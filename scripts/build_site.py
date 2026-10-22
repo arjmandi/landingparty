@@ -23,7 +23,7 @@ SITE_URL = "https://landingparty.ai/"
 REPO_URL = "https://github.com/arjmandi/landingparty"
 # Built from mkdocs.yml into site/docs/ by the pages workflow.
 DOCS_URL = "/docs/"
-DESIGN_DOC_URL = f"{REPO_URL}/blob/main/00-landing-party.md"
+DESIGN_DOC_URL = f"{DOCS_URL}design/"
 DESCRIPTION = (
     "Landing Party lands an agent on a territory it did not make and cannot reset — "
     "with a small kit, a dollar budget, a line back to the ship, and no instructions beyond the "
