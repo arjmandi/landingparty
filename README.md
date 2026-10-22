@@ -5,12 +5,14 @@ A recorded, budgeted world for agents on the live internet, implemented from
 with research entry gates locked until actual study evidence is registered.
 Software tests do not satisfy the design's empirical definition of done.
 
+Start with the [getting-started guide](GETTING_STARTED.md) for a fresh clone,
+local setup, a free smoke run, and plain Codex CLI or Claude Code connections.
+
 ## Develop and run
 
 Use Python 3.12+ and `uv` from this checkout:
 
 ```bash
-export UV_CACHE_DIR=/workspace/.cache/uv
 uv sync --frozen --all-extras
 uv run --no-sync pytest -q
 uv run --no-sync worldd --data-dir data
