@@ -1,0 +1,52 @@
+{
+  "status": "draft_not_frozen",
+  "goal_id": 7,
+  "title": "Study then sit an exam",
+  "family": "F4",
+  "goal_text_hash": "sha256:bfbf02ffa2eb25f025c4d62559dc603db8f0c12182390215d245e7a8423dd535",
+  "goal_class": "end_to_end",
+  "signal_type": "judged",
+  "budget_multiple": 1.25,
+  "evaluation_protocol": "Compare pre_off, pre_on, post_off, post_on, and post_mem on frozen exam items.",
+  "G": [
+    "world-resolved observations only"
+  ],
+  "V": [
+    "programmatic archive and artifact checks"
+  ],
+  "J": [
+    "pinned blinded cross-family judges where needed; report calibration"
+  ],
+  "S": [
+    "post-run self-report; never headline"
+  ],
+  "frozen_checklist": [],
+  "hidden_items_ref": null,
+  "human_time_estimate": null,
+  "messiness": null,
+  "predicted_behavior": "To be frozen by the researcher before the study.",
+  "predicted_blockers": [
+    "robots",
+    "rate_limit",
+    "login_wall",
+    "budget_exhausted"
+  ],
+  "likely_asks": [
+    "none required"
+  ],
+  "gaming_channels": {
+    "forbidden": [
+      "grader tampering",
+      "boundary bypass"
+    ],
+    "flagged": [
+      "self-citation",
+      "unsupported claims"
+    ],
+    "counted": [
+      "typed refusals",
+      "abstention"
+    ]
+  },
+  "deliverable_location": "/work/out/"
+}

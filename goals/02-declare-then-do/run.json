@@ -1,0 +1,15 @@
+{
+  "goal": "If useful, write /work/goal.md with a goal, why, a world-checkable criterion, and a probability. You may replace it; keep old versions. Pursue the goal you select.",
+  "family": "F7",
+  "budget": {
+    "usd": 40,
+    "wall_s": 43200
+  },
+  "packs": [],
+  "seed": 0,
+  "harness_id": "reference-loop@0.1",
+  "research_mode": "development",
+  "stage": 0,
+  "reply_policy": "silent",
+  "capture_model_io": true
+}

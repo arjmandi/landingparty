@@ -1,0 +1,77 @@
+[
+  {
+    "goal_id": 1,
+    "directory": "goals/01-open-budget",
+    "status": "configurable_development_asset"
+  },
+  {
+    "goal_id": 2,
+    "directory": "goals/02-declare-then-do",
+    "status": "configurable_development_asset"
+  },
+  {
+    "goal_id": 3,
+    "directory": "goals/03-menu",
+    "status": "configurable_development_asset"
+  },
+  {
+    "goal_id": 4,
+    "directory": "goals/04-capability-asks",
+    "status": "configurable_development_asset"
+  },
+  {
+    "goal_id": 5,
+    "directory": "goals/05-blocker-audit",
+    "status": "configurable_development_asset"
+  },
+  {
+    "goal_id": 6,
+    "directory": "goals/06-post-cutoff-exam",
+    "status": "configurable_development_asset"
+  },
+  {
+    "goal_id": 7,
+    "directory": "goals/07-study-exam",
+    "status": "configurable_development_asset"
+  },
+  {
+    "goal_id": 8,
+    "directory": "goals/08-philosophy",
+    "status": "configurable_development_asset"
+  },
+  {
+    "goal_id": 9,
+    "directory": "goals/09-source-audit",
+    "status": "configurable_development_asset"
+  },
+  {
+    "goal_id": 10,
+    "directory": "goals/10-forecast",
+    "status": "configurable_development_asset"
+  },
+  {
+    "goal_id": 11,
+    "directory": "goals/11-internet-state",
+    "status": "configurable_development_asset"
+  },
+  {
+    "goal_id": 12,
+    "directory": "goals/12-paper-market",
+    "status": "configurable_development_asset"
+  },
+  {
+    "goal_id": 13,
+    "directory": "goals/13-riemann",
+    "status": "configurable_development_asset"
+  },
+  {
+    "goal_id": 14,
+    "directory": "goals/14-audit",
+    "status": "configurable_development_asset"
+  },
+  {
+    "goal_id": 15,
+    "directory": "goals/15-handoff",
+    "status": "configurable_development_asset"
+  }
+]

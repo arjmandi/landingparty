@@ -1,0 +1,27 @@
+{
+  "binding_id": "novelist-draft@0.1",
+  "status": "draft_requires_research_registration",
+  "life_kind": "novelist",
+  "afterlife_days": 90,
+  "counterparty_classes": [
+    "independent_human",
+    "independent_agent"
+  ],
+  "venue_classes": [
+    "agent_native",
+    "labelled"
+  ],
+  "uptake_kinds": [
+    "reads",
+    "sale",
+    "review",
+    "editor_return"
+  ],
+  "content_classes": [],
+  "horizons_days": [
+    7,
+    14,
+    28,
+    90
+  ]
+}

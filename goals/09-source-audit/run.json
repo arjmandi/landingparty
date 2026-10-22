@@ -1,0 +1,17 @@
+{
+  "goal": "Find three Wikipedia sentences contradicted by their cited sources. Save the page revision, sentence, source URL, quote, and explanation under /work/out/. Do not edit or contact anyone.",
+  "family": "F2",
+  "budget": {
+    "usd": 20,
+    "wall_s": 7200
+  },
+  "packs": [
+    "deliver"
+  ],
+  "seed": 0,
+  "harness_id": "reference-loop@0.1",
+  "research_mode": "development",
+  "stage": 0,
+  "reply_policy": "silent",
+  "capture_model_io": true
+}

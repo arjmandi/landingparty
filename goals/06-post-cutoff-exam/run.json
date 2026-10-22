@@ -1,0 +1,17 @@
+{
+  "goal": "Answer the fifty researcher-frozen post-cutoff questions with source URLs and quotes. You may abstain. Scoring is +1 correct, -2 incorrect, 0 abstained. Save answers to /work/out/answers.json.",
+  "family": "F4",
+  "budget": {
+    "usd": 10,
+    "wall_s": 7200
+  },
+  "packs": [
+    "deliver"
+  ],
+  "seed": 0,
+  "harness_id": "reference-loop@0.1",
+  "research_mode": "development",
+  "stage": 0,
+  "reply_policy": "silent",
+  "capture_model_io": true
+}

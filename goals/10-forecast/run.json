@@ -1,0 +1,18 @@
+{
+  "goal": "Forecast the thirty researcher-frozen questions resolving 14 to 60 days out. State probabilities and relevant captured evidence; the forecast pack may record predictions for registered questions.",
+  "family": "F1",
+  "budget": {
+    "usd": 20,
+    "wall_s": 7200
+  },
+  "packs": [
+    "forecast",
+    "deliver"
+  ],
+  "seed": 0,
+  "harness_id": "reference-loop@0.1",
+  "research_mode": "development",
+  "stage": 0,
+  "reply_policy": "silent",
+  "capture_model_io": true
+}

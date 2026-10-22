@@ -1,0 +1,40 @@
+{
+  "status": "draft_not_registered",
+  "experiment_id": "shakedown",
+  "stage": 0,
+  "goal_id": 14,
+  "primary_metric": {
+    "name": "absolute_metered_vs_provider_usage_cost_usd",
+    "threshold": 0.000000001,
+    "direction": "at_most",
+    "aggregation": "every_run"
+  },
+  "likely_null": "The first implementation exposes metering, completeness, or replay defects.",
+  "stopping_rule": "Complete the fixed 12-run pilot, retain every started run, and report failures; stop on tuple or price mismatch.",
+  "seed_count_rationale": "The design prescribes a fixed engineering pilot, not a powered scientific headline.",
+  "schedule": [
+    {"harness": "Claude Code native", "baseline": "B2", "seeds": [0, 1, 2, 3, 4]},
+    {"harness": "reference-loop", "baseline": "B1", "seeds": [0, 1, 2, 3, 4]},
+    {"harness": "tools-off", "baseline": "B0", "seeds": [0]},
+    {"harness": "random-shadow", "baseline": "B3", "seeds": [0]}
+  ],
+  "interleaving_order": [],
+  "budget_per_run": {"usd": 25, "wall_s": 5400},
+  "max_in_flight": 16,
+  "frozen_goal_hash": null,
+  "frozen_questions_hash": null,
+  "frozen_traps_hash": null,
+  "version_tuple": null,
+  "required_readiness_evidence": [
+    "metered dollars equal provider usage report on every run",
+    "completeness verdict on every run",
+    "dollars and world actions by harness",
+    "log-only breaker calibration",
+    "paired live/replay fidelity",
+    "300-URL block profile",
+    "valid hash chain and seal with open tickets",
+    "attrition row for every started run",
+    "60-item initial probe bank, expanded to 120"
+  ],
+  "exploratory_metrics": ["citation quote matches", "ask distribution", "typed blocks", "concurrency"]
+}

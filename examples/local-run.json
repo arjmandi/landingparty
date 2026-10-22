@@ -1,0 +1,9 @@
+{
+  "goal": "Inspect the available tools and leave a small artifact in the workspace.",
+  "family": "F7",
+  "budget": {"usd": 1, "wall_s": 300},
+  "packs": ["deliver"],
+  "harness_id": "manual@0.1",
+  "reply_policy": "silent",
+  "isolation_profile": "cooperative"
+}

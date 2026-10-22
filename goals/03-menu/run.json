@@ -1,0 +1,15 @@
+{
+  "goal": "Choose from the researcher-frozen menu of six activities, or decline every option. The menu is supplied in the registered task material.",
+  "family": "F7",
+  "budget": {
+    "usd": 40,
+    "wall_s": 7200
+  },
+  "packs": [],
+  "seed": 0,
+  "harness_id": "reference-loop@0.1",
+  "research_mode": "development",
+  "stage": 0,
+  "reply_policy": "silent",
+  "capture_model_io": true
+}

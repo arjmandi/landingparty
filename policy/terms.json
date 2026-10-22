@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "review_policy": "These design classifications are seed metadata, not a current terms review. A researcher must record a source and review before provisioning; reviews expire after 90 days.",
+  "platforms": {
+    "google_workspace": {"terms_class": "permits", "origin": "https://workspace.google.com"},
+    "reddit": {"terms_class": "permits_labelled", "origin": "https://www.reddit.com"},
+    "x": {"terms_class": "permits_labelled", "origin": "https://x.com"},
+    "wikipedia": {"terms_class": "permits_labelled", "origin": "https://en.wikipedia.org"},
+    "github": {"terms_class": "permits_labelled", "origin": "https://github.com"},
+    "youtube": {"terms_class": "forbids", "origin": "https://www.youtube.com"},
+    "upwork": {"terms_class": "forbids", "origin": "https://www.upwork.com"},
+    "stackoverflow": {"terms_class": "forbids", "origin": "https://stackoverflow.com"},
+    "moltbook": {"terms_class": "permits", "agent_native": true, "origin": "https://www.moltbook.com"},
+    "agents4science": {"terms_class": "permits", "agent_native": true, "origin": "https://agents4science.org"}
+  }
+}

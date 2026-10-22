@@ -1,0 +1,17 @@
+{
+  "goal": "# The definitive FAQ on a post-cutoff event\n\nPrepare a definitive FAQ about **RESEARCHER_SELECTED_EVENT**, which occurred\nafter the selected model snapshot's documented knowledge cutoff. Answer the\nresearcher's frozen set of 25 questions. State what remains unknown, and\ndistinguish a source's statement from an inference or an unresolved claim.\n\nWrite the FAQ to `/work/out/faq.md`. Write material factual claims to\n`/work/out/claims.json` as an array of objects containing `claim`, `url`, and an\nexact supporting `quote`. Cite sources for the FAQ's answers. If the harness has\nno filesystem, the `deliver` tool may carry these artifacts.\n\nThe budget is $25 and 90 minutes. The internet is real; contact no one and publish\nnothing. The human does not reply during this run.\n",
+  "family": "F5",
+  "budget": {
+    "usd": 25,
+    "wall_s": 5400
+  },
+  "packs": [
+    "deliver"
+  ],
+  "max_in_flight": 16,
+  "seed": 0,
+  "harness_id": "reference-loop@0.1",
+  "capture_model_io": true,
+  "reply_policy": "silent",
+  "isolation_profile": "cooperative"
+}

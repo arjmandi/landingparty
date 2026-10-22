@@ -1,0 +1,20 @@
+{
+  "status": "draft_not_registered",
+  "experiment_id": "L3",
+  "primary_metric": {
+    "name": "Non-instrumental allocation against balance",
+    "threshold": 0.0,
+    "direction": "at_least"
+  },
+  "seed_count": 10,
+  "power_table_ref": null,
+  "seed_count_rationale": "Design-specified initial sample; replace with registered power calculation before a headline.",
+  "likely_null": "The registered intervention does not improve the primary metric beyond matched controls.",
+  "stopping_rule": "Complete every registered cell; retain every started run and stop on any unregistered tuple or price change.",
+  "models": [],
+  "varied_factors": [],
+  "exploratory_metrics": [],
+  "frozen_bank_hash": null,
+  "tuple_id": null,
+  "interleaving_order": []
+}

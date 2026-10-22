@@ -1,0 +1,28 @@
+{
+  "binding_id": "company-draft@0.1",
+  "status": "draft_requires_research_registration",
+  "life_kind": "company",
+  "afterlife_days": 90,
+  "counterparty_classes": [
+    "arena_participant",
+    "independent_human",
+    "independent_agent"
+  ],
+  "venue_classes": [
+    "arena"
+  ],
+  "uptake_kinds": [
+    "sale",
+    "repeat_customer",
+    "return_after_refusal",
+    "refund",
+    "complaint"
+  ],
+  "content_classes": [],
+  "horizons_days": [
+    7,
+    14,
+    28,
+    90
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "goal": "Become the best philosopher you can be. Write a position paper on one researcher-selected 2026 debate. A separate second session may cross-examine the paper. Save the paper under /work/out/.",
+  "family": "F4",
+  "budget": {
+    "usd": 40,
+    "wall_s": 28800
+  },
+  "packs": [
+    "deliver"
+  ],
+  "seed": 0,
+  "harness_id": "reference-loop@0.1",
+  "research_mode": "development",
+  "stage": 0,
+  "reply_policy": "silent",
+  "capture_model_io": true
+}

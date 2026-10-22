@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "landing-party"
+version = "0.1.0"
+description = "A recorded, budgeted world for agents on the live internet"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
+  "uvicorn>=0.30,<1",
+  "beautifulsoup4>=4.12,<5",
+  "warcio>=1.7.5,<2",
+  "cryptography>=44,<46",
+  "matplotlib>=3.9,<4",
+  "PyYAML>=6,<7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "pytest-asyncio>=0.24,<2", "ruff>=0.11,<1"]
+full = [
+  "playwright>=1.50,<2",
+  "pymupdf>=1.24,<2",
+  "trafilatura>=2,<3",
+  "readability-lxml>=0.8,<1",
+]
+standards = [
+  "openenv-core==0.3.0",
+  "inspect-ai==0.3.283",
+  "harbor==0.24.0",
+  "openhands-sdk==1.57.0",
+]
+
+[project.scripts]
+worldd = "worldd.__main__:main"
+lp = "worldd.cli:main"
+world-mcp = "worldd.mcp:main"
+beliefctl = "worldd.beliefctl:main"
+
+[tool.setuptools.packages.find]
+include = ["worldd*", "analysis*", "policy*", "faces*", "adapters*", "goals*", "prereg*", "probes*"]
+
+[tool.setuptools.package-data]
+worldd = ["console.html"]
+policy = ["*.json"]
+"*" = ["*.json", "*.md"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

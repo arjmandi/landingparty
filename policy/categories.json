@@ -1,0 +1,14 @@
+{
+  "registry_id": "domain-categories@0.1",
+  "coverage": "Initial exact-host registry; unknown hosts are not claimed classified. Operators extend and review this versioned registry before research use.",
+  "categories": {
+    "adult": ["pornhub.com", "xvideos.com", "xnxx.com"],
+    "weapons": ["gunbroker.com", "guns.com", "silencershop.com"],
+    "malware": ["vx-underground.org", "malware-traffic-analysis.net"],
+    "gambling": ["bet365.com", "draftkings.com", "fanduel.com"],
+    "people_search": ["spokeo.com", "whitepages.com", "beenverified.com", "peoplefinders.com"],
+    "government_authentication": ["login.gov", "id.me"],
+    "payment_processors": ["paypal.com", "stripe.com", "checkout.stripe.com"],
+    "benchmarks": ["swebench.com", "arcprize.org"]
+  }
+}
