@@ -21,7 +21,8 @@ DESIGN = ROOT / "design"
 SITE = ROOT / "site"
 SITE_URL = "https://landingparty.ai/"
 REPO_URL = "https://github.com/arjmandi/landingparty"
-DOCS_URL = f"{REPO_URL}#readme"
+# Built from mkdocs.yml into site/docs/ by the pages workflow.
+DOCS_URL = "/docs/"
 DESIGN_DOC_URL = f"{REPO_URL}/blob/main/00-landing-party.md"
 DESCRIPTION = (
     "Landing Party lands an agent on a territory it did not make and cannot reset — "

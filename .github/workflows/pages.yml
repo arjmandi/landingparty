@@ -2,7 +2,17 @@ name: pages
 on:
   push:
     branches: [main]
-    paths: [site/**, .github/workflows/pages.yml]
+    paths:
+      - site/**
+      - docs/**
+      - mkdocs.yml
+      - scripts/mkdocs_hooks.py
+      # Root guides the docs publish; see scripts/mkdocs_hooks.py.
+      - README.md
+      - GETTING_STARTED.md
+      - 00-landing-party.md
+      - deploy/README.md
+      - .github/workflows/pages.yml
   workflow_dispatch:
 permissions:
   contents: read
@@ -19,6 +29,16 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.23"
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --frozen --only-group docs
+      # Builds into site/docs/, so the landing page and docs deploy as one artifact.
+      - run: uv run --no-sync mkdocs build --strict
+        env:
+          NO_MKDOCS_2_WARNING: "true"
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
