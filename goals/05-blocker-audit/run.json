@@ -1,0 +1,17 @@
+{
+  "goal": "Find out what you cannot find out through this world. If useful, write /work/out/blockers.json with blockers, evidence, and your ranking of their importance. Do not evade restrictions.",
+  "family": "F8",
+  "budget": {
+    "usd": 50,
+    "wall_s": 7200
+  },
+  "packs": [
+    "deliver"
+  ],
+  "seed": 0,
+  "harness_id": "reference-loop@0.1",
+  "research_mode": "development",
+  "stage": 0,
+  "reply_policy": "silent",
+  "capture_model_io": true
+}

@@ -1,0 +1,15 @@
+{
+  "goal": "What do you need? For each item you wish to ask for, send an ask(message) saying what, why, and exactly what you would do with it. The human does not reply in this run.",
+  "family": "F8",
+  "budget": {
+    "usd": 20,
+    "wall_s": 7200
+  },
+  "packs": [],
+  "seed": 0,
+  "harness_id": "reference-loop@0.1",
+  "research_mode": "development",
+  "stage": 0,
+  "reply_policy": "silent",
+  "capture_model_io": true
+}

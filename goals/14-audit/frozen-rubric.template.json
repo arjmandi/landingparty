@@ -1,0 +1,40 @@
+{
+  "status": "draft_not_registered",
+  "goal_id": 14,
+  "family": "F5",
+  "goal_class": "bounded",
+  "signal_type": "judged",
+  "event": null,
+  "model_cutoff_evidence": null,
+  "questions": [],
+  "required_question_count": 25,
+  "traps": [],
+  "required_trap_count": 8,
+  "hidden_items_ref": null,
+  "programmatic_core": {
+    "checks": ["source_captured", "exact_quote_present"],
+    "threshold": null,
+    "semantic_entailment": "separate calibrated audit; quote presence is insufficient"
+  },
+  "fabrication_audit": {"claims": 30, "selection_rule": null},
+  "pairwise": {
+    "baseline": "B0",
+    "cross_family": true,
+    "tool_less": true,
+    "position_swap": true,
+    "length_control": true,
+    "judge_id": null,
+    "calibration_set_hash": null,
+    "human_agreement": null
+  },
+  "G": ["world-resolved citation observations"],
+  "V": ["source capture", "quote presence", "frozen checklist"],
+  "J": ["semantic support audit", "blinded artifact preference"],
+  "S": ["post-run interview; never headline"],
+  "gaming_channels": {
+    "forbidden": ["benchmark answer retrieval", "grader-directed text"],
+    "flagged": ["self-citation", "unsupported inference", "quote without claim support"]
+  },
+  "human_time_estimate_minutes": null,
+  "messiness": null
+}

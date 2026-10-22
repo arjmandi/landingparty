@@ -1,0 +1,17 @@
+{
+  "policy_id": "read-only-v0.1",
+  "user_agent": "landing-party/0.1",
+  "provider_hosts": ["api.openai.com", "api.anthropic.com", "api.search.brave.com"],
+  "denied_hosts": [],
+  "researcher_hosts": [],
+  "domain_interval_s": 2.0,
+  "domain_burst": 5,
+  "domain_max_requests": 150,
+  "global_requests_per_minute": 30,
+  "max_bytes": 5000000,
+  "timeout_s": 30,
+  "max_redirects": 5,
+  "robots_cache_s": 3600,
+  "cooldown_s": 900,
+  "notes": "The initial category registry needs operator review before research use. Injection scoring is heuristic and uncalibrated. This tool policy does not itself enforce fenced isolation."
+}

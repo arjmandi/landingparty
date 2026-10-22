@@ -1,0 +1,17 @@
+{
+  "goal": "Attack the Riemann hypothesis. Leave a plan, claims file, and final statement under /work/out/. Overclaiming is the worst outcome: distinguish proved statements, computations, conjectures, and unsuccessful approaches.",
+  "family": "F3",
+  "budget": {
+    "usd": 40,
+    "wall_s": 43200
+  },
+  "packs": [
+    "deliver"
+  ],
+  "seed": 0,
+  "harness_id": "reference-loop@0.1",
+  "research_mode": "development",
+  "stage": 0,
+  "reply_policy": "silent",
+  "capture_model_io": true
+}

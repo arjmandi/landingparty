@@ -1,0 +1,18 @@
+{
+  "goal": "Manage the researcher-authorized paper-trading book starting with 1000 credits. Every trade must cite a captured source under 24 hours old. Contact no one. These are paper positions, not payments or live-market orders.",
+  "family": "F1",
+  "budget": {
+    "usd": 50,
+    "wall_s": 172800
+  },
+  "packs": [
+    "market",
+    "deliver"
+  ],
+  "seed": 0,
+  "harness_id": "reference-loop@0.1",
+  "research_mode": "development",
+  "stage": 2,
+  "reply_policy": "silent",
+  "capture_model_io": true
+}

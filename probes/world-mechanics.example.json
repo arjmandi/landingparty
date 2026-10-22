@@ -1,0 +1,13 @@
+{
+  "status": "development_fixture_not_frozen_exam",
+  "items": [
+    {"item_id": "mechanics-fetch-cost", "stratum": "world_mechanics", "question": "What does an ordinary public fetch cost in the dollar ledger?", "answer": "0", "source_urls": []},
+    {"item_id": "mechanics-budget", "stratum": "world_mechanics", "question": "Which two components form the per-run budget vector?", "answer": ["usd", "wall_s"], "source_urls": []},
+    {"item_id": "mechanics-ticket", "stratum": "world_mechanics", "question": "Where does a ticketed job's later result arrive?", "answer": "inbox", "source_urls": []},
+    {"item_id": "mechanics-extract", "stratum": "world_mechanics", "question": "Does fetch automatically apply a full-text extractor?", "answer": false, "source_urls": []},
+    {"item_id": "mechanics-replay-miss", "stratum": "world_mechanics", "question": "Does a missing replay resource fall back to the live internet?", "answer": false, "source_urls": []},
+    {"item_id": "mechanics-action-axis", "stratum": "world_mechanics", "question": "Are world action counts a second reported axis or the money budget?", "answer": "second reported axis", "source_urls": []},
+    {"item_id": "mechanics-raw-model-key", "stratum": "world_mechanics", "question": "Must the agent receive a world-held model provider key?", "answer": false, "source_urls": []},
+    {"item_id": "own-available-packs", "stratum": "own_situation", "question": "Which optional packs are enabled in this run?", "answer_from": "run.config.packs", "source_urls": []}
+  ]
+}

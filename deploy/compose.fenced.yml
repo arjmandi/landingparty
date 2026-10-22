@@ -1,0 +1,106 @@
+# Firewall evidence and direct-network checks must pass before claiming fenced isolation.
+# Both WORLD_CONTROL_TOKEN and the run's agent/proxy capabilities are supplied securely.
+name: landing-party-fenced
+services:
+  world:
+    image: landing-party-world:0.1
+    build:
+      context: ..
+      target: world
+    command: ["--host", "0.0.0.0", "--port", "7777", "--lane-port", "8081"]
+    environment:
+      WORLD_DATA_DIR: /data
+      WORLD_WORK_GROUP_WRITABLE: "1"
+      WORLD_PROXY_HOST: 0.0.0.0
+      WORLD_PROXY_PORT: 8080
+      WORLD_CONTROL_TOKEN: ${WORLD_CONTROL_TOKEN:?Set a researcher capability securely}
+      WORLD_DOH_URL: ${WORLD_DOH_URL:-https://dns.google/resolve}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: 127.0.0.1,localhost,world,worldd,172.30.77.2
+    extra_hosts:
+      - "proxy:${WORLD_PLATFORM_PROXY_IP:-127.0.0.1}"
+    volumes:
+      - world-data:/data
+    networks:
+      control:
+      agent:
+        ipv4_address: 172.30.77.2
+    ports:
+      - "127.0.0.1:7777:7777"
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+      - seccomp:./seccomp-browser.json
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7777/healthz',timeout=2).read()"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+  fence:
+    image: landing-party-agent:0.1
+    build:
+      context: ..
+      target: agent
+    command: [/bin/sh, /opt/landingparty/deploy/init-fence.sh]
+    environment:
+      WORLD_INTERNAL_IP: 172.30.77.2
+    user: root
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN]
+    security_opt: [no-new-privileges:true]
+    networks:
+      agent:
+        ipv4_address: 172.30.77.3
+    depends_on:
+      world:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD-SHELL, "test -f /tmp/fence-ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+  agent:
+    image: landing-party-agent:0.1
+    network_mode: service:fence
+    command: [sleep, infinity]
+    user: "10002:10002"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+      - /home/agent:rw,nosuid,size=128m,uid=10002,gid=10002
+    volumes:
+      - type: volume
+        source: world-data
+        target: /work
+        volume:
+          subpath: runs/${WORLD_RUN_ID:-unconfigured}/work
+      - type: volume
+        source: world-data
+        target: /world
+        read_only: true
+        volume:
+          subpath: runs/${WORLD_RUN_ID:-unconfigured}/world
+    environment:
+      WORLD_URL: http://172.30.77.2:7778
+      HTTP_PROXY: ${WORLD_PROXY_URL:-http://172.30.77.2:8080}
+      HTTPS_PROXY: ${WORLD_PROXY_URL:-http://172.30.77.2:8080}
+      WORLD_RUN_ID: ${WORLD_RUN_ID:-unconfigured}
+      WORLD_AGENT_TOKEN: ${WORLD_AGENT_TOKEN:-}
+      SSL_CERT_FILE: /world/ca.pem
+      OPENAI_BASE_URL: http://172.30.77.2:8081/openai/v1
+      NO_PROXY: 172.30.77.2,127.0.0.1,localhost
+    depends_on:
+      fence:
+        condition: service_healthy
+networks:
+  agent:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.77.0/24
+  control:
+volumes:
+  world-data:

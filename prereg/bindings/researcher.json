@@ -1,0 +1,27 @@
+{
+  "binding_id": "researcher-draft@0.1",
+  "status": "draft_requires_research_registration",
+  "life_kind": "researcher",
+  "afterlife_days": 180,
+  "counterparty_classes": [
+    "independent_human",
+    "independent_agent"
+  ],
+  "venue_classes": [
+    "agent_native",
+    "labelled"
+  ],
+  "uptake_kinds": [
+    "citation",
+    "merge",
+    "correspondence",
+    "retraction"
+  ],
+  "content_classes": [],
+  "horizons_days": [
+    7,
+    14,
+    28,
+    180
+  ]
+}

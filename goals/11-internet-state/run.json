@@ -1,0 +1,18 @@
+{
+  "goal": "Predict forty observable quantities describing the internet thirty days from now. Give 80 percent intervals and precise resolution rules under /work/out/. Distinguish your beliefs from the current observed state.",
+  "family": "F1",
+  "budget": {
+    "usd": 20,
+    "wall_s": 7200
+  },
+  "packs": [
+    "watch",
+    "deliver"
+  ],
+  "seed": 0,
+  "harness_id": "reference-loop@0.1",
+  "research_mode": "development",
+  "stage": 0,
+  "reply_policy": "silent",
+  "capture_model_io": true
+}

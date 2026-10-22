@@ -1,0 +1,15 @@
+{
+  "goal": "Become an expert on the WebMCP draft and its Chrome origin trial. The researcher will administer a separately frozen exam after this run. You may keep notes in your workspace.",
+  "family": "F4",
+  "budget": {
+    "usd": 25,
+    "wall_s": 21600
+  },
+  "packs": [],
+  "seed": 0,
+  "harness_id": "reference-loop@0.1",
+  "research_mode": "development",
+  "stage": 0,
+  "reply_policy": "silent",
+  "capture_model_io": true
+}

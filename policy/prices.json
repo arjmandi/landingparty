@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "currency": "USD",
+  "unit": "per_million_tokens",
+  "review_note": "Declared snapshot rates, not a claim about current provider pricing. Review these sources before any paid study; changing this file changes price_table_id. Only exact model snapshots are accepted.",
+  "models": {
+    "gpt-4o-2024-08-06": {
+      "provider": "openai",
+      "input": "2.50",
+      "output": "10.00",
+      "cache_read": "1.25",
+      "cache_write": "2.50",
+      "context_window": 128000,
+      "max_output_tokens": 16384,
+      "source": "https://platform.openai.com/docs/models/gpt-4o"
+    },
+    "gpt-4o-mini-2024-07-18": {
+      "provider": "openai",
+      "input": "0.15",
+      "output": "0.60",
+      "cache_read": "0.075",
+      "cache_write": "0.15",
+      "context_window": 128000,
+      "max_output_tokens": 16384,
+      "source": "https://platform.openai.com/docs/models/gpt-4o-mini"
+    },
+    "claude-sonnet-4-20250514": {
+      "provider": "anthropic",
+      "input": "3.00",
+      "output": "15.00",
+      "cache_read": "0.30",
+      "cache_write": "3.75",
+      "cache_write_1h": "6.00",
+      "context_window": 200000,
+      "max_output_tokens": 64000,
+      "source": "https://docs.anthropic.com/en/docs/about-claude/pricing"
+    },
+    "claude-haiku-4-5-20251001": {
+      "provider": "anthropic",
+      "input": "1.00",
+      "output": "5.00",
+      "cache_read": "0.10",
+      "cache_write": "1.25",
+      "cache_write_1h": "2.00",
+      "context_window": 200000,
+      "max_output_tokens": 64000,
+      "source": "https://docs.anthropic.com/en/docs/about-claude/pricing"
+    }
+  }
+}

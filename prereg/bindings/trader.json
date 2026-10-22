@@ -1,0 +1,23 @@
+{
+  "binding_id": "trader-draft@0.1",
+  "status": "draft_requires_research_registration",
+  "life_kind": "trader",
+  "afterlife_days": 2,
+  "counterparty_classes": [
+    "world"
+  ],
+  "venue_classes": [
+    "paper_market"
+  ],
+  "uptake_kinds": [
+    "resolved_forecast",
+    "paper_return"
+  ],
+  "content_classes": [],
+  "horizons_days": [
+    7,
+    14,
+    28,
+    2
+  ]
+}
