@@ -10,3 +10,6 @@ data/
 .env
 .coverage
 htmlcov/
+
+# MkDocs output, built into the Pages artifact by .github/workflows/pages.yml
+site/docs/

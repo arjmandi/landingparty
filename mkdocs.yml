@@ -1,0 +1,93 @@
+# Documentation published at https://landingparty.ai/docs/ by .github/workflows/pages.yml.
+# Build with: uv run --group docs mkdocs build --strict
+site_name: Landing Party
+site_url: https://landingparty.ai/docs/
+site_description: A recorded, budgeted world for agents on the live internet.
+repo_url: https://github.com/arjmandi/landingparty
+repo_name: arjmandi/landingparty
+edit_uri: ""
+
+docs_dir: docs
+# Inside the landing page folder, so site/ is the whole Pages artifact.
+site_dir: site/docs
+
+# Internal audit and status notes stay in the repository only. A new page in
+# docs/ must be added to the nav or listed here, or the strict build fails.
+exclude_docs: |
+  design-build-audit.md
+  implementation-status.md
+  integrations-audit.md
+  runtime-audit.md
+  verification.md
+
+validation:
+  nav:
+    omitted_files: warn
+  links:
+    not_found: warn
+
+# Publishes README.md, GETTING_STARTED.md, deploy/README.md and 00-landing-party.md.
+hooks:
+  - scripts/mkdocs_hooks.py
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Fenced deployment: deployment.md
+  - Design: design.md
+  - World services:
+      - Lives and retention: lives.md
+      - Network boundary: gateway.md
+      - Delegation and approvals: credentials.md
+      - Clearances and capabilities: capabilities.md
+      - Identity and venues: venues.md
+      - Beliefs and reflection: beliefs.md
+      - Procedural skill checks: skill-tests.md
+      - Arenas and surveys: arenas-and-surveys.md
+      - Research data and credentials: data-protection.md
+  - Research and analysis:
+      - Post-run research: research.md
+      - R1 pattern test: r1.md
+      - Decision-level divergence: decision-divergence.md
+      - Signature details: signature-details.md
+      - Repeatability and Elo: comparison-statistics.md
+      - Content allocation: allocation.md
+      - Entity discovery: entity-instrument.md
+      - Judge-pair checks: judge-canaries.md
+      - Replay and canaries: replay-canaries.md
+
+theme:
+  name: material
+  # The landing page serves these at the site root.
+  logo: /favicon.svg
+  favicon: /favicon.svg
+  # Fonts load from extra_css, matching the landing page.
+  font: false
+  palette:
+    scheme: slate
+    primary: custom
+    accent: custom
+  features:
+    - content.code.copy
+    - navigation.footer
+    - navigation.sections
+    - navigation.top
+    - search.highlight
+    - toc.follow
+
+extra:
+  # The header logo leads back to the landing page.
+  homepage: /
+
+extra_css:
+  - stylesheets/landing-party.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - tables
+  - toc:
+      permalink: true
