@@ -1,0 +1,39 @@
+{
+  "canvas": "https://claude.ai/artifact/2HBK8Badj5C1JeBj9NEY3x",
+  "artboard": "project/Main.dc.html",
+  "version": "1792694818-7ff9",
+  "assets": {
+    "6a83308ddf74ab4794a1bb1744f5e1bd": {
+      "path": "assets/video/arrival.mp4",
+      "sha256": "f5ea245fc4e813f02f0350845319f5c9220130bed431fa3245866b7de7db1164"
+    },
+    "36c65aa9fa18fddde151e763da0e7715": {
+      "path": "assets/video/takeover.mp4",
+      "sha256": "d64311df0adbd2ccfee04a07f883458c88009825f16b6e9ef203ddfae4743fbd"
+    },
+    "1d88a5813bf0801081c5d89dd7377b3e": {
+      "path": "assets/img/arrival-poster.jpg",
+      "sha256": "fbb3ab79ccd349693d2e2db2c13c2dfc9f8a3dac7fa4ec760da4d0162c0ce2ad"
+    },
+    "19003fb938f53a3b7348cdbb10aa05ef": {
+      "path": "assets/img/takeover-poster.jpg",
+      "sha256": "21e2dbb7f4d63cb74eedf4d1ca0066160394acee10c43c9128122d2e8b5eb81c"
+    },
+    "1f42b2419a7d6f679b92ba7b22676fa0": {
+      "path": "assets/img/standard-issue.jpg",
+      "sha256": "b3ee5d812d20f17bc6f5a2ae7bf1c3f3360e2e2812731a9c319e243876b827c2"
+    },
+    "0c6a268a6db4b0a8675e836d54eae02c": {
+      "path": "assets/img/ships-log.jpg",
+      "sha256": "40daf36b9c87fa3649c892b6f42596a6751dc9bb4af592b699805bb27e8fa333"
+    },
+    "2db5ec3ef579bf9b032490cb82ae1e29": {
+      "path": "assets/img/personal-log.jpg",
+      "sha256": "43bf07b316c77d382d989b07b3dcf7be5cc2da222d9a0ceda50b78e273104418"
+    },
+    "7a2a99d2d43a6d1d0b821f0ded3bc71e": {
+      "path": "assets/img/standing-orbit.jpg",
+      "sha256": "50f104e8feef57447a2cfd5fbd6e9a98487a8ba4a7f077688bbcbe1f1657b022"
+    }
+  }
+}
