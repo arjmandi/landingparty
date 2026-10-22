@@ -100,3 +100,8 @@ def configure_models(app, world, *, prices=None):
         from analysis.judges import MeteredResearchClient
 
         world.services["pipeline"].model = MeteredResearchClient.for_app(world, app)
+    if "judge_canaries" in world.services:
+        from analysis.judges import MeteredResearchClient
+
+        world.services["judge_canaries"].model = MeteredResearchClient.for_app(world, app)
+        world.services["judge_canaries"]._owns_model = True

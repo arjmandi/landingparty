@@ -4,11 +4,13 @@ import argparse
 import json
 import os
 import secrets
+import socket
 import subprocess
 import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--live", action="store_true")
@@ -45,9 +47,15 @@ if args.live:
         "HTTPS_PROXY",
         "-e",
         "WORLD_DOH_URL=https://dns.google/resolve",
-        "--add-host",
-        "proxy:" + os.environ.get("WORLD_PLATFORM_PROXY_IP", "172.31.14.125"),
     ]
+    proxy_host = urlsplit(
+        os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or ""
+    ).hostname
+    if proxy_host:
+        proxy_address = os.environ.get("WORLD_PLATFORM_PROXY_IP") or socket.gethostbyname(
+            proxy_host
+        )
+        command += ["--add-host", proxy_host + ":" + proxy_address]
 else:
     command += ["--network", "none"]
 command.append("landing-party-world:0.1")

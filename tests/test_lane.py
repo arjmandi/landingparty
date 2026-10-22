@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from decimal import Decimal
 
@@ -129,11 +130,21 @@ async def test_chat_forwarded_unchanged_and_metered(store, monkeypatch):
     assert store.spend(run_id)["model"] == 0.00035
     assert store.reserved(run_id) == 0
     calls = [item for item in store.records(run_id) if item["kind"] == "model_call"]
+    assert calls[0]["fixture_transport"] is True
+    assert calls[0]["transport_type"] == "MockTransport"
+    assert calls[0]["upstream_origin"] == "https://fixture.provider"
     assert len(calls) == 1 and calls[0]["usage"]["input"] == 100
     assert store.reconcile(run_id)["valid"]
     capture = next((store.run_dir(run_id) / "model-io").glob("*.json")).read_text()
     assert "world-secret" not in capture
     assert "world-secret" not in (store.run_dir(run_id) / "record.jsonl").read_text()
+    anchor = next(item for item in store.records(run_id) if item["kind"] == "model_capture")
+    assert anchor["call_id"] == calls[0]["call_id"]
+    assert (
+        anchor["capture_hash"]
+        == "sha256:"
+        + hashlib.sha256((store.run_dir(run_id) / anchor["capture_ref"]).read_bytes()).hexdigest()
+    )
 
 
 async def test_responses_route_and_query_run_id(store):
@@ -530,7 +541,7 @@ async def test_control_plane_kill_drains_lane_before_seal(tmp_path, streaming):
 
 
 async def test_stop_barrier_finalizes_a_backpressured_stream(store):
-    run_id = run(store)
+    run_id = run(store, capture_model_io=True)
     remote = httpx.AsyncClient(
         transport=httpx.MockTransport(
             lambda request: httpx.Response(
@@ -585,9 +596,15 @@ async def test_stop_barrier_finalizes_a_backpressured_stream(store):
         result = await router.lane_manager.stop_run(run_id, timeout=0.2)
         assert result["audited"]
         assert store.get_run(run_id)["tainted"]
+        anchor = next(row for row in store.records(run_id) if row["kind"] == "model_capture")
+        capture = store.run_dir(run_id) / anchor["capture_ref"]
+        before = capture.read_bytes()
+        assert anchor["capture_hash"] == "sha256:" + hashlib.sha256(before).hexdigest()
         store.append_record(run_id, "seal")
+        store.update_run(run_id, state="sealed")
         count = len(store.records(run_id))
         resume.set()
         await asyncio.wait_for(task, timeout=1)
         assert len(store.records(run_id)) == count
         assert store.records(run_id)[-1]["kind"] == "seal"
+        assert capture.read_bytes() == before

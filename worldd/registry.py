@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
+from collections import Counter
 from datetime import datetime
 from typing import Any
 
@@ -10,6 +12,10 @@ from .storage import canonical_json, content_hash, utc_now
 
 VERSION_FIELDS = (
     "banner_policy_id",
+    "forecast_policy_id",
+    "runtime_protocol_id",
+    "life_protocol_id",
+    "belief_mount_policy_id",
     "world_id",
     "archive_id",
     "tool_set_id",
@@ -26,6 +32,8 @@ VERSION_FIELDS = (
     "model_snapshot_id",
     "model_value_document_id",
     "belief_schema_id",
+    "kernel_policy_id",
+    "belief_mount_policy_id",
     "slot_suggester_policy_id",
     "validator_policy_id",
     "trigger_policy_id",
@@ -88,6 +96,10 @@ class RegistryService:
                 CREATE TABLE IF NOT EXISTS gate_revocations (
                     gate_id TEXT PRIMARY KEY REFERENCES research_gates(gate_id), payload TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS registered_executions (
+                    study_id TEXT NOT NULL,seq INTEGER NOT NULL,run_id TEXT NOT NULL REFERENCES runs(run_id),
+                    payload TEXT NOT NULL,PRIMARY KEY(study_id,seq),UNIQUE(study_id,run_id)
+                );
                 """
             )
 
@@ -137,6 +149,15 @@ class RegistryService:
                 (series_id, prereg_hash, tuple_id, canonical_json(result), result["created_at"]),
             )
         return self.get_series(series_id)
+
+    def get_version(self, version_id: str) -> dict[str, Any]:
+        with self.store._lock:
+            row = self.store.db.execute(
+                "SELECT payload FROM registered_versions WHERE version_id=?", (version_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(version_id)
+        return json.loads(row[0])
 
     def get_series(self, series_id: str) -> dict[str, Any]:
         with self.store._lock:
@@ -193,6 +214,227 @@ class RegistryService:
             raise ValueError("Run belongs to another registered series")
         return {"valid": True, "series_id": series_id, "tuple_id": series["tuple_id"]}
 
+    def record_execution(self, study_id, run_id, *, cell, seed):
+        """Bind an actual started row to its frozen plan before executing its harness."""
+        with self.store._transaction():
+            row = self.store.db.execute(
+                "SELECT payload FROM studies WHERE study_id=?", (study_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(study_id)
+            study = json.loads(row[0])
+            matches = [item for item in study["cells"] if item["cell_id"] == cell]
+            if study["state"] != "running" or run_id not in study["run_ids"] or len(matches) != 1:
+                raise ValueError(
+                    "The actual started run does not belong to this running frozen plan"
+                )
+            planned = matches[0]
+            run = self.store.get_run(run_id)
+            config = run["config"]
+            expected, series_id, sources = planned["config"], planned["series_id"], {}
+            if study.get("dependency_protocol"):
+                bindings = [
+                    item for item in study.get("execution_bindings", []) if item["run_id"] == run_id
+                ]
+                if len(bindings) != 1:
+                    raise ValueError("A dependent execution requires its durable actual resolution")
+                binding = bindings[0]
+                payload = {
+                    key: binding[key]
+                    for key in (
+                        "cell_id",
+                        "seed",
+                        "episode",
+                        "sources",
+                        "config",
+                        "dependency_protocol_hash",
+                    )
+                }
+                if (
+                    binding["hash"] != content_hash(payload)
+                    or binding["cell_id"] != cell
+                    or binding["seed"] != seed
+                    or binding["dependency_protocol_hash"] != study["dependency_protocol"]["hash"]
+                ):
+                    raise ValueError("The dependent execution resolution changed")
+                expected, series_id, sources = (
+                    binding["config"],
+                    binding["series_id"],
+                    binding["sources"],
+                )
+            if (
+                seed not in planned["seeds"]
+                or config.get("seed") != seed
+                or any(
+                    config.get(key) != expected.get(key)
+                    for key in (
+                        "goal",
+                        "budget",
+                        "packs",
+                        "harness_id",
+                        "model_snapshot_id",
+                        "mode",
+                        "archive_in",
+                        "iota",
+                        "continuity_source_run_id",
+                    )
+                )
+                or config.get("series_id") != series_id
+            ):
+                raise ValueError("Actual execution differs from its frozen study cell")
+            series = self.get_series(series_id)
+            if series["prereg_hash"] != study["prereg_hash"]:
+                raise ValueError("The execution uses another pre-registration")
+            self.validate_run(series_id, config)
+            previous = self.store.db.execute(
+                "SELECT payload FROM registered_executions WHERE study_id=? AND run_id=?",
+                (study_id, run_id),
+            ).fetchone()
+            if previous:
+                value = json.loads(previous[0])
+                if value["cell"] != cell or value["seed"] != seed:
+                    raise ValueError("A started execution cannot be reassigned")
+                return value
+            seq = self.store.db.execute(
+                "SELECT COALESCE(MAX(seq),0)+1 FROM registered_executions WHERE study_id=?",
+                (study_id,),
+            ).fetchone()[0]
+            value = {
+                "study_id": study_id,
+                "seq": seq,
+                "run_id": run_id,
+                "cell": cell,
+                "seed": seed,
+                "series_id": series_id,
+                "prereg_hash": study["prereg_hash"],
+                "started_at": run["created_at"],
+                "episode": planned.get("episode", 1),
+                "condition_id": planned.get("condition_id", cell),
+                "dependencies": sources,
+                "dependency_protocol_hash": (study.get("dependency_protocol") or {}).get("hash"),
+            }
+            self.store.db.execute(
+                "INSERT INTO registered_executions VALUES(?,?,?,?)",
+                (study_id, seq, run_id, canonical_json(value)),
+            )
+            self.store.db.execute(
+                "UPDATE series_runs SET cell=? WHERE series_id=? AND run_id=?",
+                (cell, series_id, run_id),
+            )
+            return value
+
+    def execution_log(self, study_id):
+        with self.store._lock:
+            return [
+                json.loads(row[0])
+                for row in self.store.db.execute(
+                    "SELECT payload FROM registered_executions WHERE study_id=? ORDER BY seq",
+                    (study_id,),
+                )
+            ]
+
+    def record_life_execution(self, study_id, run_id, runner_id):
+        """A session is a nested source row, never an independent life replicate."""
+        with self.store._transaction():
+            study = json.loads(
+                self.store.db.execute(
+                    "SELECT payload FROM studies WHERE study_id=?", (study_id,)
+                ).fetchone()[0]
+            )
+            runner = json.loads(
+                self.store.db.execute(
+                    "SELECT payload FROM life_runners WHERE runner_id=?", (runner_id,)
+                ).fetchone()[0]
+            )
+            binding = runner.get("study_binding", {})
+            run = self.store.get_run(run_id)
+            tag = run["config"].get("execution_binding", {})
+            cells = [cell for cell in study["cells"] if cell["cell_id"] == binding.get("cell_id")]
+            intents = [
+                intent
+                for intent in runner.get("session_intents", [])
+                if intent["hash"] == tag.get("resolution_hash")
+            ]
+            life = json.loads(
+                self.store.db.execute(
+                    "SELECT payload FROM lives WHERE life_id=?", (runner["life_id"],)
+                ).fetchone()[0]
+            )
+            if (
+                study["execution_kind"] != "lives"
+                or run_id not in study["run_ids"]
+                or study["state"] not in {"running", "paused", "completed", "failed"}
+                or len(cells) != 1
+                or len(intents) != 1
+                or binding.get("study_id") != study_id
+                or tag.get("study_id") != study_id
+                or tag.get("cell_id") != binding["cell_id"]
+                or tag.get("seed") != binding["seed"]
+                or run["config"]["seed"] != binding["seed"]
+                or cells[0]["config"]["life_id"] != life["life_id"]
+                or run["config"]["life_id"] != life["life_id"]
+                or not any(session["run_id"] == run_id for session in life["sessions"])
+                or runner["configuration_hash"] != content_hash(runner["cell"])
+                or intents[0]["hash"]
+                != content_hash({key: value for key, value in intents[0].items() if key != "hash"})
+            ):
+                raise ValueError(
+                    "The actual life session does not match its authorized frozen study worker"
+                )
+            series_id = run["config"]["series_id"]
+            if self.get_series(series_id)["prereg_hash"] != study["prereg_hash"]:
+                raise ValueError("The life session uses another pre-registration")
+            self.validate_run(series_id, run["config"])
+            previous = self.store.db.execute(
+                "SELECT payload FROM registered_executions WHERE study_id=? AND run_id=?",
+                (study_id, run_id),
+            ).fetchone()
+            if previous:
+                return json.loads(previous[0])
+            seq = self.store.db.execute(
+                "SELECT COALESCE(MAX(seq),0)+1 FROM registered_executions WHERE study_id=?",
+                (study_id,),
+            ).fetchone()[0]
+            value = {
+                "study_id": study_id,
+                "seq": seq,
+                "run_id": run_id,
+                "cell": binding["cell_id"],
+                "condition_id": cells[0].get("condition_id", binding["cell_id"]),
+                "seed": binding["seed"],
+                "life_id": life["life_id"],
+                "runner_id": runner_id,
+                "unit": "life_session",
+                "episode": tag["episode"],
+                "series_id": series_id,
+                "prereg_hash": study["prereg_hash"],
+                "started_at": run["created_at"],
+                "dependencies": runner.get("dependency_resolution", {}).get("sources", {}),
+                "dependency_protocol_hash": (study.get("dependency_protocol") or {}).get("hash"),
+            }
+            self.store.db.execute(
+                "INSERT INTO registered_executions VALUES(?,?,?,?)",
+                (study_id, seq, run_id, canonical_json(value)),
+            )
+            self.store.db.execute(
+                "UPDATE series_runs SET cell=? WHERE series_id=? AND run_id=?",
+                (binding["cell_id"], series_id, run_id),
+            )
+            return value
+
+    @staticmethod
+    def _interleaved(cells):
+        remaining = Counter(cells)
+        pending = set(remaining)
+        for cell in cells:
+            if cell not in pending:
+                return False
+            pending.remove(cell)
+            remaining[cell] -= 1
+            if not pending:
+                pending = {name for name, count in remaining.items() if count > 0}
+        return not pending
+
     def comparability(self, left: str | dict, right: str | dict, *, series_id: str | None = None):
         a = self.store.get_run(left) if isinstance(left, str) else left
         b = self.store.get_run(right) if isinstance(right, str) else right
@@ -209,9 +451,20 @@ class RegistryService:
         if ca.get("goal") != cb.get("goal") or ca.get("family") != cb.get("family"):
             reasons.append("different goal slice")
         pa, pb = ca.get("block_profile"), cb.get("block_profile")
-        if not isinstance(pa, dict) or not isinstance(pb, dict) or set(pa) != set(pb):
+        if not isinstance(pa, dict) or not isinstance(pb, dict) or not pa or set(pa) != set(pb):
             reasons.append("block profile is missing or has different domain classes")
-        elif any(abs(float(pa[key]) - float(pb[key])) > 0.05 for key in pa):
+        elif any(
+            isinstance(pa[key], bool)
+            or isinstance(pb[key], bool)
+            or not isinstance(pa[key], (int, float))
+            or not isinstance(pb[key], (int, float))
+            or not math.isfinite(pa[key])
+            or not math.isfinite(pb[key])
+            or not 0 <= pa[key] <= 1
+            or not 0 <= pb[key] <= 1
+            or abs(pa[key] - pb[key]) > 0.05
+            for key in pa
+        ):
             reasons.append("block profile differs by more than five percentage points")
         same_archive = va.get("archive_id") is not None and va.get("archive_id") == vb.get(
             "archive_id"
@@ -227,13 +480,27 @@ class RegistryService:
                 reasons.append("live interleaving has not been demonstrated")
             else:
                 runs = self.get_series(series_id)["runs"]
+                with self.store._lock:
+                    cohorts = [
+                        row[0]
+                        for row in self.store.db.execute(
+                            "SELECT DISTINCT study_id FROM registered_executions WHERE run_id=?",
+                            (a["run_id"],),
+                        )
+                    ]
+                for cohort in cohorts:
+                    log = self.execution_log(cohort)
+                    if any(item["run_id"] == b["run_id"] for item in log) and all(
+                        item["prereg_hash"] == self.get_series(series_id)["prereg_hash"]
+                        for item in log
+                    ):
+                        runs = log
+                        break
                 selected = [item for item in runs if item["run_id"] in {a["run_id"], b["run_id"]}]
                 cells = [item["cell"] for item in runs]
                 if len(selected) != 2 or len(set(cells)) < 2:
                     reasons.append("registered execution has no interleaved condition contrast")
-                elif len(cells) >= 4 and not any(
-                    cells[i] == cells[i + 2] != cells[i + 1] for i in range(len(cells) - 2)
-                ):
+                elif not self._interleaved(cells):
                     reasons.append("conditions ran in batches rather than interleaved order")
         return {
             "comparable": not reasons,
@@ -248,6 +515,14 @@ class RegistryService:
         if name not in {"shakedown", "R1", "R5", "L4", "IRB"}:
             raise ValueError("Unknown stage gate")
         errors = list(validate_gate_report(name, report))
+        if name == "shakedown":
+            from analysis.programme import PilotReadiness
+
+            errors.extend(PilotReadiness(self.world).verify(report))
+        if name == "R1":
+            from analysis.r1 import R1Readiness
+
+            errors.extend(R1Readiness(self.world).verify(report))
         scientific = report.get("scientific", report.get("eligible_scientific", False)) is True
         if provenance != "research" or not scientific:
             errors.append("development/test evidence cannot authorize a research stage")
@@ -419,6 +694,16 @@ class RegistryService:
             if self.store.db.execute(
                 "SELECT 1 FROM gate_revocations WHERE gate_id=?", (gate["gate_id"],)
             ).fetchone():
+                return False
+        if gate["name"] == "shakedown":
+            from analysis.programme import PilotReadiness
+
+            if PilotReadiness(self.world).verify(gate["report"]):
+                return False
+        if gate["name"] == "R1":
+            from analysis.r1 import R1Readiness
+
+            if R1Readiness(self.world).verify(gate["report"]):
                 return False
         if gate["name"] == "IRB":
             report = gate["report"]

@@ -14,6 +14,8 @@ dependencies = [
   "beautifulsoup4>=4.12,<5",
   "warcio>=1.7.5,<2",
   "cryptography>=44,<46",
+  "matplotlib>=3.9,<4",
+  "PyYAML>=6,<7",
 ]
 
 [project.optional-dependencies]
@@ -23,6 +25,12 @@ full = [
   "pymupdf>=1.24,<2",
   "trafilatura>=2,<3",
   "readability-lxml>=0.8,<1",
+]
+standards = [
+  "openenv-core==0.3.0",
+  "inspect-ai==0.3.283",
+  "harbor==0.24.0",
+  "openhands-sdk==1.57.0",
 ]
 
 [project.scripts]
@@ -42,6 +50,7 @@ policy = ["*.json"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100

@@ -6,6 +6,7 @@ import os
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 import httpx
 from fastapi import FastAPI, Query, Request
@@ -57,6 +58,8 @@ def create_app(
     from .extensions import initialize
 
     initialize(world)
+    if "workspace_checkpoints" in world.services:
+        store.ledger_observer = world.services["workspace_checkpoints"].observe_debit
     if "payments" in world.services:
         gateway.payment_handler = world.services["payments"].handle_402
     world.services["breakers"] = BreakerService(world)
@@ -80,10 +83,14 @@ def create_app(
             if inspect.isawaitable(result):
                 world.track_observer(values["run_id"], result)
 
+    world.perception_pricing = (
+        world.services["perception"].pricing_identity() if "perception" in world.services else {}
+    )
     lane_router = create_lane_router(
         store,
         client=lane_client,
         prices=prices,
+        perception_prices=world.perception_pricing,
         internal_token=internal_token,
         capabilities=world.capabilities,
         usage_observer=observe_usage,
@@ -91,7 +98,9 @@ def create_app(
     )
     world.internal_model_token = internal_token
     world.lane = lane_router.lane_manager
-    world.price_table_id = price_table_id(prices if prices is not None else load_prices())
+    world.price_table_id = price_table_id(
+        prices if prices is not None else load_prices(), perception_prices=world.perception_pricing
+    )
     app.state.lane_router = lane_router
     app.include_router(lane_router)
     from .model_callbacks import configure_models
@@ -117,6 +126,7 @@ def create_app(
         return {
             "status": "ok",
             "version": __version__,
+            "world_id": world.world_id,
             "supported_stages": [0, 1, 2, 3],
             "services": sorted(world.services),
             "research_gates": world.services["registry"].gates()
@@ -179,8 +189,22 @@ def create_app(
         return await world.end_run(body.run_id, reason="operator_stop", truncated=True)
 
     @app.get("/v1/report")
-    async def report(run_id: str):
-        return world.life_report(run_id) if run_id.startswith("life_") else world.report(run_id)
+    async def report(
+        run_id: str,
+        format: Literal["json", "markdown", "html", "csv"] = "json",
+    ):
+        result = world.life_report(run_id) if run_id.startswith("life_") else world.report(run_id)
+        if format == "json":
+            return result
+        from analysis.publication import render_publication
+
+        media = {"markdown": "text/markdown", "html": "text/html", "csv": "text/csv"}
+        extension = {"markdown": "md", "html": "html", "csv": "csv"}[format]
+        return Response(
+            render_publication(result, format=format),
+            media_type=media[format],
+            headers={"Content-Disposition": f'attachment; filename="{run_id}.{extension}"'},
+        )
 
     @app.get("/v1/export")
     async def export(run_id: str):

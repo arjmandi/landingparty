@@ -45,8 +45,15 @@ Judges are tool-less and must have a different declared model family than the
 agent. Pairwise judging swaps positions and uses equal-length character prefixes,
 retaining disagreement. That length-control method is recorded, not hidden.
 Goal labels use 25-action segments; asks are classified only after the run.
-`human_agreement` and `calibration_set_hash` identify independently calibrated
-judges. A derived label remains J below kappa 0.6; pairwise preference remains J.
+An asserted `human_agreement` does not promote a judge. Supply
+`judge.calibration_artifact:{path,hash}` with frozen expert rows and a separate
+`calibration_budget_usd` inside the total research cap. Each row has `task`
+(`citation_support`, `goal_recovery`, or `ask_classification`), `input` using
+that task's normal data fields, and expert `label`. The same actual prompts run
+in fresh metered children; the runner verifies every receipt and computes
+task-specific agreement and per-class precision/recall. Forty labelled items
+and kappa at least 0.6 promote only that task. A derived label remains J without
+this evidence; pairwise preference remains J.
 Process judging requires replay mode. Calibration helpers publish kappa,
 precision, recall, and miss rate rather than assuming the judge is correct.
 
@@ -62,7 +69,10 @@ counts and explicit shell-audit evidence; a nonempty record alone proves nothing
 The `interview` option uses the agent's exact pinned model and an explicit budget.
 Free recall receives only the read-only workspace snapshot in a fresh context.
 Day reconstruction is a separate call with the record grouped by day. Both are S,
-never headline, and no consistency score is manufactured.
+never headline, and no consistency score is manufactured. Structured answers
+retain the actual 0–100 reality rating, parameter self-ratings, and per-day
+ratings; omitted or invalid numbers remain explicitly unmeasured. Reality belief
+does not become an inferred score from the prose.
 
 `probe_bank`, `probe_model`, and `probe_mountings` run independent contexts for
 `pre_off`, `pre_on`, `post_off`, `post_on`, and `post_mem`. Only read tools
@@ -248,3 +258,153 @@ binding, policy, model, seed, complete tuples, and actual block profiles must
 match. Tuple differences require exact `registered_contrasts` declared in the
 actual registry before the life began. Raw t=0 choices are not silently
 converted into commensurate rubric scores; absent deltas remain unmeasured.
+
+## Actual code grading and the F5 bracket
+
+`grading_protocol:{path,hash}` enables `GradingRunner` on the verified sealed
+workspace snapshot. Research series must pin the exact descriptor hash in
+`prereg.grading_protocol_hash` before the episode. The protocol supplies
+`protocol_id`, `core_threshold`, and `checklist` rows containing `item_id` plus
+a `check`. Built-in kinds are `file_exists`, `json_equals` (JSON `pointer` and
+`expected`), `sha256_matches` (`expected` hash), and `citation_quotes`; every
+input `path` starts with `work-snapshot/`. Missing files produce observed failed
+checks. Changed snapshots, escaping paths, symlinks, and workspace code execution
+are rejected. Each observation cites the actual sealed snapshot record.
+
+Optional `hidden_items:[{item_id,answer}]` and `answers_path` execute the fixed
+answer key with correct +1, incorrect −2, and abstained 0. Keys are private
+world inputs. `claims_validator:true` enables the epistemic claims file at
+`claims_path`; only host-registered `pipeline.register_claim_checker(id,callback)`
+callbacks run. Unknown checkers remain unmeasured. A failed frozen programmatic
+core caps F5 at the bottom bracket and buys no pairwise judgments. Missing or
+incomplete core evidence cannot silently enter the F5 preference bracket.
+Optional `goal_metadata` is validated against the exact treatment text and
+included in the spec sheet. `analysis.goals.validate_goal_protocol` enforces the
+section 9.1 fields; draft templates and null human-time/messiness values do not
+become registered metadata.
+
+## Portable mission reports
+
+`lp report` and `/v1/report` can render JSON, Markdown, CSV, or standalone HTML.
+Every CSV reading carries its run/life identity, policy, price-table, and preamble
+identifiers. The spec sheet contains the actual conditions, verbatim seed scope,
+budget vector, cost/token decomposition, completeness, attrition, goal metadata,
+and calibration inventory. Measured values are shown beside explicit missing
+reasons. Sponsor readings remain separate. Crowd G, each calibrated/un-calibrated
+critic V/J, and agent prediction S stay in different columns; their residuals
+do not turn into a single taste score.
+
+Every post-seal pipeline emits `analysis/publication/` with JSON, Markdown,
+CSV readings/curve points/attrition, SVG and PNG figures, a self-contained HTML
+report with embedded SVG, and a file-hash manifest. Only actual points are
+plotted: each trajectory has separate dollar and world-action panels. A missing
+axis omits the figure with a reason. Life checkpoint publications add calendar
+days, a four-column rubric matrix, and the actual coverage accrual curves.
+They live at `lives/<id>/publication/<checkpoint-hash>/`. Passive readers verify
+the matching report and figure hashes; they make no model calls or new source
+observations. Never interpolate a missing checkpoint into a measurement.
+
+`horizon_failures` with a pinned `horizon_model` enables the actual cross-family
+25-action cumulative-prefix labeler for thread abandonment, commitment
+contradiction, and repeated rediscovery. The optional `instrument` descriptor
+contains frozen calibration rows. Input caps are checked before purchase;
+fresh sealed child receipts and actual expert calibration determine each
+metric's J/V column separately. Null labels remain missing rather than false.
+
+## Pilot readiness evidence
+
+`POST /v1/studies/<id>/readiness` evaluates the actual registered shakedown via
+`PilotReadiness.evaluate`, with optional `price_table_artifact` and
+`probe_bank_artifact` private run-owned descriptors. It makes no paid calls and
+does not register a gate. Provider agreement is independently repriced from the
+provider's raw usage report in each actual `model_capture`, bound to the terminal
+source record and compared with nanodollar ledger settlements. Capture off,
+unknown usage, changed bytes, missing frozen prices, or a model baseline with no
+calls cannot pass. The bank must contain at least sixty actual keyed items, with
+its exact hash frozen in `prereg.probe_bank_hash`.
+
+The evaluator also derives the exact twelve-run schedule and all started
+casualties, completeness verdicts, source dollars/actions per harness, actual
+replay-index fidelity, verified contemporaneous 300-URL block profiles,
+chain/ledger/seal checks including an actual open-ticket seal, and counterfactual
+breaker rates from runs whose hashed policy actually used `mode:log_only`.
+The proposed empirical thresholds are recorded and never automatically applied.
+The goal/questions/traps and complete goal metadata must already be frozen.
+Readiness artifacts are immutable under the study; `PilotReadiness.verify`
+recomputes their actual evidence without writes. Registry gate registration
+requires that exact artifact and actual research provenance. A twelve-run
+software fixture remains development evidence and cannot unlock research.
+
+## Historical curves and whole-life cohorts
+
+The runtime records bounded private workspace checkpoints after the first actual
+committed debit crossing 10%, 25%, 50%, and 100% of the source dollar cap. The
+post-seal `grading_protocol` grades these verified historical bytes using the same
+frozen core as the final artifact. `curve_score_path` defaults to
+`["checklist","pass_fraction"]`. Missing pre-restart observations or bounded-copy
+omissions stay unmeasured. A debit crossing several thresholds contributes one
+observed state at its actual overshoot coordinates. Vertical changes at repeated
+coordinates contribute zero area; the last actual observation at that coordinate
+is used, with the policy and all raw receipts retained. Both dollar and action
+log-AUC/slope are published. No final artifact is copied into a historical score.
+
+`StudyReport` consumes actual registry execution rows, frozen primary G/V paths,
+source completeness and comparability before pooling distributions or `pass^k`.
+Carryover contrasts re-resolve the preregistered dependency graph and actual
+imports/archive receipts. Whole-life studies count each durable life/cell/seed
+join once. Sleeping and resumed sessions remain in costs and attrition, never as
+independent repeats. Failed or uncertain requested measurements stay visible.
+
+## Content, entities and rubric shapes
+
+`allocation` enables the cross-family content/instrumentality classifier with a
+hash-pinned `instrument`, explicit `model_spec`, `budget_usd` and input caps.
+The instrument contains described `classes` and expert `calibration_rows` tied
+to actual archived action slices. Each captured request binds the instrument
+hash. Forty fresh paired expert slices and actual kappa determine V; otherwise
+labels remain exploratory J. See [allocation.md](allocation.md). Source and
+life publications include separate content/non-instrumental action-share series;
+life series preserve actual cumulative dollars/actions/calendar coordinates and
+never combine different protocol hashes.
+
+`entities` enables `EntityInstrument` with a frozen BIO ontology/alias protocol
+and the same explicit budget controls. Literal archived spans, token offsets,
+actual first-touch coordinates and calibrated J/V are preserved. Unknown names,
+changed bytes and incomplete context cannot silently increase a discovery count.
+See [entity-instrument.md](entity-instrument.md).
+
+A life binding can declare `classifier_mappings`, for example
+`[{"parameter":"experience","label":"play","evidence_class":"play_artifact"}]`.
+Supported labels are `play`, `reiteration`, `revisit`, `instrumental`,
+`non_instrumental`, and `content_class`; `equals` selects the actual label,
+`content_class` optionally restricts the category, and `value:"interval_usd"`
+selects actual attributed dollars rather than event count. The life runner
+reconstructs frozen expert labels, actual prompts/responses, unique child
+receipts and bills before using saved allocation evidence. Claimed scalar
+kappas are rejected. The minimum actual task kappa and maximum actual miss rate
+bound experience V; sponsor/probe labels never become G.
+
+Research lives additionally require `life_rubric_policy_hash` and
+`life_binding_hash` in their actual pre-session series preregistration. A rubric
+policy may define `shapes:[{name,all:[...]}]`. Each predicate names `checkpoint`
+(`current`, d7/d14/d28/end/after30/after90), `parameter`, `column` G/V/J,
+`field` (default `value`; also `mean_rating`, `rate`, or `n`), `op` gte/lte/eq,
+and finite `threshold`. The seven design names use underscores, such as
+`pleasant_executive`. Only registered thresholds are applied. Missing readings
+and overlapping matched rules remain unmeasured. Earlier matrices come only
+from hash-verified registered checkpoints, with future readings excluded.
+
+Whole-life cohort reports also join actual registered d7 mean J ratings to
+completed after90 G ladders per parameter. Strict matching precedes Spearman
+correlation, individual pairs and missing reasons remain visible, the forty-life
+L1 floor is explicit, and J-based predictive results never become automatic
+scientific gate evidence. Scheduled judge-pair health checks require an explicit
+frozen protocol and per-check/lifetime budget; their agreement is drift evidence,
+not expert calibration.
+
+A delivered `work-snapshot/out/self-assessment.json` (or explicit
+`self_assessment_path`) is retained with its actual sealed snapshot/hash as S,
+never as a checked grade. Frozen-mode spec sheets verify the actual pinned
+corpus bytes/manifest and report local search fidelity against archived query
+lists. Missing query coverage stays unmeasured; this is not a claim that a
+historical snapshot is identical to the live web.

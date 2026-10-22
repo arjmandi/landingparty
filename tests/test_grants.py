@@ -384,3 +384,27 @@ async def test_cancelled_proxy_calls_consume_quota_without_fabricating_passes(se
     )
     assert refused["rule_id"] == "rehearsal_quota"
     assert grants.verify(run_id)["valid"]
+
+
+async def test_incident_revokes_same_life_old_and_current_platform_clearances(setup):
+    world, grants, _, _, _ = setup
+
+    def run(life):
+        return world.store.create_run({"life_id": life, "budget": {"usd": 1}, "stage": 2})["run_id"]
+
+    earlier, current, unrelated = run("l_one"), run("l_one"), run("l_two")
+    old_grant = propose(grants, earlier, standing=True)
+    new_grant = propose(grants, current, standing=True)
+    other_grant = propose(grants, unrelated, standing=True)
+    result = grants.revoke_incident(
+        current, platform="fixture", incident_ref="incident:actual-removal"
+    )
+    assert set(result["revoked"]) == {old_grant["grant_id"], new_grant["grant_id"]}
+    assert grants.get(other_grant["grant_id"])["state"] == "rehearsal"
+    assert grants.verify(earlier)["valid"] and grants.verify(current)["valid"]
+    assert (
+        grants.revoke_incident(current, platform="fixture", incident_ref="incident:retry")[
+            "revoked"
+        ]
+        == []
+    )

@@ -19,11 +19,19 @@ class StepRequest(BaseModel):
 
 
 class OpenEnvFace:
-    def __init__(self, client: httpx.AsyncClient, *, agent_client=None, replay_scorer=None):
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        agent_client=None,
+        replay_scorer=None,
+        harness_id="openenv@0.1/submit-wait",
+    ):
         self.client, self.replay_scorer = client, replay_scorer
         self.agent_client = agent_client or client
         self.run_id, self.mode, self.cursor = None, None, 0
         self.headers = {}
+        self.harness_id = harness_id
 
     async def reset(self, config: dict):
         if self.run_id:
@@ -33,7 +41,7 @@ class OpenEnvFace:
                     "/v1/beam-up", json={"run_id": self.run_id, "reason": "harness_stopped"}
                 )
                 response.raise_for_status()
-        config = {**config, "harness_id": "openenv@0.1/submit-wait"}
+        config = {**config, "harness_id": self.harness_id}
         response = await self.client.post("/v1/run", json=config)
         response.raise_for_status()
         run = response.json()

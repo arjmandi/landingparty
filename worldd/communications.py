@@ -637,6 +637,11 @@ class CommunicationsService(VenueDB):
             "INSERT INTO communication_inbound VALUES (?,?,?,?)",
             (platform, external_id, run_id, canonical(event)),
         )
+        forecast = getattr(self.world, "services", {}).get("forecast")
+        if forecast and hasattr(forecast, "notify_state_write"):
+            forecast.notify_state_write(
+                run_id=run_id, world_ref=f"inbound:{platform}:{external_id}"
+            )
         return event
 
     async def recover(self):

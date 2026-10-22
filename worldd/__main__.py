@@ -25,17 +25,27 @@ def main():
         "--proxy-port", type=int, default=8080, help="Recorded HTTP/HTTPS proxy; 0 disables it."
     )
     parser.add_argument(
+        "--public-port",
+        type=int,
+        default=0,
+        help="Optional public identity/incident listener; 0 disables it (suggested: 7779).",
+    )
+    parser.add_argument(
         "--lane-port",
         type=int,
         default=8081,
         help="Separate model listener; 0 disables it. Lane is also on control port.",
     )
     args = parser.parse_args()
-    ports = [port for port in [args.port, args.lane_port, args.agent_port, args.proxy_port] if port]
+    ports = [
+        port
+        for port in [args.port, args.lane_port, args.agent_port, args.proxy_port, args.public_port]
+        if port
+    ]
     if len(ports) != len(set(ports)):
         parser.error("listener ports must differ (0 disables an optional listener)")
     app = create_app(args.data_dir)
-    if not args.lane_port and not args.agent_port and not args.proxy_port:
+    if not args.lane_port and not args.agent_port and not args.proxy_port and not args.public_port:
         uvicorn.run(app, host=args.host, port=args.port)
         return
 
@@ -53,6 +63,10 @@ def main():
             listeners.append((lane, args.lane_port))
         if args.agent_port:
             listeners.append((create_agent_app(app.state.world), args.agent_port))
+        if args.public_port:
+            from .public_identity import create_public_app
+
+            listeners.append((create_public_app(app.state.world), args.public_port))
         servers = [
             uvicorn.Server(uvicorn.Config(listener, host=args.host, port=port))
             for listener, port in listeners

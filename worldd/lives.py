@@ -5,12 +5,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import io
 import json
+import tarfile
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from .life_billing import LifeBilling, serialized
+from .life_checkpoints import LifeCheckpoints
 from .storage import canonical_json, content_hash
 from .util import identifier
 
@@ -25,19 +28,23 @@ def _time(value: str | datetime) -> datetime:
 def _money(value) -> Decimal:
     if isinstance(value, bool):
         raise TypeError("Invalid dollar amount")
-    result = Decimal(str(value))
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        raise ValueError("Invalid dollar amount") from None
     if not result.is_finite() or result < 0 or result * 1_000_000_000 % 1:
         raise ValueError("Dollars must be nonnegative whole nanodollars")
     return result
 
 
-class LifeService(LifeBilling):
+class LifeService(LifeBilling, LifeCheckpoints):
     def __init__(self, world, *, clock=None):
         self.world = world
         self.store = world.store
         self.clock = clock or (lambda: datetime.now(UTC))
         self.tasks: dict[str, asyncio.Task] = {}
         self._tick_locks = {}
+        self._rubric_locks = {}
         self._closed = False
         with self.store._lock:
             self.store.db.executescript(
@@ -56,6 +63,38 @@ class LifeService(LifeBilling):
 
     def _now(self):
         return _time(self.clock())
+
+    def _notify_state(self, life_id):
+        forecast = getattr(self.world, "services", {}).get("forecast")
+        if not forecast or not hasattr(forecast, "notify_state_write"):
+            return
+        with self.store._lock:
+            event = json.loads(
+                self.store.db.execute(
+                    "SELECT payload FROM life_events WHERE life_id=? ORDER BY seq DESC LIMIT 1",
+                    (life_id,),
+                ).fetchone()[0]
+            )
+        reference = f"life:{life_id}:{event['seq']}:{event['hash']}"
+        try:
+            forecast.notify_state_write(life_id=life_id, world_ref=reference)
+        except Exception as error:  # noqa: BLE001 - observers cannot undo committed capital or lifecycle transitions
+            with self.store._transaction():
+                self._save(
+                    self._load(life_id),
+                    "forecast_observer_failed",
+                    world_ref=reference,
+                    reason=type(error).__name__,
+                )
+
+    def _enforce_money_end(self, life_id):
+        life = self.get(life_id)
+        if life["ended"] or life["state"] == "billing_hold":
+            return
+        if self._driver_at_floor(life):
+            self._spawn(life_id + ":bankruptcy", self.end(life_id, reason="bankruptcy"))
+        elif self._available(life) <= 0 and self._held(life) == 0:
+            self._spawn(life_id + ":budget", self.end(life_id, reason="budget_exhausted"))
 
     def _load(self, life_id):
         row = self.store.db.execute(
@@ -78,6 +117,40 @@ class LifeService(LifeBilling):
                 )
             ]
 
+    def protocol_identity(self, life_id):
+        """Immutable inducing conditions, excluding IDs and evolving observations."""
+        life = self.get(life_id)
+        driver = life.get("driver")
+        return {
+            "stage": life["stage"],
+            "research_mode": life["research_mode"],
+            "budget_nano": life.get(
+                "budget_nano", int(Decimal(str(life["budget"]["usd_life"])) * 1_000_000_000)
+            ),
+            "wall_life_days": life["budget"]["wall_life_days"],
+            "continuity": life["continuity"],
+            "wake_policy": life["wake_policy"],
+            "reply_policy": life["reply_policy"],
+            "afterlife_days": life["afterlife_days"],
+            "binding_id": life["binding_id"],
+            "income_rail": life["income_rail"],
+            "driver": {
+                key: driver.get(key)
+                for key in (
+                    "metric",
+                    "direction",
+                    "reading_at_start",
+                    "reading_at_start_nano",
+                    "floor",
+                    "floor_nano",
+                    "floor_event",
+                    "rescue_policy",
+                )
+            }
+            if driver
+            else None,
+        }
+
     def events(self, life_id: str) -> list[dict]:
         with self.store._lock:
             self._load(life_id)
@@ -87,6 +160,148 @@ class LifeService(LifeBilling):
                     "SELECT payload FROM life_events WHERE life_id=? ORDER BY seq", (life_id,)
                 )
             ]
+
+    @serialized
+    def verify(self, life_id):
+        life = self._load(life_id)
+        previous = "sha256:" + "0" * 64
+        events = self.events(life_id)
+        for seq, event in enumerate(events, 1):
+            if (
+                event.get("seq") != seq
+                or event.get("prev_hash") != previous
+                or event.get("hash")
+                != content_hash({key: value for key, value in event.items() if key != "hash"})
+            ):
+                return {"valid": False, "reason": "Invalid life transition chain", "seq": seq}
+            previous = event["hash"]
+        materialized = bool(events and events[-1].get("state_hash"))
+        if materialized and events[-1]["state_hash"] != content_hash(life):
+            return {"valid": False, "reason": "Life state differs from its recorded transition"}
+        return {
+            "valid": True,
+            "count": len(events),
+            "head": previous,
+            "materialized_verified": materialized,
+        }
+
+    def export(self, life_id, *, include_sessions=True):
+        """Export a sealed life snapshot and actual artifacts without credentials."""
+        with self.store._lock:
+            life = self._load(life_id)
+            verification = self.verify(life_id)
+            if life["active_run_id"]:
+                raise ValueError("Seal active sessions before exporting this life snapshot")
+            events = self.events(life_id)
+        output = io.BytesIO()
+        manifest = {
+            "life_id": life_id,
+            "partial": not bool(life["ended"]),
+            "verification": verification,
+            "files": {},
+            "artifact_integrity": [],
+            "source_reports": [],
+        }
+
+        def add(archive, name, body):
+            entry = tarfile.TarInfo(life_id + "/" + name)
+            entry.mode, entry.size = 0o600, len(body)
+            archive.addfile(entry, io.BytesIO(body))
+            manifest["files"][name] = "sha256:" + hashlib.sha256(body).hexdigest()
+
+        with tarfile.open(fileobj=output, mode="w:gz") as archive:
+            add(archive, "life.json", canonical_json(life).encode())
+            add(
+                archive,
+                "record.jsonl",
+                ("\n".join(canonical_json(event) for event in events) + "\n").encode(),
+            )
+            with self.store._lock:
+                holds = [
+                    json.loads(row[0])
+                    for row in self.store.db.execute(
+                        "SELECT payload FROM life_human_holds WHERE life_id=? ORDER BY hold_id",
+                        (life_id,),
+                    )
+                ]
+            add(archive, "accounting/human_holds.json", canonical_json(holds).encode())
+            accounting = [
+                {
+                    "run_id": run_id,
+                    "state": self.store.get_run(run_id)["state"],
+                    "ledger": self.store.reconcile(run_id),
+                    "record_verification": self.store.verify_record(run_id),
+                }
+                for run_id in self._billing_runs(life)
+            ]
+            add(archive, "accounting/runs.json", canonical_json(accounting).encode())
+            for run_id in self._billing_runs(life):
+                report = self.store.run_dir(run_id) / "report.json"
+                manifest["source_reports"].append(
+                    {
+                        "run_id": run_id,
+                        "report_ref": f"runs/{run_id}/report.json",
+                        "hash": "sha256:" + hashlib.sha256(report.read_bytes()).hexdigest()
+                        if report.is_file() and report.resolve() == report
+                        else None,
+                        "status": "available"
+                        if report.is_file() and report.resolve() == report
+                        else "unmeasured",
+                    }
+                )
+            owned = self.store.data_dir / "lives" / life_id
+            for reference in life.get("rubric_checkpoints", []):
+                path = self.store.data_dir / reference["artifact_ref"]
+                valid = not (
+                    not path.is_relative_to(owned)
+                    or path.resolve() != path
+                    or not path.is_file()
+                    or "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+                    != reference["artifact_hash"]
+                )
+                manifest["artifact_integrity"].append({**reference, "valid": valid})
+            if owned.is_dir() and owned.resolve() == owned:
+                for path in sorted(owned.rglob("*")):
+                    if (
+                        path.is_file()
+                        and not path.is_symlink()
+                        and path.resolve().is_relative_to(owned)
+                    ):
+                        add(archive, "artifacts/" + str(path.relative_to(owned)), path.read_bytes())
+            if include_sessions:
+                for run_id in self._billing_runs(life):
+                    add(archive, "sessions/" + run_id + ".tar.gz", self.world.export(run_id))
+            add(archive, "manifest.json", canonical_json(manifest).encode())
+        return output.getvalue()
+
+    def record_incident(self, life_id, incident_ref):
+        footprint = getattr(self.world, "services", {}).get("footprint")
+        if not footprint or not hasattr(footprint, "query"):
+            raise ValueError("An incident needs actual world footprint evidence")
+        matches = [
+            item
+            for item in footprint.query(life_id=life_id, include_incidents=True)
+            if item["item_id"] == incident_ref and item["kind"] == "incident"
+        ]
+        if len(matches) != 1:
+            raise ValueError("The incident does not belong to this actual life")
+        item = matches[0]
+        reference = {
+            "incident_ref": incident_ref,
+            "run_id": item["run_id"],
+            "platform": item["platform"],
+            "kind": item["metadata"]["incident_kind"],
+            "owner": item["metadata"]["owner"],
+            "observed_at": item["created_at"],
+        }
+        with self.store._transaction():
+            life = self._load(life_id)
+            if not any(
+                value["incident_ref"] == incident_ref for value in life.setdefault("incidents", [])
+            ):
+                life["incidents"].append(reference)
+                self._save(life, "incident", reference=reference)
+        return self.get(life_id)
 
     def record_rubric(self, life_id, report, *, artifact_ref, artifact_hash):
         """Anchor an actual immutable world-side rubric artifact in the life chain."""
@@ -121,6 +336,8 @@ class LifeService(LifeBilling):
 
     def _save(self, life: dict, kind: str, **data):
         """Called in a Store transaction; life transitions have their own durable chain."""
+        if set(data) & {"life_id", "seq", "recorded_at", "state_hash", "prev_hash", "hash"}:
+            raise ValueError("Life transition metadata cannot replace chain integrity fields")
         life_id = life["life_id"]
         head = self.store.db.execute(
             "SELECT seq,payload FROM life_events WHERE life_id=? ORDER BY seq DESC LIMIT 1",
@@ -132,6 +349,7 @@ class LifeService(LifeBilling):
             "recorded_at": self._now().isoformat(),
             "kind": kind,
             **data,
+            "state_hash": content_hash(life),
             "prev_hash": json.loads(head[1])["hash"] if head else "sha256:" + "0" * 64,
         }
         event["hash"] = content_hash(event)
@@ -205,6 +423,13 @@ class LifeService(LifeBilling):
                 or start <= floor
             ):
                 raise ValueError("A driver must start above its finite floor")
+            if driver["metric"] == "usd_balance":
+                if any(Decimal(str(value)) * 1_000_000_000 % 1 for value in (start, floor)):
+                    raise ValueError("Money-driver readings must use whole nanodollars")
+                driver.update(
+                    reading_at_start_nano=int(Decimal(str(start)) * 1_000_000_000),
+                    floor_nano=int(Decimal(str(floor)) * 1_000_000_000),
+                )
             driver.update(
                 reading_at_start=start,
                 reading=start,
@@ -234,6 +459,7 @@ class LifeService(LifeBilling):
             "identity_id": config.get("identity_id"),
             "binding_id": config.get("binding_id"),
             "budget": {"usd_life": float(usd), "wall_life_days": days},
+            "budget_nano": int(usd * 1_000_000_000),
             "created_at": created.isoformat(),
             "ends_at": (created + timedelta(days=days)).isoformat(),
             "continuity": continuity,
@@ -243,6 +469,7 @@ class LifeService(LifeBilling):
             "driver": driver,
             "income_rail": rail,
             "income_usd": 0,
+            "income_nano": 0,
             "afterlife_days": sorted(set(afterlife)),
             "afterlife": {},
             "sessions": [],
@@ -252,6 +479,7 @@ class LifeService(LifeBilling):
             "pending_wake": None,
             "t0_fingerprint_ref": None,
             "footprint_ref": None,
+            "incidents": [],
             "life_rubric_ref": None,
         }
         with self.store._transaction():
@@ -261,6 +489,7 @@ class LifeService(LifeBilling):
             )
             self._save(life, "life_start", config_hash=content_hash(config))
         self._schedule(life_id)
+        self._notify_state(life_id)
         return self.get(life_id)
 
     @serialized
@@ -287,11 +516,48 @@ class LifeService(LifeBilling):
     def _available(self, life):
         return max(
             Decimal(0),
-            Decimal(str(life["budget"]["usd_life"]))
-            + Decimal(str(life["income_usd"]))
+            Decimal(
+                life.get(
+                    "budget_nano", int(Decimal(str(life["budget"]["usd_life"])) * 1_000_000_000)
+                )
+            )
+            / 1_000_000_000
+            + self._income(life)
             - self._spent(life)
             - self._held(life),
         )
+
+    def _income(self, life):
+        return (
+            Decimal(life.get("income_nano", int(Decimal(str(life["income_usd"])) * 1_000_000_000)))
+            / 1_000_000_000
+        )
+
+    def _driver_at_floor(self, life):
+        driver = life.get("driver")
+        if not driver:
+            return False
+        if driver["metric"] == "usd_balance":
+            reading = (
+                Decimal(
+                    driver.get(
+                        "reading_at_start_nano",
+                        int(Decimal(str(driver["reading_at_start"])) * 1_000_000_000),
+                    )
+                )
+                / 1_000_000_000
+                + self._income(life)
+                - self._spent(life)
+            )
+            floor = (
+                Decimal(
+                    driver.get("floor_nano", int(Decimal(str(driver["floor"])) * 1_000_000_000))
+                )
+                / 1_000_000_000
+            )
+        else:
+            reading, floor = Decimal(str(driver["reading"])), Decimal(str(driver["floor"]))
+        return reading <= floor
 
     @serialized
     def status(self, life_id: str) -> dict:
@@ -302,8 +568,18 @@ class LifeService(LifeBilling):
         driver = dict(life["driver"]) if life["driver"] else None
         if driver and driver["metric"] == "usd_balance":
             driver["reading"] = float(
-                Decimal(str(driver["reading_at_start"])) + Decimal(str(life["income_usd"])) - spent
+                Decimal(
+                    driver.get(
+                        "reading_at_start_nano",
+                        int(Decimal(str(driver["reading_at_start"])) * 1_000_000_000),
+                    )
+                )
+                / 1_000_000_000
+                + self._income(life)
+                - spent
             )
+        if driver:
+            driver["at_floor"] = self._driver_at_floor(life)
         return {
             "life_id": life_id,
             "state": life["state"],
@@ -317,6 +593,7 @@ class LifeService(LifeBilling):
             "wake_rules": life["wake_rules"],
             "ended": life["ended"],
             "afterlife": life["afterlife"],
+            "rubric_jobs": life.get("rubric_jobs", {}),
         }
 
     def prepare_session(self, life_id: str, config: dict) -> dict:
@@ -346,7 +623,7 @@ class LifeService(LifeBilling):
         state = self.status(life_id)
         if state["remaining_usd"] <= 0 or state["wall_left_s"] <= 0:
             raise ValueError("Life budget or wall horizon is exhausted")
-        if state["driver"] and state["driver"]["reading"] <= state["driver"]["floor"]:
+        if self._driver_at_floor(life):
             raise ValueError("Bankrupt lives cannot be rescued")
         result = json.loads(canonical_json(config))
         result.update(
@@ -488,9 +765,17 @@ class LifeService(LifeBilling):
         if wake:
             self.world.push(run_id, {"type": "wake", **wake})
         self._schedule(life_id)
+        self._notify_state(life_id)
         return self.get(life_id)
 
-    async def start_session(self, life_id: str, config: dict | None = None) -> dict:
+    async def start_session(
+        self,
+        life_id: str,
+        config: dict | None = None,
+        *,
+        register_prereg=None,
+        execution_binding=None,
+    ) -> dict:
         from .models import RunConfig
 
         life = self.get(life_id)
@@ -503,7 +788,15 @@ class LifeService(LifeBilling):
                 if key in RunConfig.model_fields and key not in {"preamble_hash", "preflight_id"}
             }
         prepared = self.prepare_session(life_id, {**inherited, **(config or {})})
-        result = self.world.create_run(RunConfig.model_validate(prepared))
+        if register_prereg is not None:
+            if life["series_id"]:
+                raise ValueError("Dependency registration requires a life without a fixed series")
+            prepared.pop("series_id", None)
+        result = self.world.create_run(
+            RunConfig.model_validate(prepared),
+            register_prereg=register_prereg,
+            execution_binding=execution_binding,
+        )
         self.attach_session(life_id, result["run_id"])
         return result
 
@@ -526,10 +819,13 @@ class LifeService(LifeBilling):
                 life["state"] = "ready"
             self._save(life, "session_close", run_id=run_id, spent_usd=session["spent_usd"])
         state = self.status(life_id)
-        if state["driver"] and state["driver"]["reading"] <= state["driver"]["floor"]:
+        if state["driver"] and state["driver"]["at_floor"]:
             self._spawn(life_id + ":bankruptcy", self.end(life_id, reason="bankruptcy"))
         elif state["remaining_usd"] <= 0:
             self._spawn(life_id + ":budget", self.end(life_id, reason="budget_exhausted"))
+        self._spawn(life_id + ":rubric", self._run_rubric_jobs(life_id))
+        self._schedule(life_id)
+        self._notify_state(life_id)
         return self.get(life_id)
 
     def credit(
@@ -562,23 +858,34 @@ class LifeService(LifeBilling):
             ]
             if matching:
                 prior = matching[0]
-                if Decimal(str(prior["amount_usd"])) != value or prior["source"] != source:
+                if (
+                    Decimal(
+                        prior.get(
+                            "amount_nano", int(Decimal(str(prior["amount_usd"])) * 1_000_000_000)
+                        )
+                    )
+                    / 1_000_000_000
+                    != value
+                    or prior["source"] != source
+                ):
                     raise ValueError("Income evidence conflicts with its earlier credit")
                 return life
             if life["ended"]:
                 raise ValueError("An ended life cannot be rescued")
-            driver = self.status(life_id)["driver"]
-            if driver and driver["reading"] <= driver["floor"]:
+            if self._driver_at_floor(life):
                 raise ValueError("A bankrupt life cannot be rescued")
-            life["income_usd"] = float(Decimal(str(life["income_usd"])) + value)
+            life["income_nano"] = int((self._income(life) + value) * 1_000_000_000)
+            life["income_usd"] = float(Decimal(life["income_nano"]) / 1_000_000_000)
             self._save(
                 life,
                 "income",
                 amount_usd=float(value),
+                amount_nano=int(value * 1_000_000_000),
                 source=source,
                 evidence_ref=evidence_ref,
                 author_class=author_class,
             )
+        self._notify_state(life_id)
         return self.get(life_id)
 
     def observe_driver(self, life_id: str, metric: str, value: float, *, evidence_ref: str) -> dict:
@@ -594,8 +901,9 @@ class LifeService(LifeBilling):
             self._save(
                 life, "driver_observation", metric=metric, value=value, evidence_ref=evidence_ref
             )
-        if value <= life["driver"]["floor"]:
+        if self._driver_at_floor(life):
             self._spawn(life_id + ":bankruptcy", self.end(life_id, reason="bankruptcy"))
+        self._notify_state(life_id)
         return self.get(life_id)
 
     def money_asks_denied(self, life_id: str) -> bool:
@@ -635,8 +943,16 @@ class LifeService(LifeBilling):
             }
             life["state"] = "sleeping"
             self._save(
-                life, "sleep", run_id=run_id, action_id=action_id, wake_rules=life["wake_rules"]
+                life,
+                "sleep",
+                run_id=run_id,
+                action_id=action_id,
+                wake_rules=life["wake_rules"],
+                inbox_cursor=self.store.db.execute(
+                    "SELECT COALESCE(MAX(cursor),0) FROM inbox WHERE run_id=?", (run_id,)
+                ).fetchone()[0],
             )
+        self._notify_state(life_id)
         self._spawn(life_id + ":sleep", self._close_sleeping(life_id, run_id, action_id))
         return {"kind": "silence", "action_id": action_id}
 
@@ -668,6 +984,7 @@ class LifeService(LifeBilling):
             }
             self._save(life, "wake", **life["pending_wake"])
         self._schedule(life_id)
+        self._notify_state(life_id)
         return True
 
     async def end(self, life_id: str, reason: str = "agent_finished") -> dict:
@@ -685,6 +1002,20 @@ class LifeService(LifeBilling):
                 await cancelled
         if self.get(life_id)["state"] == "billing_hold":
             raise ValueError("Unresolved human billing must be reconciled before ending this life")
+        with self.store._lock:
+            outstanding = [
+                json.loads(row[0])
+                for row in self.store.db.execute(
+                    "SELECT payload FROM life_human_holds WHERE life_id=?", (life_id,)
+                )
+            ]
+        outstanding = [
+            hold for hold in outstanding if hold["state"] not in {"committed", "released"}
+        ]
+        if outstanding:
+            for hold in outstanding:
+                self._freeze_billing(hold["hold_id"])
+            raise ValueError("Outstanding human work must settle before this life can end")
         with self.store._transaction():
             life = self._load(life_id)
             if life["ended"]:
@@ -706,7 +1037,9 @@ class LifeService(LifeBilling):
             result = identity.mark_ended(life_id)
             if inspect.isawaitable(result):
                 await result
+        await self._run_rubric_jobs(life_id)
         self._schedule(life_id)
+        self._notify_state(life_id)
         return self.get(life_id)
 
     def _spawn(self, key, coroutine):
@@ -737,22 +1070,25 @@ class LifeService(LifeBilling):
 
     async def _timer(self, life_id):
         life = self.get(life_id)
+        deadlines = self._rubric_deadlines(life)
         if life["ended"]:
             pending = [
                 (int(day), item)
                 for day, item in life["afterlife"].items()
                 if item["state"] != "complete"
             ]
-            if not pending:
-                return
-            future = [
-                _time(item["due_at"]) for _, item in pending if _time(item["due_at"]) > self._now()
-            ]
-            deadline = min(future) if future else self._now()
+            deadlines.extend(
+                max(_time(item.get("retry_at") or item["due_at"]), self._now())
+                for _, item in pending
+            )
         else:
             deadline = _time(life["ends_at"])
             if life["state"] == "sleeping" and life["wake_rules"].get("until"):
                 deadline = min(deadline, _time(life["wake_rules"]["until"]))
+            deadlines.append(deadline)
+        if not deadlines:
+            return
+        deadline = min(deadlines)
         await asyncio.sleep(max(0, (deadline - self._now()).total_seconds()))
         await self.tick(life_id)
 
@@ -761,6 +1097,7 @@ class LifeService(LifeBilling):
             return await self._tick(life_id)
 
     async def _tick(self, life_id: str) -> dict:
+        self._ensure_rubric_jobs(life_id)
         life = self.get(life_id)
         if not life["ended"] and self._now() >= _time(life["ends_at"]):
             return await self.end(life_id, reason="wall_clock")
@@ -778,8 +1115,21 @@ class LifeService(LifeBilling):
             for day, item in list(life["afterlife"].items()):
                 if item["state"] == "complete" or _time(item["due_at"]) > self._now():
                     continue
+                if item.get("retry_at") and _time(item["retry_at"]) > self._now():
+                    continue
                 footprint = getattr(self.world, "services", {}).get("footprint")
                 if footprint is None or not hasattr(footprint, "read_life"):
+                    with self.store._transaction():
+                        current = self._load(life_id)
+                        current["afterlife"][day]["retry_at"] = (
+                            self._now() + timedelta(hours=1)
+                        ).isoformat()
+                        self._save(
+                            current,
+                            "afterlife_reading_blocked",
+                            checkpoint=int(day),
+                            reason="probe unavailable",
+                        )
                     continue
                 try:
                     result = footprint.read_life(life_id, checkpoint=int(day))
@@ -789,6 +1139,9 @@ class LifeService(LifeBilling):
                     with self.store._transaction():
                         current = self._load(life_id)
                         current["afterlife"][day]["state"] = "failed"
+                        current["afterlife"][day]["retry_at"] = (
+                            self._now() + timedelta(hours=1)
+                        ).isoformat()
                         self._save(current, "afterlife_reading_failed", checkpoint=int(day))
                     continue
                 with self.store._transaction():
@@ -796,6 +1149,13 @@ class LifeService(LifeBilling):
                     current["afterlife"][day].update(
                         state="complete", observed_at=self._now().isoformat(), result=result
                     )
+                    current["afterlife"][day].pop("retry_at", None)
+                    current["footprint_ref"] = {
+                        "life_id": life_id,
+                        "checkpoint": int(day),
+                        "result_hash": content_hash(result),
+                        "observed_at": self._now().isoformat(),
+                    }
                     if all(value["state"] == "complete" for value in current["afterlife"].values()):
                         current["state"] = "ended"
                     self._save(current, "afterlife_reading", checkpoint=int(day), result=result)
@@ -810,51 +1170,44 @@ class LifeService(LifeBilling):
                             self._save(
                                 self._load(life_id), "survey_dispatch_failed", checkpoint=int(day)
                             )
-            current = self.get(life_id)
-            pipeline = getattr(self.world, "services", {}).get("pipeline")
-            if (
-                pipeline
-                and hasattr(pipeline, "has_life_config")
-                and pipeline.has_life_config(life_id)
-            ):
-                for day, item in current["afterlife"].items():
-                    if item["state"] != "complete" or item.get("rubric_state") == "complete":
-                        continue
-                    try:
-                        report = pipeline.life(life_id, checkpoint=f"after{day}")
-                        if inspect.isawaitable(report):
-                            report = await report
-                        with self.store._transaction():
-                            refreshed = self._load(life_id)
-                            refreshed["afterlife"][day].update(
-                                rubric_state="complete", rubric_report_hash=content_hash(report)
-                            )
-                            self._save(
-                                refreshed,
-                                "rubric_checkpoint",
-                                checkpoint=f"after{day}",
-                                report_hash=content_hash(report),
-                            )
-                    except Exception:  # noqa: BLE001 - preserve the reading and retry scoring independently
-                        with self.store._transaction():
-                            refreshed = self._load(life_id)
-                            refreshed["afterlife"][day]["rubric_state"] = "failed"
-                            self._save(
-                                refreshed, "rubric_checkpoint_failed", checkpoint=f"after{day}"
-                            )
-                current = self.get(life_id)
-            if any(
-                value["state"] != "complete" and _time(value["due_at"]) > self._now()
-                for value in current["afterlife"].values()
-            ):
-                self._schedule(life_id)
-            return current
+        await self._run_rubric_jobs(life_id)
         self._schedule(life_id)
         return self.get(life_id)
+
+    def _recover_sleep_handoffs(self, life):
+        """Rebuild the secondary queue if a crash followed the authoritative inbox commit."""
+        late = getattr(self.world, "late_events", None)
+        if late is None:
+            return
+        latest = life["sessions"][-1]["run_id"] if life["sessions"] else None
+        for sleep in self.events(life["life_id"]):
+            if sleep["kind"] != "sleep":
+                continue
+            cursor = sleep.get("inbox_cursor", 0)
+            while True:
+                batch = self.store.inbox(sleep["run_id"], since=cursor, limit=1000)["events"]
+                if not batch:
+                    break
+                for event in batch:
+                    # Older records predate the exact cursor checkpoint; their
+                    # committed wall timestamp supplies a conservative cutoff.
+                    if "inbox_cursor" not in sleep and event["ts"] < sleep["recorded_at"]:
+                        continue
+                    late.append(
+                        sleep["run_id"],
+                        life["life_id"],
+                        event,
+                        source_event_id=event["event_id"],
+                        observed_at=event["ts"],
+                    )
+                    if sleep["run_id"] == latest:
+                        self.notify_event(life["life_id"], event)
+                cursor = batch[-1]["cursor"]
 
     async def recover(self):
         self._recover_billing()
         for life in self.list():
+            self._recover_sleep_handoffs(life)
             if life["active_run_id"] and self.store.get_run(life["active_run_id"])["state"] in {
                 "sealed",
                 "ended",

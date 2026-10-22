@@ -77,6 +77,19 @@ async def test_actual_life_checkpoint_persists_private_immutable_report(life_sou
     path = world.store.data_dir / result["artifact_ref"]
     assert result["artifact_hash"] == "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
     assert lives.get(life_id)["life_rubric_ref"]["artifact_hash"] == result["artifact_hash"]
+    publication = world.life_report(life_id)["publication"]
+    assert (
+        publication["figure_svgs"] and "Revealed life parameters" in publication["figure_svgs"][-1]
+    )
+    export_root = (
+        world.store.data_dir
+        / "lives"
+        / life_id
+        / "publication"
+        / result["artifact_hash"].split(":", 1)[1]
+    )
+    assert (export_root / "rubric-matrix.png").is_file()
+    assert (export_root / "curve-points.csv").is_file()
     assert await pipeline.life(life_id) == result
     footprint = world.services["footprint"]
     item = footprint.query(life_id=life_id)[0]
@@ -97,6 +110,21 @@ async def test_life_analysis_refuses_changed_config_and_premature_calendar_readi
         await pipeline.life(life_id, checkpoint="d7")
     with pytest.raises(ValueError, match="actual afterlife"):
         await pipeline.life(life_id, checkpoint="after30")
+
+
+async def test_scoring_rechecks_actual_frozen_policy_bytes_and_research_registration(life_source):
+    world, lives, pipeline, life_id, _run_id, options, _artifact = life_source
+    pipeline.configure_life(life_id, **options)
+    path = world.store.data_dir / "lives" / life_id / "rubric/config.json"
+    config = json.loads(path.read_bytes())
+    research = {**lives.get(life_id), "research_mode": "research"}
+    with pytest.raises(ValueError, match="registered series"):
+        pipeline.life_pipeline._validate_configuration(research, config)
+    config["policy"]["policy_id"] = "post-hoc-changed-shape-policy"
+    path.write_text(json.dumps(config))
+    await lives.end(life_id)
+    with pytest.raises(ValueError, match="frozen artifact"):
+        await pipeline.life(life_id)
 
 
 async def test_automatic_afterlife_checkpoint_uses_actual_reading_without_reopening_source(

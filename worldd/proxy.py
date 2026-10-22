@@ -21,6 +21,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import httpx
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
@@ -204,15 +205,23 @@ class ProxyService:
         self.bindings[hashlib.sha256(token.encode()).hexdigest()] = Binding(
             run_id, bool(raw_enabled)
         )
-        public_ca = self.store.run_dir(run_id) / "world" / "ca.pem"
-        public_ca.parent.mkdir(parents=True, exist_ok=True)
-        public_ca.write_bytes(self.ca.cert_path.read_bytes())
+        public_ca = self.prepare_run(run_id)
         return {
             "server": self.address,
             "username": run_id,
             "password": token,
             "ca_path": str(public_ca),
         }
+
+    def prepare_run(self, run_id):
+        """Publish only the public CA before preflight; issue no agent capability."""
+        self.store.get_run(run_id)
+        public_ca = self.store.run_dir(run_id) / "world" / "ca.pem"
+        public_ca.parent.mkdir(parents=True, exist_ok=True)
+        if public_ca.is_symlink():
+            raise ValueError("The public CA destination must not be a symlink")
+        public_ca.write_bytes(self.ca.cert_path.read_bytes())
+        return public_ca
 
     def bind_browser(self, run_id: str, session_id: str, token: str | None = None):
         configuration = self.bind_run(run_id, token)
@@ -271,31 +280,44 @@ class ProxyService:
         reason = (
             HTTPStatus(status).phrase if status in HTTPStatus._value2member_map_ else "Response"
         )
-        cleaned = {
-            k: v
-            for k, v in headers.items()
-            if k.lower()
-            not in (HOP_HEADERS - {"proxy-authenticate"}) | {"content-length", "content-encoding"}
+        pairs = list(headers.multi_items() if hasattr(headers, "multi_items") else headers.items())
+        representation_only = head_only or status == 304
+        connection_headers = {
+            name.strip().lower()
+            for key, value in pairs
+            if key.lower() == "connection"
+            for name in value.split(",")
         }
+        cleaned = [
+            (k, v)
+            for k, v in pairs
+            if k.lower()
+            not in (HOP_HEADERS - {"proxy-authenticate"}) | {"content-length"} | connection_headers
+            and (k.lower() != "content-encoding" or representation_only)
+        ]
         length = (
             next(
                 (
                     str(value)
-                    for key, value in headers.items()
+                    for key, value in pairs
                     if key.lower() == "content-length" and str(value).isdigit()
                 ),
                 str(len(body)),
             )
-            if head_only
+            if representation_only
             else str(len(body))
         )
-        cleaned.update({"Content-Length": length, "Connection": "close"})
+        if status != 204:
+            cleaned.append(("Content-Length", length))
+        cleaned.append(("Connection", "close"))
         head = (
             f"HTTP/1.1 {status} {reason}\r\n"
-            + "".join(f"{k}: {v}\r\n" for k, v in cleaned.items())
+            + "".join(f"{k}: {v}\r\n" for k, v in cleaned)
             + "\r\n"
         )
-        writer.write(head.encode("iso-8859-1") + (b"" if head_only else body))
+        writer.write(
+            head.encode("iso-8859-1") + (b"" if representation_only or status == 204 else body)
+        )
         await writer.drain()
 
     async def _deny(self, writer, status, rule, detail, kind="policy_deny"):
@@ -348,7 +370,8 @@ class ProxyService:
                         "HTTPS requests must use an origin-form target",
                     )
                     return
-                expected = hostname if port == 443 else f"{hostname}:{port}"
+                authority_host = f"[{hostname}]" if ":" in hostname else hostname
+                expected = authority_host if port == 443 else f"{authority_host}:{port}"
                 if headers.get("host", "").lower() != expected.lower():
                     await self._deny(
                         writer, 403, "tunnel_authority", "HTTPS tunnel authority cannot change"
@@ -403,7 +426,7 @@ class ProxyService:
             authorization = await browser.authorize_network_request(
                 binding.run_id, method, url, headers, body, token=token
             )
-            authorization = {**authorization, "response_private": True}
+            authorization = {**authorization, "response_private": True, "browser_session": True}
             if not authorization.get("allow"):
                 await self._deny(
                     writer,
@@ -438,10 +461,13 @@ class ProxyService:
                 writer, 403, "write_method", "External writes require an approved scoped lease"
             )
             return
+        connection_headers = {
+            name.strip().lower() for name in headers.get("connection", "").split(",")
+        }
         forwarded = {
             key: value
             for key, value in headers.items()
-            if key not in HOP_HEADERS | {"host", "content-length"}
+            if key not in HOP_HEADERS | {"host", "content-length"} | connection_headers
             and not key.startswith("x-world-")
         }
         if authorization is None:
@@ -487,16 +513,23 @@ class ProxyService:
                 )
                 return
             payload = path.read_bytes()
-        response_headers = {
-            **reply.get("headers_subset", {}),
-            "Content-Type": reply.get("content_type", "application/octet-stream"),
-        }
+        response_headers = httpx.Headers(
+            {
+                **reply.get("headers_subset", {}),
+                "Content-Type": reply.get("content_type", "application/octet-stream"),
+            }
+        )
         if authorization and hasattr(self.world.gateway, "consume_response_headers"):
             response_headers.update(
                 self.world.gateway.consume_response_headers(
                     binding.run_id, private_reference or handle
                 )
             )
+        for name in list(response_headers):
+            if name.lower().startswith("x-world-"):
+                del response_headers[name]
+        if reply.get("response_block"):
+            response_headers["X-World-Response-Block-Type"] = reply["response_block"]["type"]
         await self._write(
             writer, reply.get("status", 200), response_headers, payload, head_only=method == "HEAD"
         )

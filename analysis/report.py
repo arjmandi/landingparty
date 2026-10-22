@@ -227,6 +227,7 @@ def build_report(
     *,
     ledger: dict | None = None,
     verification: dict | None = None,
+    measurements: dict | None = None,
 ) -> dict:
     """Summarize a run without contacting the agent, a provider, or the internet.
 
@@ -385,6 +386,16 @@ def build_report(
                 "max_in_flight",
                 "harness_id",
                 "seed",
+                "seed_scope",
+                "mode",
+                "archive_in",
+                "canary",
+                "banner",
+                "continuity",
+                "browser_identity",
+                "captcha_policy",
+                "rubric_disclosed",
+                "binding_id",
             )
         },
         "budget": config.get("budget"),
@@ -452,6 +463,7 @@ def build_report(
             "open_expectations_at_end": end.get("open_expectations_at_end"),
             "completeness": completeness["verdict"],
             "tainted": tainted,
+            "compactions": (run.get("completeness") or {}).get("compaction_count"),
         },
         "columns": {
             "G": {
@@ -479,6 +491,66 @@ def build_report(
             "reason": "a second run, goal slice, block profile, and archive or interleaving evidence are required",
         },
     }
+    goal = config.get("goal") if isinstance(config.get("goal"), dict) else {}
+    report["spec_sheet"] = {
+        "identifiers": report["identifiers"],
+        "version_tuple": version,
+        "mode": report["mode"],
+        "archive_id": version.get("archive_id"),
+        "conditions": report["configuration"],
+        "budget_vector": report["budget"],
+        "seed_scope_verbatim": config.get("seed_scope")
+        or unmeasured("the run did not record its seed-scope statement"),
+        "goal": {
+            "family": report["family"],
+            "goal_text_hash": "sha256:"
+            + sha256(str(goal.get("text", config.get("goal") or "")).encode()).hexdigest(),
+            **{
+                key: goal.get(key, unmeasured("goal protocol metadata was not registered"))
+                for key in (
+                    "goal_class",
+                    "signal_type",
+                    "checklist_hash",
+                    "verifiability_split",
+                    "human_time_estimate",
+                    "messiness",
+                )
+            },
+        },
+        "binding_id": config.get("binding_id"),
+        "costs": report["costs"],
+        "axes": report["axes"],
+        "requests": {
+            "recorded_raw_submissions": report["activity"]["network_submissions"],
+            "recorded_fetched_resources": fetches,
+            "scope": "recorded submissions and distinct captured resources; transport retries require gateway trace",
+        },
+        "bytes": {"fetched": fetched_bytes},
+        "wall": report["time"],
+        "reply_wait": unmeasured("separate harness reply-wait accounting was not recorded"),
+        "human_seconds": ask_summary["human_seconds"],
+        "concurrency": report["activity"]["in_flight_before"],
+        "completeness": completeness,
+        "attrition": report["attrition"],
+        "measurements": {
+            "judge_id": version.get("judge_id"),
+            "observer_id": version.get("observer_id"),
+            "classifier_id": version.get("classifier_id"),
+            "calibrations": [],
+        },
+        "baselines": unmeasured("matched baseline run reports were not supplied"),
+        "checklist_self_assessment": unmeasured(
+            "no recorded checklist self-assessment was delivered"
+        ),
+        "frozen_mitigation_fidelity": unmeasured(
+            "no paired frozen/live mitigation fidelity was measured"
+        ),
+        "comparability": report["comparability"],
+    }
+    if measurements is not None:
+        from .publication import attach_measurements
+
+        attach_measurements(report, measurements)
     return report
 
 
@@ -486,8 +558,26 @@ def render_report(report: dict) -> str:
     """Render the mission report as Markdown, retaining the four score columns."""
     identifiers = report.get("identifiers") or {}
     costs, activity = report.get("costs", {}), report.get("activity", {})
+
+    def column_reading(column):
+        value = report["columns"][column]
+        if value.get("status") == "unmeasured":
+            return "Unmeasured: " + value["reason"]
+        return ", ".join(value.get("readings", {})) or "Recorded observations"
+
+    def cell(parameter, column):
+        value = report["rubric"][parameter][column]
+        if value.get("status") == "unmeasured":
+            return "unmeasured"
+        raw = value.get("value", value.get("ratings", value.get("n")))
+        return str(raw).replace("|", "\\|") + (
+            f" (coverage {value['coverage']:.0%})"
+            if isinstance(value.get("coverage"), (int, float))
+            else ""
+        )
+
     lines = [
-        f"# Mission report: {report.get('run_id', 'unknown')}",
+        f"# Mission report: {report.get('run_id', report.get('life_id', report.get('study_id', 'unknown')))}",
         "",
         (
             f"State: {report.get('state')}. Mode: {report.get('mode')}. "
@@ -519,9 +609,9 @@ def render_report(report: dict) -> str:
             "| Column | Observation |",
             "|---|---|",
             "| G — grounded | Recorded spend, typed blocks, world-resolved expectations |",
-            "| V — verifiable | Record and ledger checks; citation support remains unmeasured |",
-            f"| J — prejudged | Unmeasured: {report['columns']['J']['reason']} |",
-            f"| S — self-report | Unmeasured: {report['columns']['S']['reason']} |",
+            f"| V — verifiable | {column_reading('V')} |",
+            f"| J — prejudged | {column_reading('J')} |",
+            f"| S — self-report | {column_reading('S')} |",
             "",
             "## Life rubric",
             "",
@@ -530,12 +620,19 @@ def render_report(report: dict) -> str:
         ]
     )
     lines.extend(
-        f"| {name} | unmeasured | unmeasured | unmeasured | unmeasured |" for name in PARAMETERS
+        "| "
+        + name
+        + " | "
+        + " | ".join(cell(name, column) for column in ("G", "V", "J", "S"))
+        + " |"
+        for name in PARAMETERS
     )
     lines.extend(
         [
             "",
-            "A run-level activity summary is not a scored life. Unmeasured values do not enter an aggregate.",
+            "Revealed parameters are reported separately; unmeasured values do not enter an aggregate."
+            if report.get("life_id")
+            else "A run-level activity summary is not a scored life. Unmeasured values do not enter an aggregate.",
             "",
             "## Casualty report",
             "",
@@ -549,6 +646,45 @@ def render_report(report: dict) -> str:
     )
     lines.extend(
         f"- {name}: {value['reason']}." for name, value in report.get("unmeasured", {}).items()
+    )
+    from .publication import _flatten
+
+    readings = [
+        {**row, "column": column}
+        for column, data in report.get("columns", {}).items()
+        for row in _flatten(data.get("readings", {}))
+    ]
+    if readings:
+        lines.extend(
+            [
+                "",
+                "## Measured readings",
+                "",
+                "| Column | Metric | Reading | Reason |",
+                "|---|---|---|---|",
+            ]
+        )
+        for row in readings:
+            fields = (
+                row["column"],
+                row["metric"],
+                row["value"] if row["value"] is not None else row["status"],
+                row.get("reason") or "",
+            )
+            lines.append(
+                "| "
+                + " | ".join(str(value).replace("|", "\\|").replace("\n", " ") for value in fields)
+                + " |"
+            )
+    lines.extend(
+        [
+            "",
+            "## Spec sheet",
+            "",
+            "```json",
+            json.dumps(report.get("spec_sheet", {}), ensure_ascii=False, sort_keys=True, indent=2),
+            "```",
+        ]
     )
     analysis = report.get("analysis") or {}
     if analysis.get("stages"):

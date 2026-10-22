@@ -26,12 +26,13 @@ from .beliefs import (
     _public,
     _stamp,
     _time,
+    formation_records,
 )
 from .util import blocked, identifier, now
 
 SCHEMA_ID = "belief@1"
 VALIDATOR_ID = "structural-private-flags@1"
-KERNEL_ID = "mechanical-depth3-n50-assumptions4-open64@1"
+KERNEL_ID = "mechanical-depth3-n50-assumptions4-open64-observed-intervals@2"
 SLOT_SUGGESTER_ID = "copula-slots@1"
 _FINAL_RUN_STATES = {"sealed", "killed", "ended"}
 _APPROVED = {"approved", "deposited", "complete", "held", True}
@@ -564,7 +565,22 @@ class BeliefService:
         ]
 
     @staticmethod
-    def _attachments(state: dict, observation: dict) -> list[str]:
+    def _attachments(
+        state: dict, observation: dict, observed_from: dict | None = None
+    ) -> list[str]:
+        if observed_from is None:
+            observed_from = {}
+            for belief_id, record in state.items():
+                triple = record.get("triple")
+                starts = [
+                    interval["valid_from"]
+                    for interval in record.get("kernel", {}).get("observed_intervals", [])
+                    if triple
+                    and interval.get("slot")
+                    == {"subject": triple["subject"], "predicate": triple["predicate"]}
+                ]
+                if starts:
+                    observed_from[belief_id] = min(starts, key=_time)
         targets = []
         routes = {observation.get(key) for key in ("action_id", "about_action", "ticket_id")}
         routes.discard(None)
@@ -583,15 +599,132 @@ class BeliefService:
                 and old_triple
                 and triple.get("subject") == old_triple["subject"]
                 and triple.get("predicate") == old_triple["predicate"]
-                and _time(record["valid_from"]) <= instant
-                and (not record.get("valid_to") or instant < _time(record["valid_to"]))
+                and (
+                    _time(record["valid_from"]) <= instant
+                    and (not record.get("valid_to") or instant < _time(record["valid_to"]))
+                    or belief_id in observed_from
+                    and _time(observed_from[belief_id]) <= instant
+                )
             )
             if explicit == belief_id or routes & evidence_routes or structured:
                 targets.append(belief_id)
         return sorted(targets)
 
-    def fold(self, run_id: str, as_of=None, *, valid_at=None, include_flags=False) -> list[dict]:
-        state = {record["id"]: record for record in self.beliefs(run_id).fold(as_of)}
+    @staticmethod
+    def _append_observed_value(record, observation):
+        """Collect source observations, without asserting an agent-held replacement."""
+        if record["change_class"] in {"static", "false_premise"}:
+            return
+        triple, original = observation.get("triple"), record.get("triple")
+        matching = (
+            isinstance(triple, dict)
+            and original
+            and triple.get("subject") == original["subject"]
+            and triple.get("predicate") == original["predicate"]
+            and "object" in triple
+        )
+        if not matching and "value" not in observation:
+            return
+        evidence = {
+            "observation_ref": observation["observation_ref"],
+            "observed_at": observation["observed_at"],
+            "recorded_at": observation["recorded_at"],
+            "class": observation.get("class", "observed"),
+            "provenance": copy.deepcopy(observation.get("provenance", {})),
+        }
+        for key in ("action_id", "about_action", "ticket_id", "source_ref", "source_run_id"):
+            if key in observation:
+                evidence[key] = copy.deepcopy(observation[key])
+        interval = {
+            "kernel_id": KERNEL_ID,
+            "mechanical": True,
+            "agent_endorsed": False,
+            "slot": {"subject": original["subject"], "predicate": original["predicate"]}
+            if matching
+            else {"belief_id": record["id"]},
+            "value": copy.deepcopy(triple["object"] if matching else observation["value"]),
+            "valid_from": observation["observed_at"],
+            "valid_to": None,
+            "observation_ref": observation["observation_ref"],
+            "observations": [evidence],
+        }
+        if matching:
+            interval["triple"] = copy.deepcopy(triple)
+        # Open intermediate points also keep structured attachment possible
+        # after the original claim closes. The final pass derives exclusive
+        # value intervals from the complete world-time order, including imports.
+        record["kernel"]["observed_intervals"].append(interval)
+        return interval["valid_from"] if matching else None
+
+    @staticmethod
+    def _observed_value_intervals(intervals):
+        events, seen = [], set()
+        for interval in intervals:
+            for observation in interval["observations"]:
+                event = {
+                    "slot": interval["slot"],
+                    "value": interval["value"],
+                    "observation": observation,
+                }
+                if "triple" in interval:
+                    event["triple"] = interval["triple"]
+                identity = _canonical(event)
+                if identity not in seen:
+                    seen.add(identity)
+                    events.append(event)
+        events.sort(
+            key=lambda event: (
+                _time(event["observation"]["observed_at"]),
+                event["observation"]["observation_ref"],
+                _canonical(event),
+            )
+        )
+        result, active = [], {}
+        for event in events:
+            slot, observation = _canonical(event["slot"]), event["observation"]
+            previous = active.get(slot)
+            if previous is not None and _canonical(previous["value"]) == _canonical(event["value"]):
+                previous["observations"].append(copy.deepcopy(observation))
+                continue
+            if previous is not None:
+                previous["valid_to"] = observation["observed_at"]
+            interval = {
+                "kernel_id": KERNEL_ID,
+                "mechanical": True,
+                "agent_endorsed": False,
+                "slot": copy.deepcopy(event["slot"]),
+                "value": copy.deepcopy(event["value"]),
+                "valid_from": observation["observed_at"],
+                "valid_to": None,
+                "observation_ref": observation["observation_ref"],
+                "observations": [copy.deepcopy(observation)],
+            }
+            if "triple" in event:
+                interval["triple"] = copy.deepcopy(event["triple"])
+            active[slot] = interval
+            result.append(interval)
+        return result
+
+    def fold(
+        self,
+        run_id: str,
+        as_of=None,
+        *,
+        valid_at=None,
+        include_flags=False,
+        _semantic_events=None,
+        _observation_rows=None,
+    ) -> list[dict]:
+        semantic = (
+            self.beliefs(run_id).fold(as_of)
+            if _semantic_events is None
+            else [
+                _public(record)
+                for record in self.beliefs(run_id)._fold(_semantic_events, as_of).values()
+            ]
+        )
+        state = {record["id"]: record for record in semantic}
+        observed_from = {}
         for record in state.values():
             record["kernel"] = record.pop(
                 "imported_kernel",
@@ -604,13 +737,32 @@ class BeliefService:
                 },
             )
             record["kernel"].setdefault("flags", [])
-        for observation in self._observations(run_id, as_of):
-            attached = self._attachments(state, observation)[:50]
+            record["kernel"].setdefault("observed_intervals", [])
+            original = record.get("triple")
+            starts = [
+                interval["valid_from"]
+                for interval in record["kernel"]["observed_intervals"]
+                if original
+                and interval.get("slot")
+                == {"subject": original["subject"], "predicate": original["predicate"]}
+            ]
+            if starts:
+                observed_from[record["id"]] = min(starts, key=_time)
+        for observation in sorted(
+            (self._observations(run_id, as_of) if _observation_rows is None else _observation_rows),
+            key=lambda row: (_time(row["observed_at"]), row["observation_ref"]),
+        ):
+            attached = self._attachments(state, observation, observed_from)[:50]
             affected = set(attached)
             contradictions = []
             for belief_id in attached:
                 record = state[belief_id]
                 kernel = record["kernel"]
+                start = self._append_observed_value(record, observation)
+                if start is not None:
+                    observed_from[belief_id] = min(
+                        observed_from.get(belief_id, start), start, key=_time
+                    )
                 ref = observation["observation_ref"]
                 ticket = observation.get("ticket_id")
                 if ticket in record["assumptions"] and "outcome" in observation:
@@ -718,6 +870,9 @@ class BeliefService:
         instant = _time(valid_at) if valid_at is not None else None
         for belief_id in sorted(state):
             record = state[belief_id]
+            record["kernel"]["observed_intervals"] = self._observed_value_intervals(
+                record["kernel"]["observed_intervals"]
+            )
             if instant is not None and not (
                 _time(record["valid_from"]) <= instant
                 and (not record.get("valid_to") or instant < _time(record["valid_to"]))
@@ -729,6 +884,52 @@ class BeliefService:
                 record["kernel"]["flags"] = []
             result.append(record)
         return result
+
+    def formation_fold(self, run_id, as_of=None):
+        return formation_records(
+            self.fold(run_id, as_of),
+            reflection_policy=self._config(run_id).get("reflection_policy", "none"),
+        )
+
+    def checkpoint_fold(self, run_id, record_seq):
+        """Fold an exact authoritative record prefix, including timestamp ties."""
+        if not isinstance(record_seq, int) or isinstance(record_seq, bool) or record_seq < 0:
+            raise BeliefValidationError("checkpoint record sequence must be nonnegative")
+        records = self.store.records(run_id)
+        if records and record_seq > records[-1]["seq"]:
+            raise BeliefValidationError("checkpoint is beyond the source record")
+        prefix = [record for record in records if record["seq"] <= record_seq]
+        versions = {
+            record.get("version_id") for record in prefix if record["kind"].startswith("belief_")
+        }
+        imports = [
+            record
+            for record in prefix
+            if record["kind"] in {"belief_bundle_import", "belief_control_mount"}
+        ]
+        imported_limit = max((record.get("belief_seq", 0) for record in imports), default=0)
+        events = [
+            event
+            for event in self.beliefs(run_id)._records()
+            if event["seq"] <= imported_limit or event["belief"]["version_id"] in versions
+        ]
+        refs = {
+            record.get("observation_ref")
+            for record in prefix
+            if record["kind"] == "belief_observation"
+        }
+        refs.update(ref for record in imports for ref in record.get("observation_refs", []))
+        observations = [row for row in self._observations(run_id) if row["observation_ref"] in refs]
+        folded = self.fold(run_id, _semantic_events=events, _observation_rows=observations)
+        return {
+            "beliefs": folded,
+            "semantic_events": events,
+            "observations": observations,
+            "record_seq": record_seq,
+            "record_hash": prefix[-1]["hash"] if prefix else None,
+            "boundary_policy": "authoritative_record_prefix@1",
+            "legacy_import_boundary_missing": any("belief_seq" not in record for record in imports),
+        }
 
     async def observe(self, run_id: str, observation: dict) -> dict:
         """Attach a trusted world observation, idempotently; never accept tool input here."""
@@ -912,11 +1113,10 @@ class BeliefService:
                 )
                 if old is None:
                     raise KeyError(params["id"])
-                if old["author"] == "reflector" and author == "agent":
-                    if payload == {"status": "held"}:
-                        result = beliefs.reconfirm(params["id"])
-                    else:
-                        result = beliefs.revise(params["id"], {**payload, "author": "agent"})
+                if payload == {"status": "held"} and author == "agent":
+                    result = beliefs.reconfirm(params["id"])
+                elif old["author"] == "reflector" and author == "agent":
+                    result = beliefs.revise(params["id"], {**payload, "author": "agent"})
                 else:
                     result = beliefs.revise(params["id"], payload)
             elif tool == "retract":
@@ -936,6 +1136,7 @@ class BeliefService:
                 "belief_" + result["op"],
                 belief_id=result["id"],
                 version_id=result["version_id"],
+                belief_seq=len(beliefs._records()),
                 action_id=action_id,
             )
             if tool == "revise" and isinstance(payload.get("revision"), dict):
@@ -1001,7 +1202,26 @@ class BeliefService:
                 (record for record in self.fold(run_id) if record["id"] == params["id"]), None
             )
             if record is None:
-                raise KeyError(params["id"])
+                metadata = self._resolve_evidence(run_id, params["id"])
+                if metadata is None:
+                    raise KeyError(params["id"])
+                fields = (
+                    "recorded_at",
+                    "source_run_id",
+                    "entity_type",
+                    "evidence_origin",
+                    "class",
+                    "hash",
+                    "bytes",
+                    "injection_score",
+                    "imported_from",
+                )
+                return {
+                    "id": params["id"],
+                    "provenance": {key: metadata[key] for key in fields if key in metadata},
+                    "resolution": "provenance_only",
+                    "content_available": False,
+                }
             return record
         if query == "history":
             return beliefs.history(params["id"])
@@ -1060,6 +1280,8 @@ class BeliefService:
             run_id,
             "belief_prior_installed",
             belief_id=rule["id"],
+            version_id=rule["version_id"],
+            belief_seq=len(beliefs._records()),
             condition="source_trust@1",
             initial_condition=True,
         )
@@ -1146,19 +1368,33 @@ class BeliefService:
             heads[skill["name"]] = skill
         return [heads[name] for name in sorted(heads)]
 
-    def export_bundle(self, run_id: str, *, tuple_: dict | None = None, _continuity=False) -> dict:
+    def export_bundle(
+        self, run_id: str, *, tuple_: dict | None = None, _continuity=False, _formation_only=False
+    ) -> dict:
         beliefs = self.beliefs(run_id)
         events = beliefs._records()
         heads = self.fold(run_id)
+        eligibility = (
+            formation_records(
+                heads, reflection_policy=self._config(run_id).get("reflection_policy", "none")
+            )
+            if _formation_only
+            else None
+        )
         selected = {
             record["id"]
             for record in heads
             if _continuity
             or (
-                record["status"] == "held"
-                and (record["rank"] >= 3 or record["kind"] in {"strategy", "self"})
+                (record["status"] == "held" and (record["rank"] >= 3 or record["kind"] == "self"))
+                or (
+                    record["kind"] == "strategy"
+                    and record["status"] not in {"proposed", "conditional"}
+                )
             )
         }
+        if eligibility is not None:
+            selected = {record["id"] for record in eligibility["items"]}
         deltas = []
         previous = "sha256:" + "0" * 64
         for event in events:
@@ -1191,6 +1427,15 @@ class BeliefService:
                         "source_run_id": resolved.get("run_id", run_id),
                         "entity_type": resolved.get("entity_type", "observation"),
                     }
+                    score = resolved.get("injection_score")
+                    for key in ("resource", "reply"):
+                        envelope = resolved.get(key)
+                        if isinstance(envelope, dict) and isinstance(
+                            envelope.get("provenance"), dict
+                        ):
+                            score = envelope["provenance"].get("injection_score", score)
+                    if score is not None:
+                        evidence_index[ref]["injection_score"] = score
                     if resolved.get("evidence_origin") == "workspace_note":
                         evidence_index[ref].update(
                             {
@@ -1231,6 +1476,10 @@ class BeliefService:
                 if record["id"] in selected and record["kind"] == "self"
             ],
         }
+        if eligibility is not None:
+            bundle["formation_eligibility"] = {
+                key: value for key, value in eligibility.items() if key != "items"
+            }
         bundle["signature"] = hmac.new(
             self._bundle_key, _canonical(bundle).encode(), hashlib.sha256
         ).hexdigest()
@@ -1238,6 +1487,10 @@ class BeliefService:
             run_id, "belief_bundle_export", bundle_hash=_hash(bundle), count=len(selected)
         )
         return bundle
+
+    def export_formation_bundle(self, run_id, *, tuple_=None):
+        """Sign the complete eligible formation projection, including its low ranks."""
+        return self.export_bundle(run_id, tuple_=tuple_, _formation_only=True)
 
     def export_continuity(self, run_id: str) -> dict:
         """Complete session memory; unlike pattern transfer, this drops no belief."""
@@ -1471,6 +1724,8 @@ class BeliefService:
             source_run_id=supplied["manifest"]["source_run_id"],
             bundle_hash=_hash(bundle),
             count=len(heads),
+            belief_seq=len(beliefs._records()),
+            observation_refs=[row["observation_ref"] for row in supplied.get("observations", [])],
         )
         self.render(run_id)
         return {

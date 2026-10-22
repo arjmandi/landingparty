@@ -22,9 +22,11 @@ class WorldFixture:
 
 
 @pytest.fixture
-def world(tmp_path):
+def world(tmp_path, monkeypatch):
     world = WorldFixture(tmp_path)
     clock = lambda: datetime(2026, 10, 22, 12, tzinfo=UTC)
+    monkeypatch.setattr("worldd.storage.utc_now", lambda: clock().isoformat())
+    monkeypatch.setattr("worldd.kernel.now", lambda: clock().isoformat())
     beliefs = BeliefService(world, clock=clock)
     world.services["beliefs"] = beliefs
     yield world, clock
@@ -280,3 +282,76 @@ async def test_companion_recovery_worker_runs_once_for_each_new_idle_world_conte
         assert {request["tag"] for request in calls} == {"model.reflector"}
     finally:
         await service.aclose()
+
+
+async def test_no_flags_arm_suppresses_excess_self_inference_diagnostics(world):
+    world, clock = world
+    run_id = run(world, validator_policy_id="structural-no-flags@1")
+    service = ReflectionService(world, clock=clock)
+    try:
+        operations = [
+            {
+                "tool": "believe",
+                "params": {
+                    "record": {
+                        "kind": "rule",
+                        "claim": f"Inference {index}",
+                        "rank": 4,
+                        "evidence": [{"ref": "a_evidence", "class": "self_inference"}],
+                    }
+                },
+            }
+            for index in range(6)
+        ]
+        await service._apply(run_id, operations)
+        assert not [row for row in service.database.journal(run_id) if row["kind"] == "belief_flag"]
+        assert all(
+            not row["belief"]["flags"]
+            for row in world.services["beliefs"].beliefs(run_id)._records()
+        )
+    finally:
+        service.database.close()
+
+
+async def test_companion_context_biases_whole_open_ticket_entity_and_ignores_closed_assumptions(
+    world,
+):
+    from types import SimpleNamespace
+
+    world, clock = world
+    run_id = run(world, "companion")
+    beliefs = world.services["beliefs"]
+    world.store.append_record(run_id, "ask_opened", ticket_id="t_open", state="open")
+    for subject, assumptions in (("A unrelated", []), ("Z harbour", ["t_open"]), ("Z harbour", [])):
+        result = await beliefs.handle(
+            run_id,
+            "a_context",
+            "believe",
+            {
+                "record": {
+                    "kind": "fact",
+                    "claim": subject + " is open",
+                    "rank": 3,
+                    "triple": {"subject": subject, "predicate": "state", "object": "open"},
+                    "assumptions": assumptions,
+                    "evidence": [{"ref": "a_evidence", "class": "observed"}],
+                }
+            },
+        )
+        assert result["kind"] == "result", result
+    world.services["asks"] = SimpleNamespace(
+        list_tickets=lambda source: [
+            {"ticket_id": "t_open", "state": "open"},
+            {"ticket_id": "t_closed", "state": "approved"},
+        ]
+    )
+    service = ReflectionService(world, clock=clock)
+    try:
+        context = service._context(run_id, {"type": "idle"}, companion=True)
+        assert context["open_ticket_ids"] == ["t_open"]
+        assert [row["triple"]["subject"] for row in context["beliefs"][:2]] == [
+            "Z harbour",
+            "Z harbour",
+        ]
+    finally:
+        service.database.close()

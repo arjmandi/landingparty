@@ -15,6 +15,8 @@ SERVICE_MODULES = [
     ("forecast", "worldd.forecast", "ForecastService"),
     ("reflection", "worldd.reflection", "ReflectionService"),
     ("footprint", "worldd.footprint", "FootprintService"),
+    ("incident_reports", "worldd.public_identity", "IncidentReportService"),
+    ("workspace_checkpoints", "worldd.checkpoints", "WorkspaceCheckpointService"),
     ("communications", "worldd.communications", "CommunicationsService"),
     ("market", "worldd.market", "MarketService"),
     ("perception", "worldd.perception", "PerceptionService"),
@@ -29,6 +31,7 @@ SERVICE_MODULES = [
     ("surveys", "worldd.surveys", "SurveyService"),
     ("preflight", "worldd.preflight", "PreflightService"),
     ("pipeline", "analysis.pipeline", "PostRunPipeline"),
+    ("judge_canaries", "worldd.judge_canaries", "JudgeCanaryService"),
     ("studies", "worldd.studies", "StudyService"),
 ]
 
@@ -42,6 +45,6 @@ def initialize(world):
         setattr(world, name, world.services[name])
 
 
-async def invoke(service, method, *args, **kwargs):
+async def invoke(service, method, /, *args, **kwargs):
     result = getattr(service, method)(*args, **kwargs)
     return await result if inspect.isawaitable(result) else result

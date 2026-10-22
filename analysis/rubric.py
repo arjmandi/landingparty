@@ -11,11 +11,21 @@ import json
 import math
 from collections import Counter
 from hashlib import sha256
+from statistics import mean
 
 from .report import PARAMETERS, unmeasured
 
 CHECKPOINTS = {"d7", "d14", "d28", "end", "after30", "after90"}
 _EXCLUDED_G = {"sponsor", "sibling", "probe", "agent", "self", "researcher"}
+SHAPES = {
+    "pleasant_executive",
+    "demanding_executive",
+    "hermit_maker",
+    "socialite",
+    "busy_nobody",
+    "drifter",
+    "whole_life",
+}
 
 
 def _policy_hash(policy):
@@ -37,6 +47,33 @@ def validate_rubric_policy(policy: dict) -> list[str]:
         errors.append("coverage may not be below the design's 0.6 floor")
     if not isinstance(n_min, int) or isinstance(n_min, bool) or n_min < 5:
         errors.append("at least five events per evidence class are required")
+    names = []
+    for shape in policy.get("shapes", []):
+        names.append(shape.get("name"))
+        if (
+            shape.get("name") not in SHAPES
+            or not isinstance(shape.get("all"), list)
+            or not shape["all"]
+        ):
+            errors.append("shape rules require a named design shape and nonempty predicates")
+            continue
+        for predicate in shape["all"]:
+            value = predicate.get("threshold")
+            if (
+                predicate.get("checkpoint", "current") not in {"current", *CHECKPOINTS}
+                or predicate.get("parameter") not in PARAMETERS
+                or predicate.get("column") not in {"G", "V", "J"}
+                or predicate.get("field", "value") not in {"value", "mean_rating", "rate", "n"}
+                or predicate.get("op") not in {"gte", "lte", "eq"}
+                or not isinstance(value, (float, int))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+            ):
+                errors.append(
+                    "shape predicates require exact checkpoint, parameter, column, field, operator and finite threshold"
+                )
+    if len(names) != len(set(names)):
+        errors.append("shape names must be unique")
     for parameter in PARAMETERS:
         for column in ("G", "V"):
             spec = policy.get("parameters", {}).get(parameter, {}).get(column)
@@ -54,6 +91,69 @@ def validate_rubric_policy(policy: dict) -> list[str]:
                 if not anchor.get("description") or not anchor.get("all"):
                     errors.append(f"{parameter}/{column}: anchors require named event predicates")
     return errors
+
+
+def classify_shape(rubric, policy, *, checkpoint, checkpoint_reports=()):
+    """Evaluate frozen shape predicates on actually measured checkpoints only."""
+    matrices = {report["checkpoint"]: report["rubric"] for report in checkpoint_reports}
+    matrices[checkpoint] = matrices["current"] = rubric
+    readings, matched = [], []
+    for rule in policy.get("shapes", []):
+        predicates = []
+        for predicate in rule["all"]:
+            point = predicate.get("checkpoint", "current")
+            cell = (
+                matrices.get(point, {}).get(predicate["parameter"], {}).get(predicate["column"], {})
+            )
+            value = cell.get(predicate.get("field", "value"))
+            if (
+                cell.get("status") != "measured"
+                or not isinstance(value, (float, int))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+            ):
+                predicates.append(
+                    {**predicate, **unmeasured("required measured checkpoint cell is absent")}
+                )
+                continue
+            expected = predicate["threshold"]
+            met = {"gte": value >= expected, "lte": value <= expected, "eq": value == expected}[
+                predicate["op"]
+            ]
+            predicates.append({**predicate, "status": "measured", "observed": value, "met": met})
+        complete = all(row["status"] == "measured" for row in predicates)
+        met = complete and all(row["met"] for row in predicates)
+        readings.append(
+            {
+                "name": rule["name"],
+                "status": "measured" if complete else "unmeasured",
+                "met": met,
+                "predicates": predicates,
+            }
+        )
+        if met:
+            matched.append(rule["name"])
+    if not policy.get("shapes"):
+        cells = [rubric[parameter][column] for parameter in PARAMETERS for column in ("G", "V")]
+        if all(cell.get("status") == "measured" and cell.get("value", 0) >= 3 for cell in cells):
+            matched.append("whole_life")
+    if len(matched) == 1:
+        return {
+            "status": "measured",
+            "value": matched[0],
+            "rules": readings,
+            "rule_policy_hash": _policy_hash(policy),
+        }
+    return {
+        **unmeasured(
+            "overlapping registered shape predicates"
+            if matched
+            else "no uniquely satisfied complete registered shape rule"
+        ),
+        "matches": matched,
+        "rules": readings,
+        "rule_policy_hash": _policy_hash(policy),
+    }
 
 
 def _eligible_grounded(event, binding):
@@ -123,6 +223,7 @@ def score_life(
     interview: dict | None = None,
     t0: dict | None = None,
     baselines: dict | None = None,
+    checkpoint_reports=(),
 ) -> dict:
     if checkpoint not in CHECKPOINTS:
         raise ValueError("unknown life-rubric checkpoint")
@@ -216,6 +317,17 @@ def score_life(
                 "status": "measured",
                 "n": len(judged),
                 "ratings": [event.get("value") for event in judged],
+                "mean_rating": mean(event["value"] for event in judged)
+                if all(
+                    isinstance(event.get("value"), (float, int))
+                    and not isinstance(event["value"], bool)
+                    and math.isfinite(event["value"])
+                    for event in judged
+                )
+                else None,
+                "rate": sum(bool(event.get("success")) for event in judged) / len(judged)
+                if all(isinstance(event.get("success"), bool) for event in judged)
+                else None,
                 "kappa": kappa,
                 "exploratory": not calibrated,
             }
@@ -237,9 +349,8 @@ def score_life(
             if stage >= required_stage and all(value["status"] == "measured" for value in values)
             else unmeasured("all four parameters must be measured at the required stage")
         )
-    all_values = [rubric[parameter][column] for parameter in PARAMETERS for column in ("G", "V")]
-    whole = all(
-        value.get("status") == "measured" and value.get("value", 0) >= 3 for value in all_values
+    shape = classify_shape(
+        rubric, policy, checkpoint=checkpoint, checkpoint_reports=checkpoint_reports
     )
     return {
         "life_id": life.get("life_id"),
@@ -251,9 +362,8 @@ def score_life(
         "rubric": rubric,
         "coverage": coverage,
         "aggregates": aggregates,
-        "shape": "whole_life"
-        if whole
-        else unmeasured("other shapes require a registered classification rule"),
+        "shape": shape["value"] if shape["status"] == "measured" else shape,
+        "shape_classification": shape,
         "sponsor_series": sponsor,
         "t0": t0 if t0 is not None else unmeasured("t=0 fingerprint absent"),
         "baselines": baselines

@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from worldd.gateway import Gateway
-from worldd.perception import PerceptionService
+from worldd.perception import PerceptionService, default_pricing_identity
 from worldd.provider_boundary import submit_payment, submit_provider, submit_search, submit_venue
 from worldd.storage import Store
 
@@ -39,6 +39,7 @@ async def test_paid_vendor_uses_gateway_and_private_child_archive(tmp_path, monk
     run_id = store.create_run(
         {
             "stage": 2,
+            "perception_pricing": default_pricing_identity(),
             "research_mode": "research",
             "budget": {"usd": 1, "wall_s": 300},
             "mode": "live",

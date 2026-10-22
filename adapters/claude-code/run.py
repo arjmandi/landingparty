@@ -9,6 +9,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from adapters.environment import agent_environment
+
 
 def command(binding_dir: Path, briefing: str, goal: str = "") -> list[str]:
     return [
@@ -31,7 +33,7 @@ def command(binding_dir: Path, briefing: str, goal: str = "") -> list[str]:
 
 
 def runtime_environment(binding_dir: Path, source=None):
-    environment = dict(os.environ if source is None else source)
+    environment = agent_environment(os.environ if source is None else source)
     settings = json.loads((binding_dir / "world.settings.json").read_text())
     run_id = settings["env"]["WORLD_RUN_ID"]
     token = environment.get("WORLD_RUN_TOKEN")
@@ -51,6 +53,19 @@ def runtime_environment(binding_dir: Path, source=None):
     ):
         environment.pop(name, None)
     return environment
+
+
+def transcript_attrition(path: Path) -> dict:
+    """Actual stream compactions for this launcher's fresh-context invocation."""
+    from analysis.completeness import parse_transcript
+
+    parsed = parse_transcript(path)
+    return {
+        "compactions": parsed["compaction_count"] if not parsed["malformed_lines"] else None,
+        "resumed_context_messages": 0,
+        "resumed_context_bytes": 0,
+        "transcript_malformed_lines": parsed["malformed_lines"],
+    }
 
 
 def main(argv: list[str] | None = None) -> int:

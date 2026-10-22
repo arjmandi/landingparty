@@ -17,14 +17,36 @@ class LateEvents:
             "CREATE TABLE IF NOT EXISTS events "
             "(event_id TEXT PRIMARY KEY,run_id TEXT,life_id TEXT,payload TEXT,delivered_to TEXT)"
         )
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(events)")}
+        if "source_event_id" not in columns:
+            self.db.execute("ALTER TABLE events ADD COLUMN source_event_id TEXT")
+        self.db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS late_source_event ON events(source_event_id) "
+            "WHERE source_event_id IS NOT NULL"
+        )
         (data_dir / "late-events.sqlite3").chmod(0o600)
 
-    def append(self, run_id, life_id, event):
-        event = {**event, "event_id": identifier("e"), "run_id": run_id, "ts": now()}
+    def append(self, run_id, life_id, event, *, source_event_id=None, observed_at=None):
+        event = {
+            **event,
+            "event_id": identifier("e"),
+            "run_id": run_id,
+            "ts": observed_at or now(),
+        }
+        if source_event_id:
+            event["source_event_id"] = source_event_id
         self.db.execute(
-            "INSERT INTO events VALUES(?,?,?,?,NULL)",
-            (event["event_id"], run_id, life_id, canonical(event)),
+            "INSERT OR IGNORE INTO events "
+            "(event_id,run_id,life_id,payload,delivered_to,source_event_id) "
+            "VALUES(?,?,?,?,NULL,?)",
+            (event["event_id"], run_id, life_id, canonical(event), source_event_id),
         )
+        if source_event_id:
+            return json.loads(
+                self.db.execute(
+                    "SELECT payload FROM events WHERE source_event_id=?", (source_event_id,)
+                ).fetchone()[0]
+            )
         return event
 
     def pending(self, life_id):

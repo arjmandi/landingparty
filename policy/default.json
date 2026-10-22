@@ -1,7 +1,7 @@
 {
   "policy_id": "read-only-v0.1",
   "user_agent": "landing-party/0.1",
-  "provider_hosts": ["api.openai.com", "api.anthropic.com", "api.search.brave.com"],
+  "provider_hosts": ["api.openai.com", "api.anthropic.com", "api.search.brave.com", "api.exa.ai", "api.mistral.ai"],
   "denied_hosts": [],
   "researcher_hosts": [],
   "domain_interval_s": 2.0,

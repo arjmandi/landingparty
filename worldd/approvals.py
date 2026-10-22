@@ -38,21 +38,26 @@ def redact(value):
     if isinstance(value, dict):
         return {
             key: "[redacted]"
-            if key.lower()
+            if key.lower().replace("-", "").replace("_", "")
             in {
                 "password",
                 "authorization",
-                "x-api-key",
-                "api_key",
-                "access_token",
-                "refresh_token",
+                "xapikey",
+                "apikey",
+                "accesstoken",
+                "refreshtoken",
+                "idtoken",
+                "csrftoken",
+                "clientsecret",
+                "privatekey",
+                "token",
                 "secret",
                 "credential",
                 "credentials",
                 "cookie",
                 "cookies",
-                "storage_state",
-                "storage_state_ref",
+                "storagestate",
+                "storagestateref",
             }
             else redact(item)
             for key, item in value.items()
@@ -343,6 +348,8 @@ class PaymentMandateLedger:
         self.clock = clock or (lambda: datetime.now(UTC))
         endpoint = os.environ.get("WORLD_PAYMENT_API_URL")
         self.adapter = adapter or (HTTPPaymentAdapter(endpoint) if endpoint else None)
+        self._active = {}
+        self._stopping = set()
         with self.database.lock:
             self.database.db.execute("""CREATE TABLE IF NOT EXISTS payment_mandates (
                 mandate_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, merchant TEXT NOT NULL,
@@ -466,6 +473,40 @@ class PaymentMandateLedger:
         ]
 
     async def pay(
+        self,
+        run_id,
+        action_id,
+        mandate_id,
+        action,
+        amount,
+        *,
+        adapter=None,
+        category="paid_content",
+    ):
+        if run_id in self._stopping:
+            raise ValueError("This run is stopping payments")
+        task = asyncio.current_task()
+        self._active.setdefault(run_id, set()).add(task)
+        try:
+            return await self._pay(
+                run_id, action_id, mandate_id, action, amount, adapter=adapter, category=category
+            )
+        finally:
+            self._active[run_id].discard(task)
+            if not self._active[run_id]:
+                self._active.pop(run_id, None)
+
+    async def stop_run(self, run_id):
+        self._stopping.add(run_id)
+        tasks = [
+            task for task in self._active.get(run_id, ()) if task is not asyncio.current_task()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _pay(
         self,
         run_id,
         action_id,
@@ -725,6 +766,8 @@ class PaymentMandateLedger:
             self.store.update_run(row["run_id"], tainted=True)
 
     async def aclose(self):
+        for run_id in list(self._active):
+            await self.stop_run(run_id)
         closer = getattr(self.adapter, "aclose", None)
         if closer:
             outcome = closer()

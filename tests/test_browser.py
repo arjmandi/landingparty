@@ -79,6 +79,83 @@ async def test_actual_backend_never_silently_disables_sandbox_or_tls():
     # transport fixture suite. The adapter supplies chromium_sandbox=True.
 
 
+async def test_operator_return_in_flight_is_drained_before_seal(world):
+    run_id = world.run()
+    service, backend = browser(world)
+    session_id = await open_session(world, service, run_id)
+    backend.challenge = "mfa"
+    pending = await service.handle(
+        run_id, "a_doc", "goto", {"session_id": session_id, "url": "https://fixture.test/doc"}
+    )
+    world.services["asks"].answer(pending["ticket_id"], "approve")
+    service.takeover_start(session_id, pending["ticket_id"])
+    started = asyncio.Event()
+
+    async def paused_url(handle):
+        started.set()
+        await asyncio.Event().wait()
+
+    backend.current_url = paused_url
+    task = asyncio.create_task(service.takeover_done(session_id))
+    await started.wait()
+    world.store.update_run(run_id, state="stopping")
+    await asyncio.wait_for(service.stop_run(run_id), 2)
+    assert task.cancelled()
+    assert backend.handles[0]["closed"]
+    world.store.append_record(run_id, "seal")
+    world.store.update_run(run_id, state="sealed")
+    assert world.store.records(run_id)[-1]["kind"] == "seal"
+    assert not service._operations
+    await service.aclose()
+
+
+async def test_human_actions_serialize_and_stop_cancels_them(world):
+    run_id = world.run()
+    service, backend = browser(world)
+    session_id = await open_session(world, service, run_id)
+    pending = world.services["asks"].raise_ticket(
+        run_id, "a_take", "takeover", pending_action={"session_id": session_id}
+    )
+    world.services["asks"].answer(pending["ticket_id"], "approve")
+    service.takeover_start(session_id, pending["ticket_id"])
+    started = asyncio.Event()
+
+    async def paused_action(*args, **kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    backend.action = paused_action
+    task = asyncio.create_task(
+        service.human_action(
+            session_id, "type", {"selector": "input", "text": "private-human-password"}
+        )
+    )
+    await started.wait()
+    with pytest.raises(ValueError, match="another human action"):
+        await service.human_action(session_id, "click", {"selector": "button"})
+    await asyncio.wait_for(service.stop_run(run_id), 2)
+    assert task.cancelled()
+    assert "private-human-password" not in str(world.store.records(run_id))
+    await service.aclose()
+
+
+async def test_captcha_refusal_is_not_overridden_by_model_token_threshold(world):
+    run_id = world.run(captcha_policy="refuse", breaker_policy={"challenge_tokens": 10})
+    service, backend = browser(world)
+    session_id = await open_session(world, service, run_id)
+    backend.challenge = "captcha"
+    result = await service.handle(
+        run_id,
+        "a_captcha",
+        "goto",
+        {"session_id": session_id, "url": "https://fixture.test/challenge"},
+    )
+    assert result["rule_id"] == "captcha_policy"
+    assert service.observe_model_usage(run_id, 1000, call_id="actual_model_call") == []
+    assert world.services["asks"].list_tickets(run_id) == []
+    await service.aclose()
+
+
 async def test_context_is_reused_and_account_actions_are_serialized(world):
     run_id = world.run()
     service, backend = browser(world)
@@ -159,7 +236,9 @@ async def test_takeover_hides_human_keystrokes_and_refreshes_agent_observation(w
     await service.human_action(
         session_id, "type", {"selector": "#password", "text": "human-private-password"}
     )
-    world.clock.advance(42)
+    world.clock.advance(21)
+    world.services["asks"].touch(pending["ticket_id"])
+    world.clock.advance(21)
     backend.challenge = None
     assert (await service.takeover_done(session_id))["fresh_observation_required"]
     output = await service.handle(run_id, "a_fresh", "snapshot", {"session_id": session_id})

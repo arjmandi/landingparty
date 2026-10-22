@@ -340,6 +340,15 @@ class ValueExtractionRunner:
             human_agreement=kappa,
             calibration_set_hash=_hash(instrument.get("calibration", [])),
         )
+        self.judge.calibration_report = {
+            "judge_id": self.judge.spec.model,
+            "prompt_id": self.judge.spec.prompt_id,
+            "receipts_verified": True,
+            "column": column,
+            "kappa": kappa,
+            "n": len(calibration_labels),
+            "calibration_set_hash": _hash(instrument.get("calibration", [])),
+        }
         baseline = self._baseline(run)
         controls = {}
         if baseline:
@@ -869,6 +878,15 @@ class TasteRunner:
                 human_agreement=kappa if calibrated_panel else None,
                 calibration_set_hash=_hash(calibration),
             )
+            judge.calibration_report = {
+                "judge_id": spec.model,
+                "prompt_id": spec.prompt_id,
+                "receipts_verified": True,
+                "column": "V" if calibrated_panel else "J",
+                "kappa": kappa,
+                "n": len(expert_labels),
+                "calibration_set_hash": _hash(calibration),
+            }
             panels[spec.model] = {
                 "source_run_id": prior["source_run_id"] if prior else source_run_id,
                 "criterion_hash": _hash(criterion),

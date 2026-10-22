@@ -6,6 +6,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
+import yaml
 
 from worldd.beliefctl import run
 
@@ -87,3 +88,21 @@ def test_writes_use_same_action_endpoint_and_preserve_block_exit_status(monkeypa
         code = run(["--run-id", "r_test", "revise", "b_one", '{"rank": 2}'], client=client)
     assert code == 2 and seen[0]["params"] == {"id": "b_one", "delta": {"rank": 2}}
     assert json.loads(capsys.readouterr().out)["kind"] == "blocked"
+
+
+def test_yaml_queries_emit_real_safe_yaml_with_identical_transport(monkeypatch, capsys):
+    monkeypatch.setenv("WORLD_RUN_TOKEN", "fixture-token")
+    payload = {"kind": "result", "data": [{"claim": "on", "rank": 3, "unicode": "café"}]}
+    requests = []
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=payload)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        assert (
+            run(["--run-id", "r_test", "about", "harbour", "--format", "yaml"], client=client) == 0
+        )
+    content = capsys.readouterr().out
+    assert content.startswith("---\nkind:") and yaml.safe_load(content) == payload
+    assert requests[0]["params"] == {"query": "about", "entity": "harbour"}

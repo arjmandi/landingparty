@@ -153,3 +153,15 @@ async def test_pending_reservation_recovery_reuses_backing_hold(billing):
             "SELECT payload FROM life_human_holds WHERE hold_id=?", (hold_id,)
         ).fetchone()[0]
     )["backing_reservation_id"]
+
+
+async def test_untracked_outstanding_human_work_blocks_life_end_and_can_be_released(billing):
+    store, lives, life, source = billing
+    finish_session(store, lives, source)
+    hold = lives.reserve_human(life, 6, evidence_ref="human:pending-work", source_run_id=source)
+    with pytest.raises(ValueError, match="Outstanding human work"):
+        await lives.end(life)
+    assert lives.get(life)["state"] == "billing_hold" and not lives.get(life)["ended"]
+    lives.release_human(hold)
+    await lives.end(life)
+    assert lives.get(life)["ended"]

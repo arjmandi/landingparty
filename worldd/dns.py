@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import re
 import time
 from urllib.parse import urlsplit
 
@@ -89,3 +90,31 @@ class SecureDNSResolver:
     async def aclose(self):
         if self.owns_client:
             await self.client.aclose()
+
+    async def reverse(self, address):
+        """Observe PTR through the same verified resolver; never accept private IPs."""
+        parsed = ipaddress.ip_address(address)
+        if not parsed.is_global:
+            raise ValueError("Egress PTR observation requires a public address")
+        try:
+            response = await self.client.get(
+                self.endpoint,
+                params={"name": parsed.reverse_pointer, "type": "PTR", "cd": "false"},
+                headers={"Accept": "application/dns-json"},
+            )
+            response.raise_for_status()
+            value = response.json()
+            if value.get("Status") != 0 or value.get("TC"):
+                raise OSError("PTR observation returned an incomplete answer")
+            for record in value.get("Answer", []):
+                if record.get("type") != 12:
+                    continue
+                name = record["data"].rstrip(".").lower()
+                if 0 < len(name) <= 253 and all(
+                    re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                    for label in name.split(".")
+                ):
+                    return name
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            raise OSError("Verified DNS-over-HTTPS PTR observation failed") from exc
+        raise OSError("No valid PTR record was observed")

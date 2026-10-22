@@ -2,6 +2,8 @@
 
 import re
 
+from adapters.environment import agent_environment
+
 
 def openhands_binding(
     run_id,
@@ -50,7 +52,7 @@ def openhands_binding(
 
 
 def runtime_environment(binding, source):
-    environment = {**source, **binding["environment"]}
+    environment = {**agent_environment(source), **binding["environment"]}
     token = source.get("WORLD_RUN_TOKEN")
     if not token:
         raise ValueError("The OpenHands frontend requires its run-scoped WORLD_RUN_TOKEN")

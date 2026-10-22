@@ -61,9 +61,10 @@ def build_task(
     dockerfile.extend("ENV " + key + "=" + json.dumps(value) for key, value in routing.items())
     dockerfile += ["WORKDIR /work", "USER agent"]
     (output / "environment" / "Dockerfile").write_text("\n".join(dockerfile) + "\n")
-    # A no-goal life must not receive an invented numeric grade to satisfy a runner convention.
+    # Harbor's built-in verifier requires numbers; the native custom verifier
+    # returns VerifierResult(rewards=None) instead. Fail closed if it is omitted.
     (output / "tests" / "test.sh").write_text(
-        '#!/bin/sh\nset -eu\nmkdir -p /logs/verifier\npython - <<\'PY\'\nimport json\nfrom pathlib import Path\nPath("/logs/verifier/reward.json").write_text(json.dumps({"reward": None, "reason": "Open-ended live world; inspect the sealed mission report."}))\nPY\n'
+        '#!/bin/sh\nset -eu\necho "Live reward is None. Configure faces.harbor.native:WorldNoScoreVerifier; the built-in numeric grader is unsupported." >&2\nexit 2\n'
     )
     (output / "tests" / "test.sh").chmod(0o755)
     manifest = {
@@ -72,8 +73,62 @@ def build_task(
         "image": image,
         "routing": routing,
         "reward": None,
+        "native_environment": "faces.harbor.native:FencedExistingEnvironment",
+        "native_verifier": "faces.harbor.native:WorldNoScoreVerifier",
         "enforcement": "Requires the external fenced network namespace and successful live preflight.",
         "runtime_capabilities": "Inject only the run-scoped agent capability; researcher token is forbidden.",
     }
     (output / "landing-party.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return output
+
+
+def write_job(
+    output,
+    *,
+    task_dir,
+    run_id,
+    container_id,
+    firewall_id,
+    data_dir,
+    control_url="http://127.0.0.1:7777",
+    agent_import_path=None,
+):
+    """Write a real Harbor JobConfig for one already-created fenced run.
+
+    No capability is serialized. The researcher injects WORLD_CONTROL_TOKEN at
+    launch; only the unprivileged container receives WORLD_RUN_TOKEN.
+    """
+    for value in (run_id, container_id, firewall_id):
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", value):
+            raise ValueError("Literal bound run and container identifiers are required")
+    parsed = urlsplit(control_url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+    ):
+        raise ValueError("A credential-free trusted control URL is required")
+    job = {
+        "tasks": [{"path": str(Path(task_dir).resolve())}],
+        "environment": {
+            "import_path": "faces.harbor.native:FencedExistingEnvironment",
+            "kwargs": {
+                "run_id": run_id,
+                "container_id": container_id,
+                "firewall_id": firewall_id,
+                "data_dir": str(Path(data_dir).resolve()),
+            },
+        },
+        "verifier": {
+            "import_path": "faces.harbor.native:WorldNoScoreVerifier",
+            "kwargs": {"run_id": run_id, "world_url": control_url},
+        },
+    }
+    if agent_import_path:
+        job["agents"] = [{"import_path": agent_import_path}]
+    output = Path(output)
+    with output.open("x", encoding="utf-8") as stream:
+        stream.write(json.dumps(job, indent=2) + "\n")
+    output.chmod(0o600)
+    return job

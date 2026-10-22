@@ -7,7 +7,6 @@ import json
 import os
 import re
 import shutil
-import stat
 import tarfile
 import time
 from contextlib import asynccontextmanager
@@ -20,7 +19,11 @@ from pydantic import ValidationError
 
 from .models import TOOL_MODELS, TOOL_SERVICES, RunConfig, manifest
 from .scanning import contains_sensitive_data
+from .search import PROVIDERS, normalize_results, provider_request, search_price
 from .util import blocked, canonical, digest, identifier, now
+from .versioning import implementation_identity
+from .workspaces import POLICY_ID as WORKSPACE_POLICY_ID
+from .workspaces import share_workspace, snapshot_manifest, snapshot_workspace, verify_import
 
 
 class World:
@@ -41,6 +44,8 @@ class World:
         self.actions: dict[str, dict[str, tuple[str, dict]]] = {}
         self.lane = None
         self.price_table_id = None
+        self.perception_pricing = None
+        self.world_id = implementation_identity()
         self.services = {}
         from .events import LateEvents
         from .security import Capabilities
@@ -57,6 +62,11 @@ class World:
 
     def _lock(self, run_id):
         return self.locks.setdefault(run_id, asyncio.Lock())
+
+    def ask_provenance(self, run_id, params=None):
+        from .context import ask_provenance
+
+        return ask_provenance(self, run_id, params)
 
     def _in_flight(self, run_id):
         return sum(
@@ -115,19 +125,38 @@ class World:
                 ):
                     self.push(
                         active,
-                        {**event, "source_run_id": run_id, "late_event_id": result["event_id"]},
+                        {
+                            **event,
+                            "source_run_id": run_id,
+                            "late_event_id": result["event_id"],
+                            "observed_at": result["ts"],
+                        },
                     )
                     self.late_events.delivered(result["event_id"], active)
             return result
-        result = self.store.push_event(run_id, event)
+        if event.get("late_event_id"):
+            result = self.store.push_event_once(
+                run_id, event, source_key="late:" + event["late_event_id"]
+            )
+        else:
+            result = self.store.push_event(run_id, event)
         if event.get("type") in {
             "ask_resolved",
             "expectation_resolved",
             "belief_review",
             "page_changed",
         }:
-            self.track_observer(run_id, self._observe_event(run_id, event))
+            self.track_observer(run_id, self._observe_event(run_id, result))
         if life_id and "lives" in self.services:
+            life = self.services["lives"].get(life_id)
+            if life["state"] in {"sleeping", "waking"} and life.get("active_run_id") == run_id:
+                self.late_events.append(
+                    run_id,
+                    life_id,
+                    result,
+                    source_event_id=result["event_id"],
+                    observed_at=result["ts"],
+                )
             self.services["lives"].notify_event(life_id, result)
         self._signal(run_id)
         path = self.store.run_dir(run_id) / "world" / "inbox"
@@ -135,9 +164,41 @@ class World:
         (path / f"{result['event_id']}.json").write_text(canonical(result), encoding="utf-8")
         return result
 
-    def create_run(self, config: RunConfig) -> dict:
+    def create_run(
+        self, config: RunConfig, *, register_prereg=None, execution_binding=None
+    ) -> dict:
         if self.closing:
             raise ValueError("World is shutting down")
+        if register_prereg is not None and config.series_id:
+            raise ValueError("Choose an existing series or a dependency-resolved registration")
+        if execution_binding is not None:
+            allowed = {
+                "study_id",
+                "cell_id",
+                "seed",
+                "episode",
+                "dependency_protocol_hash",
+                "resolution_hash",
+            }
+            if (
+                not isinstance(execution_binding, dict)
+                or set(execution_binding) - allowed
+                or any(
+                    not isinstance(execution_binding.get(key), str)
+                    or not 1 <= len(execution_binding[key]) <= 128
+                    for key in ("study_id", "cell_id")
+                )
+                or type(execution_binding.get("seed")) is not int
+                or (
+                    execution_binding.get("episode") is not None
+                    and (
+                        type(execution_binding["episode"]) is not int
+                        or execution_binding["episode"] < 0
+                    )
+                )
+            ):
+                raise ValueError("An execution binding must name its actual study, cell and seed")
+            execution_binding = json.loads(canonical(execution_binding))
         settings = config.model_dump(mode="json")
         if config.research_mode == "research" and not os.environ.get("WORLD_CONTROL_TOKEN"):
             raise ValueError(
@@ -153,6 +214,11 @@ class World:
             if "lives" not in self.services:
                 raise ValueError("Life scheduler is unavailable")
             settings = self.services["lives"].prepare_session(config.life_id, settings)
+            config = RunConfig.model_validate(settings)
+        if config.browser_identity is None:
+            settings["browser_identity"] = (
+                "signed" if config.research_mode == "research" and config.stage >= 2 else "unsigned"
+            )
             config = RunConfig.model_validate(settings)
         if config.archive_in:
             source = self.store.get_run(config.archive_in)
@@ -190,16 +256,19 @@ class World:
             else []
         )
         preamble = self._preamble(config, identity=identity, accounts=accounts)
+        from .belief_controls import POLICY_ID as CONTROL_POLICY_ID
         from .extraction import EXTRACTOR_ID
+        from .kernel import KERNEL_ID
 
+        has_beliefs = "belief" in config.packs or config.iota.beliefs != "fresh"
         tuple_ = {
-            "world_id": "landing-party@0.1.0",
+            "world_id": self.world_id,
             "archive_id": config.corpus_id if config.mode == "frozen" else config.archive_in,
             "tool_set_id": tool_manifest["tool_set_id"],
             "policy_id": digest(getattr(self.gateway, "policy", {})),
             "price_table_id": self.price_table_id,
             "breaker_policy_id": digest(config.breaker_policy),
-            "search_provider_id": "brave@v1"
+            "search_provider_id": PROVIDERS[config.search_provider]["id"]
             if config.mode == "live"
             else f"frozen@{config.corpus_id}"
             if config.mode == "frozen"
@@ -209,16 +278,45 @@ class World:
             "observer_id": config.observer_id,
             "classifier_id": getattr(self.gateway, "classifier_id", config.classifier_id),
             "block_profile_id": config.block_profile_id,
+            "forecast_policy_id": digest(self.services["forecast"].policy_identity(settings))
+            if "forecast" in self.services and ("forecast" in config.packs or has_beliefs)
+            else "disabled",
+            "runtime_protocol_id": digest(
+                {
+                    "version": "world-runtime-protocol@2",
+                    "workspace_policy_id": WORKSPACE_POLICY_ID,
+                    "workspace_checkpoint_policy_id": "workspace-spend-checkpoints@1",
+                    "budget_visible": config.budget_visible,
+                    "operator_messages_allowed": config.operator_messages_allowed,
+                    "human_rate_per_minute": config.human_rate_per_minute,
+                    "max_in_flight": config.max_in_flight,
+                    "wait_budget_s": config.wait_budget_s,
+                    "raw_lane_enabled": config.raw_lane_enabled,
+                    "context_import_policy": config.context_import_policy,
+                    "initial_state": {
+                        "policy": config.continuity,
+                        "workspace": "fresh" if config.iota.workspace == "fresh" else "import",
+                        "beliefs": "fresh" if config.iota.beliefs == "fresh" else "import",
+                    }
+                    if not config.life_id
+                    else {"policy": config.continuity, "state": "life-managed"},
+                }
+            ),
+            "life_protocol_id": digest(self.services["lives"].protocol_identity(config.life_id))
+            if config.life_id and "lives" in self.services
+            else "disabled",
             "harness_id": config.harness_id,
             "model_snapshot_id": config.model_snapshot_id,
             "model_value_document_id": config.model_value_document_id,
-            "belief_schema_id": config.belief_schema_id if "belief" in config.packs else "disabled",
+            "belief_schema_id": config.belief_schema_id if has_beliefs else "disabled",
+            "kernel_policy_id": KERNEL_ID if has_beliefs else "disabled",
+            "belief_mount_policy_id": CONTROL_POLICY_ID
+            if config.belief_import_policy == "shuffled"
+            else "verbatim@1",
             "slot_suggester_policy_id": config.slot_suggester_policy_id
-            if "belief" in config.packs
+            if has_beliefs
             else "disabled",
-            "validator_policy_id": config.validator_policy_id
-            if "belief" in config.packs
-            else "disabled",
+            "validator_policy_id": config.validator_policy_id if has_beliefs else "disabled",
             "trigger_policy_id": digest(
                 {
                     "policy": config.trigger_policy_id,
@@ -237,7 +335,7 @@ class World:
             "vault_mode": config.vault_mode,
             "console_steering": config.reply_policy,
             "human_time_priced": config.human_time_priced,
-            "wake_policy": "agent-declared-v1" if config.life_id else "disabled",
+            "wake_policy": config.wake_policy if config.life_id else "disabled",
             "continuity": config.continuity,
             "browser_identity": config.browser_identity,
             "captcha_policy": config.captcha_policy,
@@ -250,7 +348,7 @@ class World:
             "market_policy_id": "paper-binary/profit-only@0.1"
             if "market" in config.packs
             else "disabled",
-            "perception_price_table_id": digest(self.services["perception"].provider_rates)
+            "perception_price_table_id": digest(self.services["perception"].pricing_identity())
             if "perception" in config.packs and "perception" in self.services
             else "disabled",
             "preamble_hash": digest(preamble),
@@ -265,24 +363,43 @@ class World:
         if config.price_table_id and config.price_table_id != tuple_["price_table_id"]:
             raise ValueError("Configured price table does not match the active model lane")
         self._import_workspace(config.iota.workspace, None)
+        if config.belief_import_policy == "shuffled" and config.iota.beliefs == "fresh":
+            raise ValueError("A shuffled belief control requires a named authenticated donor")
         belief_import = (
             self._prepare_belief_import(
                 config.iota.beliefs,
                 life_id=config.life_id,
                 continuity_source_run_id=config.continuity_source_run_id,
+                import_policy=config.belief_import_policy,
+                seed=config.seed,
             )
             if config.iota.beliefs != "fresh"
             else None
         )
+        if register_prereg is not None:
+            registry = self.services.get("registry")
+            if registry is None:
+                raise ValueError("Dependency-resolved runs require the research registry")
+            series = registry.register_series(register_prereg, tuple_)
+            settings["series_id"] = series["series_id"]
+            config = config.model_copy(update={"series_id": series["series_id"]})
+            registry.validate_run(series["series_id"], settings)
+        if execution_binding is not None:
+            settings["execution_binding"] = execution_binding
+        if self.perception_pricing is not None:
+            settings["perception_pricing"] = self.perception_pricing
         run = self.store.create_run(settings)
         run_id = run["run_id"]
         run_dir = self.store.run_dir(run_id)
         (run_dir / "world" / "fetched").mkdir(parents=True, exist_ok=True)
-        (run_dir / "work" / "out").mkdir(parents=True, exist_ok=True)
+        (run_dir / "work").mkdir(parents=True, exist_ok=True)
+        imported_workspace = self._import_workspace(config.iota.workspace, run_dir / "work")
+        if imported_workspace is not None:
+            self.store.append_record(run_id, "workspace_import", **imported_workspace)
+        if config.iota.workspace == "fresh":
+            (run_dir / "work" / "out").mkdir(exist_ok=True)
         if os.environ.get("WORLD_WORK_GROUP_WRITABLE") == "1":
-            (run_dir / "work").chmod(0o770)
-            (run_dir / "work" / "out").chmod(0o770)
-        self._import_workspace(config.iota.workspace, run_dir / "work")
+            share_workspace(run_dir / "work")
         (run_dir / "manifest.json").write_text(canonical(tool_manifest), encoding="utf-8")
         self.jobs[run_id] = {}
         self.actions[run_id] = {}
@@ -311,13 +428,25 @@ class World:
         if config.life_id:
             self.services["lives"].attach_session(config.life_id, run_id)
             for event in self.late_events.pending(config.life_id):
-                self.push(run_id, {**event, "source_run_id": event["run_id"]})
+                self.push(
+                    run_id,
+                    {
+                        **event,
+                        "source_run_id": event["run_id"],
+                        "late_event_id": event["event_id"],
+                        "observed_at": event["ts"],
+                    },
+                )
                 self.late_events.delivered(event["event_id"], run_id)
         if config.series_id and "registry" in self.services:
             self.services["registry"].record_run(config.series_id, run_id)
         if config.iota.beliefs != "fresh":
-            service, bundle, continuity = belief_import
-            if continuity:
+            service, bundle, continuity, control = belief_import
+            if control is not None:
+                from .belief_controls import apply_control
+
+                apply_control(service, run_id, bundle, control)
+            elif continuity:
                 service.import_continuity(run_id, bundle)
             else:
                 service.import_bundle(run_id, bundle)
@@ -356,6 +485,10 @@ class World:
         unsigned = {key: value for key, value in report.items() if key != "report_hash"}
         if report.get("report_hash") != digest(unsigned):
             raise ValueError("Preflight report hash mismatch")
+        if report.get("host_observer"):
+            from .host_observer import verify_activation
+
+            verify_activation(self, run_id, report["host_observer"])
         token = self.capabilities.issue(run_id)
         self.store.update_run(run_id, state="running", activated_at=now())
         self.store.append_record(run_id, "preflight_complete", report_hash=report["report_hash"])
@@ -383,6 +516,12 @@ class World:
             return blocked(
                 "budget_exhausted", "The life has unresolved human billing", "life_billing_hold"
             )
+        if life_id and "lives" in self.services:
+            state = self.services["lives"].status(life_id)
+            if state.get("driver") and state["driver"].get("at_floor"):
+                return blocked(
+                    "budget_exhausted", "The life driver reached its floor", "life_driver_floor"
+                )
         if config.get("research_mode") == "research" and config.get("stage", 0) > 0:
             try:
                 self.services["registry"].require_stage(config["stage"], research_mode="research")
@@ -417,10 +556,39 @@ class World:
         snapshot = self.store.run_dir(run_id) / "work-snapshot"
         if not snapshot.is_dir():
             raise ValueError("Workspace snapshot is missing")
+        anchor = next(
+            (
+                row
+                for row in reversed(self.store.records(run_id))
+                if row["kind"] == "workspace_snapshot"
+            ),
+            None,
+        )
+        verification = self.store.verify_record(run_id)
+        if not verification["valid"]:
+            raise ValueError("Workspace import source has an invalid record")
+        manifest = verify_import(snapshot, anchor)
         if target is not None:
             shutil.copytree(snapshot, target, dirs_exist_ok=True, symlinks=True)
+            copied = verify_import(target, anchor)
+            return {
+                "source_run_id": run_id,
+                "source_record_head": verification["head"],
+                "source_snapshot_root_hash": manifest["root_hash"],
+                "recipient_snapshot_root_hash": copied["root_hash"],
+                "entries": len(copied["entries"]),
+                "bytes": sum(row.get("bytes", 0) for row in copied["entries"].values()),
+            }
 
-    def _prepare_belief_import(self, source, *, life_id=None, continuity_source_run_id=None):
+    def _prepare_belief_import(
+        self,
+        source,
+        *,
+        life_id=None,
+        continuity_source_run_id=None,
+        import_policy="verbatim",
+        seed=0,
+    ):
         service = self.services.get("beliefs")
         if not service:
             raise ValueError("Belief service unavailable")
@@ -449,7 +617,12 @@ class World:
                 False,
             )
         service.validate_bundle(bundle, continuity=continuity)
-        return service, bundle, continuity
+        control = None
+        if import_policy == "shuffled" and not continuity:
+            from .belief_controls import prepare_control
+
+            control = prepare_control(bundle, seed)
+        return service, bundle, continuity, control
 
     def create_measurement_run(
         self,
@@ -559,6 +732,8 @@ class World:
                 + ", ".join(f"{account['alias']} ({account['platform']})" for account in accounts)
                 + "."
             )
+        if "browse" in config.packs:
+            life_terms += f" Browser requests use a {config.browser_identity} identity."
         return (
             (
                 f"You are connected through the world's tools: {names}. "
@@ -584,6 +759,8 @@ class World:
             + rubric
             + driver
             + life_terms
+            + " "
+            + config.seed_scope
         )
 
     async def _deadline(self, run_id, seconds):
@@ -713,14 +890,31 @@ class World:
                 self.pending.add(action_id)
         if wait:
             try:
-                return await asyncio.wait_for(asyncio.shield(task), config["wait_budget_s"])
+                reply = await asyncio.wait_for(asyncio.shield(task), config["wait_budget_s"])
+                if reply.get("kind") == "ticket":
+                    self.store.append_record(
+                        run_id,
+                        "action_ticket",
+                        action_id=action_id,
+                        ticket_id=reply["ticket_id"],
+                        delivery="synchronous",
+                    )
+                return reply
             except TimeoutError:
                 # No await between timeout and marking pending; the job cannot race this assignment.
                 self.pending.add(action_id)
             except asyncio.CancelledError:
                 self.pending.add(action_id)
                 raise
-        return {"kind": "ticket", "action_id": action_id, "ticket_id": f"t_{action_id[2:]}"}
+        ticket = {"kind": "ticket", "action_id": action_id, "ticket_id": f"t_{action_id[2:]}"}
+        self.store.append_record(
+            run_id,
+            "action_ticket",
+            action_id=action_id,
+            ticket_id=ticket["ticket_id"],
+            delivery="asynchronous",
+        )
+        return ticket
 
     async def _execute(self, run_id, action_id, tool, params):
         started = now()
@@ -823,7 +1017,10 @@ class World:
                     await result
 
     async def _observe_event(self, run_id, event):
-        await self.observe(run_id, {**event, "observed_at": now()})
+        # push() supplies the persisted world event, including its authoritative
+        # timestamp. Mail headers and Last-Modified never become this clock.
+        observed_at = event.get("observed_at") or event.get("ts") or now()
+        await self.observe(run_id, {**event, "observed_at": observed_at})
         reflection = self.services.get("reflection")
         if reflection and self.run_config(run_id).get("reflection_policy", "none") != "none":
             await reflection.trigger(run_id, event)
@@ -1012,7 +1209,9 @@ class World:
             await asyncio.sleep(params["seconds"])
             return {"kind": "silence", "action_id": action_id}
         if tool == "ask":
-            if "asks" in self.services and self.run_config(run_id).get("stage", 0) >= 2:
+            if "asks" in self.services and (
+                self.run_config(run_id).get("stage", 0) >= 2 or params["kind"] == "message"
+            ):
                 return await self.services["asks"].handle(run_id, action_id, tool, params)
             if params["kind"] != "message":
                 return blocked("policy_deny", "This stage supports ask(message) only", "stage_gate")
@@ -1023,10 +1222,14 @@ class World:
                 kind_requested="message",
                 agent_text=params["text"],
                 alternatives=params.get("alternatives"),
+                subgoal_fraction=params.get("subgoal_fraction"),
+                info_type=params.get("info_type"),
+                provenance=self.ask_provenance(run_id, params),
             )
             return {"kind": "silence", "action_id": action_id}
         if tool == "deliver":
             output = self.store.run_dir(run_id) / "work" / "out" / f"{action_id}.json"
+            output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(canonical(params), encoding="utf-8")
             return {"kind": "silence", "action_id": action_id}
         if tool == "watch":
@@ -1060,20 +1263,18 @@ class World:
             reply["provider_id"] = f"local@{config['archive_in']}"
             target.write_text(canonical(reply), encoding="utf-8")
             return reply
-        api_key = os.environ.get("WORLD_BRAVE_API_KEY")
+        provider = config.get("search_provider", "brave")
+        api_key = os.environ.get(PROVIDERS[provider]["key_env"])
         if not api_key:
-            return blocked("policy_deny", "Brave search is not configured", "search_credentials")
+            return blocked(
+                "policy_deny", f"{provider.title()} search is not configured", "search_credentials"
+            )
         if site and not re.fullmatch(r"[A-Za-z0-9.-]+", site):
             return blocked("policy_deny", "site must be a hostname", "invalid_site")
-        from .lane import WORLD_TOOL_PRICES
-
-        search_price = WORLD_TOOL_PRICES["search_usd_per_call"]
-        reservation = self.store.reserve(run_id, search_price)
+        price = search_price(provider)
+        reservation = self.store.reserve(run_id, price)
         if not reservation:
             return blocked("budget_exhausted", "Search cost exceeds remaining budget", "budget_cap")
-        arguments = {"q": f"{query} site:{site}" if site else query, "count": k}
-        if freshness:
-            arguments["freshness"] = freshness
 
         def uncertain():
             self.store.update_run(run_id, tainted=True)
@@ -1084,11 +1285,16 @@ class World:
             )
 
         try:
-            request = httpx.Request(
-                "GET",
-                "https://api.search.brave.com/res/v1/web/search",
-                params=arguments,
-                headers={"X-Subscription-Token": api_key, "Accept": "application/json"},
+            action = next(
+                row
+                for row in reversed(self.store.records(run_id))
+                if row["kind"] == "action" and row.get("action_id") == action_id
+            )
+            request = provider_request(
+                provider,
+                api_key,
+                {"query": query, "k": k, "freshness": freshness, "site": site},
+                submitted_at=action["ts"],
             )
             response = await self.submit_search(
                 run_id, action_id, request, reservation_id=reservation
@@ -1099,7 +1305,7 @@ class World:
                 else:
                     self.store.release(reservation)
                 return response
-            if not self.store.settle(reservation, "search", search_price):
+            if not self.store.settle(reservation, "search", price):
                 uncertain()
                 return blocked(
                     "budget_exhausted", "Search charge could not settle", "search_accounting"
@@ -1114,21 +1320,7 @@ class World:
                     f"Search returned HTTP {response.status_code}",
                     "search_provider",
                 )
-            results = response.json().get("web", {}).get("results", [])[:k]
-            reply = {
-                "kind": "result",
-                "provider_id": "brave@v1",
-                "items": [
-                    {
-                        "rank": i + 1,
-                        "url": item["url"],
-                        "title": item.get("title", ""),
-                        "snippet": item.get("description", ""),
-                        **({"published": item["page_age"]} if "page_age" in item else {}),
-                    }
-                    for i, item in enumerate(results)
-                ],
-            }
+            reply = normalize_results(provider, response.json(), k)
             target.write_text(canonical(reply), encoding="utf-8")
             return reply
         except httpx.TimeoutException:
@@ -1140,7 +1332,7 @@ class World:
         except asyncio.CancelledError:
             uncertain()
             raise
-        except (ValueError, KeyError):
+        except (ValueError, KeyError, TypeError):
             return blocked("platform_block", "Search provider response failed", "search_provider")
 
     async def _watch(self, run_id, action_id, url, interval):
@@ -1263,6 +1455,8 @@ class World:
             await self._cancel_jobs(run_id)
             if "skill_tests" in self.services:
                 await self.services["skill_tests"].stop_run(run_id)
+            if "payments" in self.services:
+                await self.services["payments"].stop_run(run_id)
             if "browser" in self.services:
                 await self.services["browser"].stop_run(run_id)
             if "proxy" in self.services:
@@ -1300,23 +1494,29 @@ class World:
             work = run_dir / "work"
             work.mkdir(exist_ok=True)
             if not snapshot.exists():
-                omissions = []
-
-                def ignore_special(directory, names):
-                    ignored = []
-                    for name in names:
-                        path = os.path.join(directory, name)
-                        mode = os.lstat(path).st_mode
-                        if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode) or stat.S_ISLNK(mode)):
-                            ignored.append(name)
-                            omissions.append(os.path.relpath(path, work))
-                    return ignored
-
-                shutil.copytree(work, snapshot, symlinks=True, ignore=ignore_special)
+                omissions = snapshot_workspace(work, snapshot)
                 if omissions:
                     self.store.append_record(
-                        run_id, "snapshot_omissions", paths=omissions, reason="special_files"
+                        run_id,
+                        "snapshot_omissions",
+                        omissions=omissions,
+                        paths=[entry["path"] for entry in omissions],
                     )
+                    self.store.update_run(run_id, tainted=True)
+            actual_manifest = snapshot_manifest(snapshot)
+            anchor = next(
+                (
+                    row
+                    for row in reversed(self.store.records(run_id))
+                    if row["kind"] == "workspace_snapshot"
+                ),
+                None,
+            )
+            if anchor:
+                if any(anchor.get(key) != value for key, value in actual_manifest.items()):
+                    raise ValueError("Workspace snapshot changed during a seal retry")
+            else:
+                self.store.append_record(run_id, "workspace_snapshot", **actual_manifest)
             end = {
                 "truncated" if truncated else "terminated": reason,
                 "reason": reason,
@@ -1371,6 +1571,9 @@ class World:
             self._ending.discard(run_id)
 
     def report(self, run_id, *, save=False):
+        if run_id.startswith("study_"):
+            return self.study_report(run_id)
+        from analysis.publication import load_measurements
         from analysis.report import build_report, render_report
 
         reconciliation = self.store.reconcile(run_id)
@@ -1385,14 +1588,28 @@ class World:
             self.store.records(run_id),
             ledger=self.store.spend(run_id),
             verification={"record": self.store.verify_record(run_id), "ledger": reconciliation},
+            measurements=load_measurements(self.store, run_id),
         )
+        if "judge_canaries" in self.services:
+            checks = self.services["judge_canaries"].reports_for_run(run_id)
+            report["judge_canary_checks"] = checks
+            report.setdefault("spec_sheet", {}).setdefault("measurements", {})[
+                "judge_canary_checks"
+            ] = checks
         if save:
             run_dir = self.store.run_dir(run_id)
             (run_dir / "report.json").write_text(canonical(report), encoding="utf-8")
             (run_dir / "spec-sheet.md").write_text(render_report(report), encoding="utf-8")
         return report
 
+    def study_report(self, study_id):
+        from analysis.cohort import StudyReport
+
+        return StudyReport(self).build(study_id)
+
     def life_report(self, life_id):
+        from analysis.publication import assemble_life_report
+
         life = self.services["lives"].get(life_id)
         checkpoints = []
         owned = self.store.data_dir / "lives" / life_id / "rubric"
@@ -1421,9 +1638,12 @@ class World:
                 "status": "unmeasured",
                 "reason": "No verified life rubric checkpoint has been recorded",
             },
+            "publication": assemble_life_report(self, life, checkpoints),
         }
 
     def export(self, run_id):
+        if run_id.startswith("life_"):
+            return self.services["lives"].export(run_id)
         run = self.store.get_run(run_id)
         if run["state"] not in {"sealed", "killed", "ended"}:
             raise ValueError("Seal the run before exporting")
@@ -1432,7 +1652,13 @@ class World:
         with tarfile.open(fileobj=output, mode="w:gz") as archive:
             for path in sorted(root.rglob("*")):
                 # Do not follow workspace symlinks outside the run or export private credentials.
-                if path.is_symlink() or path.is_dir() or "model-io" in path.parts:
+                relative = path.relative_to(root)
+                if (
+                    path.is_symlink()
+                    or path.is_dir()
+                    or relative.parts[0] == "work"
+                    or ("model-io" in relative.parts and not run["config"].get("capture_model_io"))
+                ):
                     continue
                 if path.is_file() and path.resolve().is_relative_to(root.resolve()):
                     archive.add(path, arcname=f"{run_id}/{path.relative_to(root)}", recursive=False)
@@ -1440,12 +1666,19 @@ class World:
 
     def bridge(self, run_id=None):
         runs = [self.store.get_run(run_id)] if run_id else self.store.list_runs()
+        runs = [
+            run
+            for run in runs
+            if not run["config"].get("world_accounting")
+            and not run["config"].get("private_archive")
+            and run["config"].get("metering_lane", "harness") == "harness"
+        ]
         return {
             "runs": [
                 {
                     "run_id": run["run_id"],
                     "state": run["state"],
-                    "reply_policy": run["config"]["reply_policy"],
+                    "reply_policy": run["config"].get("reply_policy", "silent"),
                     "messages": [
                         r for r in self.store.records(run["run_id"]) if r["kind"] == "ask_opened"
                     ],

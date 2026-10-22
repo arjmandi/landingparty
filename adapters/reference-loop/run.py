@@ -27,9 +27,21 @@ async def run_reference(
     world_client: httpx.AsyncClient | None = None,
     lane_client: httpx.AsyncClient | None = None,
     agent_client: httpx.AsyncClient | None = None,
+    run_info: dict[str, Any] | None = None,
+    initial_messages: list[dict[str, Any]] | None = None,
+    context_refs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if max_steps < 1 or max_tokens < 1:
         raise ValueError("max_steps and max_tokens must be positive")
+    if initial_messages and not context_refs:
+        raise ValueError("Resumed messages require source capture references")
+    if initial_messages and not run_info:
+        raise ValueError("Transcript continuity requires a pre-created life session")
+    if initial_messages and any(
+        message.get("role") not in {"system", "user", "assistant", "tool"}
+        for message in initial_messages
+    ):
+        raise ValueError("Captured context must contain provider chat messages")
     injected_world = world_client is not None
     own_world, own_lane = world_client is None, lane_client is None
     world_client = world_client or httpx.AsyncClient(
@@ -51,6 +63,9 @@ async def run_reference(
     )
     run_id = None
     end_reason = "harness_stopped"
+    should_seal = True
+    messages: list[dict[str, Any]] = []
+    steps = 0
     try:
         config = dict(
             config,
@@ -58,9 +73,21 @@ async def run_reference(
                 f"reference-loop@0.1/native-parallel/max-steps={max_steps}/max-tokens={max_tokens}"
             ),
         )
-        started = await world_client.post("/v1/run", json=config)
-        started.raise_for_status()
-        info = started.json()
+        if run_info is None:
+            started = await world_client.post("/v1/run", json=config)
+            started.raise_for_status()
+            info = started.json()
+        else:
+            info = dict(run_info)
+            if (
+                not isinstance(info.get("run_id"), str)
+                or not info["run_id"].startswith("r_")
+                or not info.get("preamble")
+                or not info.get("run_token")
+            ):
+                raise ValueError(
+                    "A pre-created session requires its real id, preamble, and capability"
+                )
         run_id = info["run_id"]
         run_token = info.get("run_token")
         agent_headers = {"Authorization": "Bearer " + run_token} if run_token else {}
@@ -85,13 +112,23 @@ async def run_reference(
             }
             for item in manifest_tools(manifest)
         ]
-        messages: list[dict[str, Any]] = [{"role": "system", "content": info["preamble"]}]
+        messages = [{"role": "system", "content": info["preamble"]}]
+        if initial_messages:
+            # The new session's world-authored briefing replaces the old system
+            # briefing; user/assistant/tool content is copied without synthesis.
+            messages.extend(
+                json.loads(
+                    json.dumps(
+                        [message for message in initial_messages if message["role"] != "system"]
+                    )
+                )
+            )
         goal = config.get("goal")
-        if goal:
+        if goal and not initial_messages:
             goal_text = goal.get("text", "") if isinstance(goal, dict) else str(goal)
             messages.append({"role": "user", "content": goal_text})
 
-        async def act(call: dict[str, Any]) -> dict[str, Any]:
+        async def act(call: dict[str, Any]) -> tuple[dict[str, Any], bool]:
             function = call["function"]
             try:
                 arguments = json.loads(function.get("arguments", "{}"))
@@ -112,9 +149,43 @@ async def run_reference(
                 )
                 response.raise_for_status()
                 reply = response.json()
-            return {"role": "tool", "tool_call_id": call["id"], "content": json.dumps(reply)}
+            return (
+                {"role": "tool", "tool_call_id": call["id"], "content": json.dumps(reply)},
+                function["name"] == "sleep" and reply.get("kind") == "silence",
+            )
+
+        def result(output=""):
+            resumed = [message for message in initial_messages or [] if message["role"] != "system"]
+            return {
+                "run_id": run_id,
+                "steps": steps,
+                "reason": end_reason,
+                "output": output,
+                "messages": messages,
+                "context_refs": list(context_refs or []),
+                "compactions": 0,
+                "resumed_context_messages": len(resumed),
+                "resumed_context_bytes": len(
+                    json.dumps(resumed, ensure_ascii=False, separators=(",", ":")).encode()
+                )
+                if resumed
+                else 0,
+                "continuity_semantics": "current briefing plus captured non-system messages"
+                if initial_messages
+                else "fresh context",
+            }
 
         for step in range(max_steps):
+            if run_info is not None:
+                state = await agent_client.get(
+                    "/v1/status", params={"run_id": run_id}, headers=agent_headers
+                )
+                state.raise_for_status()
+                status = state.json()
+                if status["state"] in {"sealed", "ended", "killed", "stopping"}:
+                    end_reason = (status.get("end") or {}).get("reason", status["state"])
+                    should_seal = False
+                    return result()
             response = await lane_client.post(
                 "chat/completions",
                 headers=lane_headers,
@@ -127,22 +198,22 @@ async def run_reference(
             )
             response.raise_for_status()
             assistant = response.json()["choices"][0]["message"]
+            steps = step + 1
             messages.append(assistant)
             calls = assistant.get("tool_calls") or []
             if not calls:
                 end_reason = "agent_finished"
-                return {
-                    "run_id": run_id,
-                    "steps": step + 1,
-                    "reason": end_reason,
-                    "output": assistant.get("content") or "",
-                }
+                return result(assistant.get("content") or "")
             # Ticket replies are returned unchanged; the model chooses whether to read its inbox.
-            messages.extend(await asyncio.gather(*(act(call) for call in calls)))
-        return {"run_id": run_id, "steps": max_steps, "reason": end_reason, "output": ""}
+            replies = await asyncio.gather(*(act(call) for call in calls))
+            messages.extend(message for message, _ in replies)
+            if any(sleep for _, sleep in replies):
+                end_reason, should_seal = "sleep", False
+                return result()
+        return result()
     finally:
         try:
-            if run_id is not None:
+            if run_id is not None and should_seal:
                 sealed = await world_client.post(
                     "/v1/beam-up", json={"run_id": run_id, "reason": end_reason}
                 )

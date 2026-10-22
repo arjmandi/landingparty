@@ -66,6 +66,60 @@ class VaultService:
         self.seed_terms = (
             terms if terms is not None else json.loads(source.read_text())["platforms"]
         )
+        self.database.db.execute(
+            "CREATE TABLE IF NOT EXISTS vault_mutations (event_id TEXT PRIMARY KEY,payload TEXT NOT NULL,signature TEXT NOT NULL)"
+        )
+
+    def _account_mutation(self, account, kind, *, reason=None):
+        event = {
+            "event_id": "vm_" + secrets.token_hex(12),
+            "kind": kind,
+            "account_id": account["account_id"],
+            "identity_id": account["identity_id"],
+            "recorded_at": timestamp(self.clock()),
+            "reason": reason,
+        }
+        self.database.db.execute(
+            "INSERT INTO vault_mutations VALUES(?,?,?)",
+            (event["event_id"], canonical(event), self.database.sign(event)),
+        )
+        services = getattr(self.world, "services", {})
+        identities, lives = services.get("identity"), services.get("lives")
+        forecast = services.get("forecast")
+        if forecast:
+            source = account["attribution"].get("run_id")
+            if source:
+                forecast.notify_state_write(
+                    run_id=source, world_ref="vault_mutation:" + event["event_id"]
+                )
+        if not identities or not lives:
+            return
+        try:
+            identity = identities.get(account["identity_id"])
+        except KeyError:
+            return
+        life_id = identity.get("life_id")
+        if not life_id:
+            return
+        if forecast and not account["attribution"].get("run_id"):
+            forecast.notify_state_write(
+                life_id=life_id, world_ref="vault_mutation:" + event["event_id"]
+            )
+        life = lives.get(life_id)
+        driver = life.get("driver")
+        if life.get("ended") or not driver or driver["metric"] != "accounts_held":
+            return
+        held = 0
+        for row in self.database.db.execute("SELECT metadata FROM accounts WHERE state='ready'"):
+            metadata = json.loads(row["metadata"])
+            if (
+                metadata["identity_id"] == identity["identity_id"]
+                and metadata["attribution"]["principal"] == identity["principal"]
+            ):
+                held += 1
+        lives.observe_driver(
+            life_id, "accounts_held", held, evidence_ref="vault_mutation:" + event["event_id"]
+        )
 
     def _cipher(self):
         if self._fernet is None:
@@ -226,6 +280,7 @@ class VaultService:
                     "ready",
                 ),
             )
+        self._account_mutation(metadata, "account_provisioned")
         if run_id and self.store.get_run(run_id)["state"] not in {"sealed", "killed", "ended"}:
             self.store.append_record(
                 run_id,
@@ -252,6 +307,44 @@ class VaultService:
             if principal and value["attribution"]["principal"] != principal:
                 raise ValueError("Account belongs to another principal of record")
         return value
+
+    def update_scope(self, alias, *, run_id, scope_classes, scope_rules):
+        """Explicit operator amendment; a pending approval cannot alter delegation."""
+        account = self.get_account(alias, run_id=run_id)
+        self._validate_terms(account["platform"], account["label"])
+        if self.store.get_run(run_id)["state"] not in {"running", "frozen"}:
+            raise ValueError("Scope amendments require an active run")
+        if not isinstance(scope_classes, list) or not scope_classes or set(scope_classes) - SCOPES:
+            raise ValueError("Invalid delegated scopes")
+        if not isinstance(scope_rules, dict) or set(scope_rules) != set(scope_classes):
+            raise ValueError("Each delegated scope requires explicit URL prefixes")
+        for prefixes in scope_rules.values():
+            if not isinstance(prefixes, list) or not prefixes:
+                raise ValueError("Each scope requires at least one URL prefix")
+            for prefix in prefixes:
+                if origin(prefix) != account["origin"]:
+                    raise ValueError("An amended scope cannot escape the account origin")
+                normalized_path(prefix)
+        value = {key: item for key, item in account.items() if key != "state"}
+        value.update(scope_classes=sorted(set(scope_classes)), scope_rules=scope_rules)
+        with self.database.transaction() as db:
+            db.execute(
+                "UPDATE accounts SET metadata=? WHERE account_id=?",
+                (canonical(value), account["account_id"]),
+            )
+            db.execute(
+                "UPDATE leases SET state='revoked' WHERE account_id=? AND state='issued'",
+                (account["account_id"],),
+            )
+        self.store.append_record(
+            run_id,
+            "delegation_scope_amended",
+            account_id=account["account_id"],
+            scope_classes=value["scope_classes"],
+            scope_rules=scope_rules,
+        )
+        self._account_mutation(value, "delegation_scope_amended")
+        return self.get_account(alias, run_id=run_id)
 
     def _run_identity(self, run_id):
         config = self.store.get_run(run_id)["config"]
@@ -373,11 +466,27 @@ class VaultService:
             return blocked("This run cannot use delegated credentials", "run_state")
         if config.get("stage", 0) < 2:
             return blocked("Delegated accounts are available from the outpost stage", "stage_gate")
+        known_account = None
         try:
-            account = self.get_account(alias, run_id=run_id)
+            account = known_account = self.get_account(alias, run_id=run_id)
             self._validate_terms(account["platform"], account["label"])
         except KeyError:
             asks = getattr(self.world, "services", {}).get("asks")
+            platform = self.platform_for_url(request.get("url"))
+            if asks and platform and self.terms(platform)["terms_class"] == "forbids":
+                return asks.raise_ticket(
+                    run_id,
+                    action_id,
+                    "policy_conflict",
+                    pending_action={
+                        "platform": platform,
+                        "scope": scope,
+                        "request": request,
+                        "reason": "platform_terms_forbid_agents",
+                    },
+                    platform=platform,
+                    scope=scope,
+                )
             if asks:
                 return asks.raise_ticket(
                     run_id,
@@ -387,10 +496,53 @@ class VaultService:
                 )
             return blocked("This account has not been provisioned", "account_missing", "login_wall")
         except ValueError as exc:
+            asks = getattr(self.world, "services", {}).get("asks")
+            if (
+                asks
+                and known_account
+                and self.terms(known_account["platform"])["terms_class"] == "forbids"
+            ):
+                return asks.raise_ticket(
+                    run_id,
+                    action_id,
+                    "policy_conflict",
+                    pending_action={
+                        "platform": known_account["platform"],
+                        "scope": scope,
+                        "request": request,
+                        "reason": "platform_terms_forbid_agents",
+                    },
+                    platform=known_account["platform"],
+                    scope=scope,
+                )
             return blocked(str(exc), "platform_terms", "platform_block")
         if account["state"] != "ready":
             return blocked("This account is not currently usable", "account_state", "login_wall")
         if not self.request_within_scope(account, scope, request):
+            asks = getattr(self.world, "services", {}).get("asks")
+            if (
+                asks
+                and scope in SCOPES - {"read"}
+                and origin(request.get("url", "")) == account["origin"]
+            ):
+                return asks.raise_ticket(
+                    run_id,
+                    action_id,
+                    "approval",
+                    pending_action={
+                        "platform": account["platform"],
+                        "account_id": account["account_id"],
+                        "scope": scope,
+                        "request": request,
+                    },
+                    provenance={
+                        "lease_scope_blocked": True,
+                        "observation_ids": [],
+                        "injection_score_max": None,
+                    },
+                    platform=account["platform"],
+                    scope=scope,
+                )
             return blocked("The requested action is outside this delegation's scope", "lease_scope")
         operation = request.get("operation") or request.get("tool")
         pack = (
@@ -540,7 +692,9 @@ class VaultService:
             ).rowcount
             if not changed:
                 raise KeyError(alias)
-        return self.get_account(alias)
+        account = self.get_account(alias)
+        self._account_mutation(account, "credential_replaced")
+        return account
 
     def update_storage_state(self, alias, state):
         """Internal browser save; never revive revoked accounts or stale secrets."""
@@ -573,7 +727,40 @@ class VaultService:
                 "UPDATE leases SET state='revoked' WHERE account_id=? AND state='issued'",
                 (account["account_id"],),
             )
+        self._account_mutation(account, "account_revoked", reason=reason)
         return {"account_id": account["account_id"], "state": "revoked", "reason": reason}
+
+    def platform_for_url(self, url):
+        try:
+            wanted = origin(url)
+        except (ValueError, TypeError):
+            return None
+        with self.database.lock:
+            reviewed = [
+                row["platform"] for row in self.database.db.execute("SELECT platform FROM terms")
+            ]
+        for platform in {*self.seed_terms, *reviewed}:
+            if self.terms(platform).get("origin") == wanted:
+                return platform
+        return None
+
+    def revoke_platform(self, run_id, platform, reason="operator_revoked"):
+        """Revoke only platform delegations held by this run's actual identity."""
+        identity_id, principal = self._run_identity(run_id)
+        with self.database.lock:
+            rows = self.database.db.execute("SELECT metadata FROM accounts").fetchall()
+        affected = []
+        for row in rows:
+            account = json.loads(row["metadata"])
+            if (
+                account["identity_id"] == identity_id
+                and account["platform"] == platform
+                and (not principal or account["attribution"]["principal"] == principal)
+            ):
+                affected.append(
+                    {"alias": account["alias"], **self.revoke(account["alias"], reason=reason)}
+                )
+        return {"revoked": affected, "platform": platform, "identity_id": identity_id}
 
     revoke_account = revoke
 

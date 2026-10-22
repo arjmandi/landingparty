@@ -8,6 +8,7 @@ injectable; missing credentials are reported rather than replaced with data.
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import json
 import math
@@ -28,6 +29,35 @@ from .util import blocked, canonical, digest, now
 
 _PROVIDER_CONTEXT = ContextVar("landing_party_provider_context", default=None)
 _PDF_LOCK = threading.Lock()
+MISTRAL_OCR_MODEL = "mistral-ocr-2505"
+
+
+def default_pricing_identity():
+    """Pure declared price/model map, independent of credentials or databases."""
+    providers = {
+        "openai": ("transcribe", "WORLD_OPENAI_USD_PER_MINUTE", "0.006", "whisper-1"),
+        "deepgram": ("transcribe", "WORLD_DEEPGRAM_USD_PER_MINUTE", "0.0043", "nova-3"),
+        "assemblyai": (
+            "transcribe",
+            "WORLD_ASSEMBLYAI_USD_PER_MINUTE",
+            "0.0035",
+            "provider-default",
+        ),
+        "mistral-ocr": (
+            "parse_document",
+            "WORLD_MISTRAL_OCR_USD_PER_PAGE",
+            "0.002",
+            MISTRAL_OCR_MODEL,
+        ),
+        "local-pdf": ("parse_document", None, "0", "pymupdf"),
+    }
+    result = {}
+    for name, (operation, binding, fallback, model) in sorted(providers.items()):
+        price = Decimal(os.environ.get(binding, fallback) if binding else fallback)
+        if not price.is_finite() or price < 0:
+            raise ValueError("Declared perception prices must be finite and nonnegative")
+        result[name] = {"operation": operation, "unit_price_usd": str(price), "model": model}
+    return result
 
 
 class ProviderBoundaryDenied(Exception):
@@ -37,18 +67,29 @@ class ProviderBoundaryDenied(Exception):
 
 
 class PerceptionProvider:
-    def __init__(self, name, *, operation, unit_price, invoke, test_only=False):
+    def __init__(
+        self, name, *, operation, unit_price, invoke, test_only=False, credential_env=None
+    ):
         self.name, self.operation = name, operation
         self.unit_price = Decimal(str(unit_price))
         if not self.unit_price.is_finite() or self.unit_price < 0:
             raise ValueError("Provider unit price must be finite and nonnegative")
         self.invoke, self.test_only = invoke, test_only
+        self.credential_env = credential_env
+
+    @property
+    def available(self):
+        return not self.credential_env or bool(os.environ.get(self.credential_env))
 
 
 def audio_seconds(raw):
     try:
         with wave.open(io.BytesIO(raw)) as audio:
-            return audio.getnframes() / audio.getframerate()
+            count, rate = audio.getnframes(), audio.getframerate()
+            frames = audio.readframes(count)
+            if count <= 0 or len(frames) != count * audio.getnchannels() * audio.getsampwidth():
+                raise ValueError("Audio frame data is empty or truncated")
+            return count / rate
     except (wave.Error, EOFError):
         # The subprocess reads only its input pipe, including nested-format references.
         result = subprocess.run(
@@ -58,8 +99,10 @@ def audio_seconds(raw):
                 "error",
                 "-protocol_whitelist",
                 "pipe",
+                "-select_streams",
+                "a:0",
                 "-show_entries",
-                "format=duration",
+                "stream=sample_rate:frame=nb_samples",
                 "-of",
                 "json",
                 "pipe:0",
@@ -71,7 +114,13 @@ def audio_seconds(raw):
         )
         if result.returncode:
             raise ValueError("Unable to determine audio duration from this resource")
-        duration = float(json.loads(result.stdout).get("format", {}).get("duration", 0))
+        # Nonseekable MP3 and other streams omit format.duration. Count decoded
+        # samples instead of guessing from a header or opening a source URL.
+        measured = json.loads(result.stdout)
+        streams = measured.get("streams", [])
+        rate = int(streams[0]["sample_rate"]) if len(streams) == 1 else 0
+        samples = sum(int(frame["nb_samples"]) for frame in measured.get("frames", []))
+        duration = samples / rate if rate > 0 else 0
         if not math.isfinite(duration) or duration <= 0:
             raise ValueError("Audio duration is missing or invalid")
         return duration
@@ -121,16 +170,41 @@ class PerceptionService(VenueDB):
         self._register_vendor("openai", "WORLD_TRANSCRIBE_OPENAI_KEY", "0.006")
         self._register_vendor("deepgram", "WORLD_DEEPGRAM_API_KEY", "0.0043")
         self._register_vendor("assemblyai", "WORLD_ASSEMBLYAI_API_KEY", "0.0035")
+        self.providers.setdefault(
+            "mistral-ocr",
+            PerceptionProvider(
+                "mistral-ocr",
+                operation="parse_document",
+                unit_price=os.environ.get("WORLD_MISTRAL_OCR_USD_PER_PAGE", "0.002"),
+                invoke=self._mistral_ocr,
+                credential_env="WORLD_MISTRAL_API_KEY",
+            ),
+        )
 
     @property
     def provider_rates(self):
         return {
-            name: {"operation": p.operation, "unit_price_usd": str(p.unit_price)}
+            name: {
+                "operation": p.operation,
+                "unit_price_usd": str(p.unit_price),
+                "available": p.available,
+            }
             for name, p in sorted(self.providers.items())
         }
 
+    def pricing_identity(self):
+        defaults = default_pricing_identity()
+        return {
+            name: {
+                "operation": provider.operation,
+                "unit_price_usd": str(provider.unit_price),
+                "model": defaults.get(name, {}).get("model", "registered-callback"),
+            }
+            for name, provider in sorted(self.providers.items())
+        }
+
     def _register_vendor(self, vendor, env_key, rate):
-        if os.environ.get(env_key) and vendor not in self.providers:
+        if vendor not in self.providers:
 
             async def invoke(raw, options):
                 key = os.environ.get(env_key)
@@ -143,7 +217,58 @@ class PerceptionService(VenueDB):
                 operation="transcribe",
                 unit_price=os.environ.get(f"WORLD_{vendor.upper()}_USD_PER_MINUTE", rate),
                 invoke=invoke,
+                credential_env=env_key,
             )
+
+    async def _mistral_ocr(self, raw, options):
+        payload = {
+            "model": MISTRAL_OCR_MODEL,
+            "document": {
+                "type": "document_url",
+                "document_url": "data:application/pdf;base64," + base64.b64encode(raw).decode(),
+            },
+            "include_image_base64": False,
+        }
+        if options.get("pages"):
+            payload["pages"] = [page - 1 for page in options["pages"]]
+        response = await self._provider_request(
+            "POST",
+            "https://api.mistral.ai/v1/ocr",
+            json=payload,
+            headers={"Authorization": "Bearer " + os.environ["WORLD_MISTRAL_API_KEY"]},
+        )
+        response.raise_for_status()
+        result = response.json()
+        expected = options.get("pages") or list(
+            range(1, await asyncio.to_thread(pdf_pages, raw) + 1)
+        )
+        pages = result.get("pages")
+        processed = result.get("usage_info", {}).get("pages_processed")
+        if (
+            isinstance(processed, bool)
+            or not isinstance(processed, int)
+            or processed != len(expected)
+            or not isinstance(pages, list)
+            or len(pages) != len(expected)
+            or {page.get("index") for page in pages if isinstance(page, dict)}
+            != {page - 1 for page in expected}
+            or any(not isinstance(page.get("markdown"), str) for page in pages)
+            or any(
+                isinstance(page.get("index"), bool) or not isinstance(page.get("index"), int)
+                for page in pages
+            )
+        ):
+            raise ValueError("OCR usage/pages do not match the accepted page quote")
+        if result.get("model") != MISTRAL_OCR_MODEL:
+            raise ValueError("OCR provider changed the registered model snapshot")
+        return {
+            "pages": [
+                {"page": page["index"] + 1, "text": page["markdown"]}
+                for page in sorted(pages, key=lambda page: page["index"])
+            ],
+            "extractor_id": "mistral-ocr@" + MISTRAL_OCR_MODEL,
+            "usage": {"pages_processed": processed},
+        }
 
     async def _transcribe(self, vendor, key, raw, options):
         if vendor == "openai":
@@ -314,6 +439,7 @@ class PerceptionService(VenueDB):
                 "handle": handle,
                 "source_hash": digest(raw),
                 "provider": name,
+                "provider_identity": self.pricing_identity()[name],
                 "options": options,
                 "units": str(units),
                 "unit": unit,
@@ -350,7 +476,7 @@ class PerceptionService(VenueDB):
                     "INSERT INTO perception_quotes VALUES (?,?,?,'quoted',NULL,NULL)",
                     (quote_id, run_id, canonical(item)),
                 )
-            quotes.append(item)
+            quotes.append({**item, "available": provider.available})
         return quotes
 
     async def handle(self, run_id, action_id, tool, params):
@@ -444,7 +570,26 @@ class PerceptionService(VenueDB):
                 "perception_quote_state",
             )
         provider = self.providers[selected["provider"]]
+        if not provider.available:
+            return blocked(
+                "policy_deny",
+                "This quoted provider has no world-held credential configured",
+                "perception_provider_unavailable",
+            )
         config = self.store.get_run(run_id)["config"]
+        frozen = config.get("perception_pricing")
+        if frozen is not None and frozen.get(selected["provider"]) != selected["provider_identity"]:
+            return blocked(
+                "policy_deny",
+                "Perception pricing/model differs from this run's frozen registration",
+                "perception_price_drift",
+            )
+        if frozen is None and config.get("research_mode", "development") != "development":
+            return blocked(
+                "policy_deny",
+                "Research perception requires frozen provider pricing",
+                "perception_price_registration",
+            )
         if (
             config.get("research_mode", "development") == "development"
             and selected["provider"] != "local-pdf"

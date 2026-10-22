@@ -85,6 +85,68 @@ async def test_paid_receipt_is_single_use_and_debited_exactly(world):
     assert len(adapter.calls) == 1
 
 
+async def test_payment_stop_drains_before_seal_and_retains_unknown_spend_hold(world):
+    class SlowAdapter(PaymentAdapter):
+        async def pay(self, **request):
+            self.started.set()
+            await asyncio.Event().wait()
+
+    run_id = world.run(stage=3)
+    adapter = SlowAdapter()
+    adapter.started = asyncio.Event()
+    ledger = PaymentMandateLedger(world, adapter=adapter, clock=world.clock)
+    approved, args = await mandate(world, ledger, run_id)
+    task = asyncio.create_task(
+        ledger.pay(run_id, "a_pay", approved["mandate_id"], args["action"], "2")
+    )
+    await adapter.started.wait()
+    world.store.update_run(run_id, state="stopping")
+    await asyncio.wait_for(ledger.stop_run(run_id), 2)
+    assert task.cancelled()
+    assert ledger.list_for_run(run_id)[0]["state"] == "uncertain"
+    assert world.store.reserved(run_id) == 2
+    assert world.store.get_run(run_id)["tainted"]
+    world.store.append_record(run_id, "seal")
+    world.store.update_run(run_id, state="sealed")
+    assert world.store.records(run_id)[-1]["kind"] == "seal"
+
+
+async def test_agent_payment_ask_binds_actual_quote_and_rejects_invented_amount(world):
+    run_id = world.run(stage=3)
+    payments = PaymentMandateLedger(world, clock=world.clock)
+    world.services["payments"] = payments
+    world.store.append_record(
+        run_id,
+        "action",
+        action_id="a_fetch",
+        tool="fetch",
+        params={"url": "https://merchant.test/article"},
+    )
+    asks = world.services["asks"]
+    params = {"kind": "grant_payment", "text": "Read the article", "action_ref": "a_fetch"}
+    assert (await asks.handle(run_id, "a_ask", "ask", params))["rule_id"] == "payment_quote"
+    world.store.append_record(
+        run_id,
+        "outcome",
+        action_id="a_fetch",
+        resource=None,
+        reply={
+            "kind": "blocked",
+            "type": "paywall_402",
+            "amount": "1.25",
+            "merchant": "https://merchant.test",
+            "quote_hash": "sha256:observed-quote",
+        },
+    )
+    pending = await asks.handle(run_id, "a_ask", "ask", params)
+    body = asks.get(pending["ticket_id"])["body"]
+    assert body["ceiling"] == "1.25" and body["action"]["quote_hash"] == "sha256:observed-quote"
+    asks.answer(pending["ticket_id"], "approve")
+    world.clock.advance(5)
+    result = await asks.handle(run_id, "a_retry", "ask", params)
+    assert result["mandate"]["ceiling"] == "1.25"
+
+
 async def test_402_handler_does_not_invent_or_pay_an_unapproved_quote(world):
     run_id = world.run(stage=3)
     adapter = PaymentAdapter()

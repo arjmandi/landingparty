@@ -1,5 +1,6 @@
 """Cross-service regressions found by independent review of the root integration."""
 
+import json
 from pathlib import Path
 
 import httpx
@@ -161,3 +162,194 @@ async def test_accepted_unfinished_ticket_is_counted_at_episode_end(reviewed_wor
     assert asks.answer(ticket["ticket_id"], "deposit")["state"] == "accepted"
     ended = await world.end_run(run_id)
     assert ended["end"]["open_tickets_at_end"] == 1
+
+
+async def test_shuffled_control_uses_only_new_links_and_one_public_history_row(reviewed_world):
+    from worldd.belief_controls import prepare_control
+
+    world, _ = reviewed_world
+    service = world.services["beliefs"]
+    donor = world.create_run(RunConfig(stage=1, packs=["belief", "deliver"]))["run_id"]
+    evidence = await world.act(donor, "deliver", {"kind": "note", "body": "Source control fixture"})
+    ids = []
+    for index, rank in enumerate((3, 5)):
+        result = await world.act(
+            donor,
+            "believe",
+            {
+                "record": {
+                    "kind": "rule",
+                    "claim": f"Review controlled strategy {index} carefully.",
+                    "rank": rank,
+                    "evidence": [{"ref": evidence["action_id"], "class": "observed"}],
+                }
+            },
+        )
+        ids.append(result["data"]["id"])
+    assert (
+        await world.act(donor, "link", {"from": ids[0], "to": ids[1], "relation": "contradicts"})
+    )["kind"] == "result"
+    await world.end_run(donor)
+    original = service.export_bundle(donor)
+    by_id = {row["id"]: row for row in original["projection"]}
+    seed = next(
+        seed
+        for seed in range(64)
+        if any(
+            row["links"] != by_id[row["id"]]["links"]
+            for row in prepare_control(original, seed)["projection"]
+        )
+    )
+    child = world.create_run(
+        RunConfig(
+            stage=1,
+            packs=["belief"],
+            seed=seed,
+            belief_import_policy="shuffled",
+            iota={"beliefs": f"import({donor})"},
+        )
+    )["run_id"]
+    current = service.fold(child)
+    for row in current:
+        assert row["n_contra"] == sum(edge["relation"] == "contradicts" for edge in row["links"])
+        history = service.query(child, query="history", id=row["id"])
+        assert len(history) == 1 and history[0]["rank"] == row["rank"]
+        assert "initial_condition" not in json.dumps(
+            history + [service.query(child, query="why", id=row["id"])]
+        )
+    for file in service.beliefs(child).views_dir.iterdir():
+        assert "world_experimental_initialization" not in file.read_text()
+        assert "source_projection_hash" not in file.read_text()
+    private = world.store.run_dir(child) / "belief-controls/authenticated-donor.json"
+    assert service.validate_bundle(json.loads(private.read_text()))["valid"]
+    assert service.fold(donor) == list(by_id.values())
+
+
+async def test_judge_and_public_review_routes_exist_only_on_trusted_control(tmp_path, monkeypatch):
+    from worldd.public_identity import create_public_app
+    from worldd.security import create_agent_app
+
+    monkeypatch.setenv("WORLD_CONTROL_TOKEN", "review-control-authority")
+    app = create_app(tmp_path)
+    world = app.state.world
+    try:
+        async with (
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url="http://control"
+            ) as control,
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(create_agent_app(world)), base_url="http://agent"
+            ) as agent,
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(create_public_app(world)), base_url="http://public"
+            ) as public,
+        ):
+            headers = {"X-World-Control-Token": "review-control-authority"}
+            for path in ("/v1/judge-canaries", "/v1/public-incident-reports"):
+                assert (await control.get(path)).status_code == 401
+                assert (await agent.get(path)).status_code == 404
+                assert (await public.get(path)).status_code == 404
+                assert (await control.get(path, headers=headers)).status_code == 200
+            assert (await control.post("/v1/judge-canaries/tick")).status_code == 401
+            assert (await agent.post("/v1/judge-canaries/tick")).status_code == 404
+            assert (await public.post("/v1/judge-canaries/tick")).status_code == 404
+            assert (
+                await control.post("/v1/judge-canaries/tick", headers=headers)
+            ).status_code == 200
+            malformed = await control.post(
+                "/v1/judge-canaries",
+                headers=headers,
+                json={
+                    "source_run_id": "missing",
+                    "config": {"callback": "os.system", "method_name": "__import__"},
+                },
+            )
+            assert malformed.status_code in {400, 404}
+            assert world.services["judge_canaries"].list() == []
+    finally:
+        await world.aclose()
+
+
+async def test_shuffle_rebuilds_only_graph_feedback_and_preserves_direct_counterevidence(
+    reviewed_world,
+):
+    from worldd.belief_controls import prepare_control
+
+    world, _ = reviewed_world
+    service = world.services["beliefs"]
+    donor = world.create_run(RunConfig(stage=1, packs=["belief", "deliver"]))["run_id"]
+    evidence = await world.act(
+        donor, "deliver", {"kind": "note", "body": "Counterevidence fixture"}
+    )
+    fact = (
+        await world.act(
+            donor,
+            "believe",
+            {
+                "record": {
+                    "kind": "fact",
+                    "claim": "Fixture harbour remains open.",
+                    "rank": 4,
+                    "triple": {
+                        "subject": "fixture harbour",
+                        "predicate": "status",
+                        "object": "open",
+                    },
+                    "evidence": [{"ref": evidence["action_id"], "class": "observed"}],
+                }
+            },
+        )
+    )["data"]["id"]
+    dependent = (
+        await world.act(
+            donor,
+            "believe",
+            {
+                "record": {
+                    "kind": "strategy",
+                    "claim": "Visit the fixture harbour tomorrow.",
+                    "rank": 3,
+                    "links": [{"to": fact, "relation": "derived_from"}],
+                }
+            },
+        )
+    )["data"]["id"]
+    await world.act(
+        donor,
+        "believe",
+        {
+            "record": {
+                "kind": "strategy",
+                "claim": "Use another fixture source instead.",
+                "rank": 5,
+                "evidence": [{"ref": evidence["action_id"], "class": "observed"}],
+            }
+        },
+    )
+    await service.observe(
+        donor,
+        {
+            "observation_ref": "review_actual_counterevidence",
+            "triple": {"subject": "fixture harbour", "predicate": "status", "object": "closed"},
+        },
+    )
+    await world.end_run(donor)
+    bundle = service.export_bundle(donor)
+    before = json.dumps(bundle, sort_keys=True)
+    original = {row["id"]: row for row in bundle["projection"]}
+    assert original[dependent]["kernel"]["support_lost"]
+    controls = (prepare_control(bundle, seed) for seed in range(64))
+    control = next(
+        control
+        for control in controls
+        if any(row["links"] != original[row["id"]]["links"] for row in control["projection"])
+    )
+    for row in control["projection"]:
+        for lost in row["kernel"]["support_lost"]:
+            assert {"to": lost["from"], "relation": "derived_from"} in row["links"]
+            assert lost["observation_ref"] == "review_actual_counterevidence"
+        if row["id"] == fact:
+            assert row["n_contra"] == original[fact]["n_contra"] == 1
+            assert row["kernel"]["evidence"] == original[fact]["kernel"]["evidence"]
+            assert row["kernel"]["classifications"] == original[fact]["kernel"]["classifications"]
+    assert json.dumps(bundle, sort_keys=True) == before

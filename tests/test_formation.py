@@ -385,3 +385,48 @@ async def test_reusing_one_billed_child_for_multiple_labels_is_rejected(environm
         await runner(world, ReusedReceipt(world)).run(
             source, beliefs=[belief(index) for index in range(3)]
         )
+
+
+def test_cross_seed_companion_stability_filters_unconfirmed_records_and_reports_denominators():
+    confirmed = {**belief(0), "author": "agent", "reconfirmed_from": "bv_proposal"}
+    source = [confirmed, belief(1)]
+    target = [confirmed, belief(2)]
+    result = cross_seed_stability(
+        [{"seed": 1, "beliefs": source}, {"seed": 2, "beliefs": target}],
+        reflection_policy="companion",
+    )
+    assert result["mean_jaccard"] == 1
+    assert [row["included_n"] for row in result["formation_eligibility"]] == [1, 1]
+    assert [row["excluded_n"] for row in result["formation_eligibility"]] == [1, 1]
+    with pytest.raises(ValueError, match="same reflection treatment"):
+        cross_seed_stability(
+            [
+                {"seed": 1, "beliefs": source},
+                {"seed": 2, "beliefs": target, "reflection_policy": "none"},
+            ],
+            reflection_policy="companion",
+        )
+
+
+async def test_companion_prose_formation_excludes_unconfirmed_records_before_paid_calls(
+    environment,
+):
+    from worldd.registry import RegistryService
+
+    world, _ = environment
+    world.services["registry"] = RegistryService(world)
+    source = world.create_run(
+        RunConfig(stage=1, packs=["belief", "reflect"], reflection_policy="companion")
+    )["run_id"]
+    await world.end_run(source)
+    model = RecordedModel(world)
+    result = await runner(world, model).run(
+        source,
+        beliefs=[{**belief(0), "reconfirmed_from": "bv_previous"}, belief(1)],
+        revision_observations=[{**revision_row(), "belief_id": "b_1"}],
+    )
+    assert result["formation_eligibility"]["included_n"] == 1
+    assert result["formation_eligibility"]["excluded_n"] == 1
+    assert result["formation_eligibility"]["excluded_revision_observations"] == 1
+    assert result["prose"]["sample"]["ids"] == ["b_0"]
+    assert not model.requests

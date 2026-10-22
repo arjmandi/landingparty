@@ -38,6 +38,27 @@ async def main():
         },
     ]
     calls, errors, active = [], [], set()
+    standing = [
+        {
+            "rule_id": "sr_fixture",
+            "kind": "approval",
+            "platform": "fixture",
+            "scope": "post",
+            "reason": "not permitted",
+        }
+    ]
+    contamination, incidents, console_cursors = [], [], []
+    incoming = [
+        {
+            "report_id": "ir_public",
+            "identity_id": "id_fixture",
+            "owner": "Fixture operator",
+            "report": "<script>window.publicReportXss=true</script>",
+            "contact": "optional contact",
+            "body_hash": "sha256:fixture",
+        }
+    ]
+    triages = []
     backend = PlaywrightBackend(state_dir=Path("/tmp/console-browser"))
     checks = {}
     try:
@@ -74,6 +95,44 @@ async def main():
                 result = {"tickets": tickets}
             elif path == "/v1/sessions":
                 result = {"sessions": []}
+            elif path == "/v1/console/state":
+                from urllib.parse import parse_qs
+
+                console_cursors.append(int(parse_qs(parsed.query)["since"][0]))
+                result = {
+                    "cursor": 9,
+                    "activity": [{"kind": "browser_action", "tool": "goto"}],
+                    "human": {"seconds": 0},
+                    "standing_rejections": standing,
+                    "incidents": incidents,
+                    "contamination": contamination,
+                }
+            elif path == "/v1/asks/standing/sr_fixture/revoke":
+                standing.clear()
+                result = {"revoked": True}
+            elif path == "/v1/contamination":
+                assert body["owner"] == "Fixture operator" and body["human_seconds"] == 6
+                contamination.append(body)
+                result = body
+            elif path == "/v1/incidents":
+                assert body["owner"] == "Fixture operator" and body["platform"] == "fixture"
+                incidents.append(body)
+                result = {"kind": "result", "revocation": "confirmed"}
+            elif path == "/v1/public-incident-reports":
+                result = {"reports": incoming}
+            elif path == "/v1/public-incident-reports/ir_public/triage":
+                assert (
+                    body["run_id"] == "r_fixture"
+                    and body["platform"] == "fixture"
+                    and body["decision"] == "accept"
+                )
+                triages.append(body)
+                incoming.clear()
+                result = {"state": "accepted", "incident_ref": "fp_fixture"}
+            elif path == "/v1/mandates":
+                expected = next(item["body"] for item in tickets if item["kind"] == "grant_payment")
+                assert body == {"run_id": "r_fixture", **expected}
+                result = {"mandate_id": "mandate_fixture"}
             elif path.endswith("/touch"):
                 ticket_id = path.split("/")[-2]
                 if body["active"]:
@@ -152,6 +211,70 @@ async def main():
         answer = next(body for path, body in calls if path == "/v1/asks/t_approval/answer")
         checks["approval_matches_api_enum"] = answer["decision"] == "approve"
         checks["one_active_ticket"] = len(active) == 0
+        await page.get_by_role("button", name="Activity, standing orders and incidents").click()
+        await page.get_by_text("Standing rejections", exact=True).wait_for()
+        await page.get_by_role("button", name="Revoke standing rejection", exact=True).click()
+        checks["standing_rule_revocation"] = not standing
+        await page.get_by_label("Triage platform", exact=True).fill("fixture")
+        await page.get_by_role(
+            "button", name="Accept report and revoke affected authority", exact=True
+        ).click()
+        checks["public_report_review_before_revocation"] = (
+            len(triages) == 1
+            and not incoming
+            and await page.evaluate("window.publicReportXss !== true")
+        )
+        await page.get_by_label("Incident platform", exact=True).fill("fixture")
+        await page.get_by_label("Human owner", exact=True).fill("Fixture operator")
+        await page.get_by_label("Incident detail", exact=True).fill("A fixture complaint")
+        await page.get_by_role(
+            "button", name="Record incident and revoke affected authority"
+        ).click()
+        await page.get_by_label("Ad hoc help or pasted material", exact=True).fill(
+            "Unscheduled fixture hint"
+        )
+        await page.get_by_label("Actual additional human seconds (maximum 600)", exact=True).fill(
+            "6"
+        )
+        await page.get_by_role("button", name="Record contamination", exact=True).click()
+        await page.get_by_text("Contamination recorded; run marked tainted.", exact=True).wait_for()
+        checks["incident_owner_and_contamination"] = len(incidents) == len(contamination) == 1
+        await page.get_by_role("button", name="Activity, standing orders and incidents").click()
+        await page.locator("#runs pre").filter(has_text="Unscheduled fixture hint").wait_for()
+        checks["activity_since_visit_cursor"] = console_cursors == [0, 9]
+        tickets.append(
+            {
+                "ticket_id": "t_payment",
+                "run_id": "r_fixture",
+                "kind": "grant_payment",
+                "state": "open",
+                "agent_text": "Read fixture article",
+                "provenance": {},
+                "body": {
+                    "merchant": "https://merchant.fixture.test",
+                    "ceiling": "1.25",
+                    "purpose": "Read fixture article",
+                    "expires_at": "2099-01-01T00:00:00+00:00",
+                    "action": {
+                        "url": "https://merchant.fixture.test/article",
+                        "quote_hash": "sha256:observed-fixture",
+                    },
+                },
+            }
+        )
+        await page.get_by_label("Researcher control token").fill(token)
+        await page.get_by_role("button", name="Connect / refresh").click()
+        await page.get_by_text("grant_payment · open · t_payment", exact=True).click()
+        await (
+            page.locator("details")
+            .filter(has_text="t_payment")
+            .get_by_role("button", name="Approve exact action")
+            .click()
+        )
+        await page.get_by_text("No open tickets.", exact=True).wait_for()
+        checks["payment_approval_issues_only_exact_canonical_mandate"] = any(
+            path == "/v1/mandates" for path, _ in calls
+        )
         visible = await page.locator("body").inner_text()
         checks["no_secret_or_token_in_visible_output"] = all(
             value not in visible

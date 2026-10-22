@@ -22,6 +22,30 @@ GAINS = {
 }
 
 
+def exposed_urls(records):
+    """Conservative item exposure set, including redirected batch/browser outcomes."""
+    urls = set()
+    for record in records:
+        if record.get("kind") == "action":
+            params = record.get("params", {})
+            urls.update(
+                url for url in params.get("urls", [params.get("url")]) if isinstance(url, str)
+            )
+        resources = [
+            record.get("resource"),
+            record.get("reply"),
+            (record.get("event") or {}).get("reply"),
+        ]
+        for resource in resources:
+            if isinstance(resource, dict):
+                urls.update(
+                    resource[key]
+                    for key in ("url", "final_url")
+                    if isinstance(resource.get(key), str)
+                )
+    return sorted(urls)
+
+
 def _score(value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
         raise TypeError("probe scores and probabilities must be numbers in [0, 1]")
@@ -114,6 +138,7 @@ def expectation_calibration(
     resolved = []
     resolved_total = 0
     outcomes = defaultdict(int)
+    excluded = defaultdict(int)
     for row in rows:
         outcome = row.get("outcome", "open")
         if isinstance(outcome, dict) and "expired" in outcome:
@@ -126,6 +151,12 @@ def expectation_calibration(
             continue
         probability = _score(row["p"])
         if outcome in {"held", "missed"}:
+            if row.get("headline_eligible") is False or row.get("late_final") is True:
+                excluded["late_or_ineligible_resolution"] += 1
+                continue
+            if row.get("grounded") is False or row.get("grounded_eligible") is False:
+                excluded["non_grounded_resolution"] += 1
+                continue
             resolved.append((probability, int(outcome == "held")))
     sufficient = len(resolved) >= minimum_resolved
     bins = []
@@ -158,6 +189,7 @@ def expectation_calibration(
         "total": len(rows),
         "resolved": resolved_total,
         "binary_resolved": len(resolved),
+        "excluded_from_calibration": dict(excluded),
         "outcomes": dict(outcomes),
         "resolution_coverage": resolved_total / len(rows) if rows else None,
         "brier": (

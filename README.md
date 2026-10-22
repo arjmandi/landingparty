@@ -16,10 +16,13 @@ uv run --no-sync pytest -q
 uv run --no-sync worldd --data-dir data
 ```
 
-The full extra installs Playwright, PDF parsing and additional extractors.
+The `full` extra installs Playwright, PDF parsing and additional extractors;
+`standards` installs pinned OpenEnv, Inspect, Harbor and OpenHands SDKs.
 Browser operation also needs a sandbox-capable Chromium and `certutil`; see
 [deployment](deploy/README.md). `WORLD_CHROMIUM_EXECUTABLE` selects a trusted
 system Chromium. The browser does not disable its sandbox or ignore TLS errors.
+Non-WAV audio inspection needs `ffprobe` (the `ffmpeg` package); the production
+world image includes it for deterministic duration-based quotes.
 
 The process binds loopback by default:
 
@@ -29,6 +32,7 @@ The process binds loopback by default:
 | 7778 | Agent tools, inbox, manifest and status | Run-scoped bearer token returned on creation/activation |
 | 8081 | OpenAI/Anthropic model lane | Run-scoped token; provider keys remain world-held |
 | 8080 | Recorded HTTP/HTTPS proxy | Per-run credentials and the world CA |
+| 7779 (optional) | Public identity and incident intake | No control routes; enable with `--public-port 7779` |
 
 Keep control outside the agent's namespace. The [fenced deployment](deploy/README.md)
 provides default-drop egress and separate users. Cooperative local development
@@ -79,6 +83,7 @@ the local launcher itself does not create these mounts.
 
 The [coverage report](docs/implementation-status.md) maps these to implementation
 and remaining validation. Each subsystem's operating contract is linked there.
+The [runtime audit](docs/runtime-audit.md) records the additional boundary fixes.
 The [verification record](docs/verification.md) lists the checks completed here
 and the operating evidence still required.
 
@@ -94,6 +99,7 @@ Fixtures cannot unlock research gates.
 | --- | --- |
 | `WORLD_CONTROL_TOKEN` | Trusted control authorization |
 | `WORLD_BRAVE_API_KEY` | Brave search, declared $0.005 per attempted provider call |
+| `WORLD_EXA_API_KEY` | Alternate Exa neural search; select `search_provider: exa`, declared $0.005 per attempted call |
 | `WORLD_OPENAI_API_KEY`, `WORLD_ANTHROPIC_API_KEY` | World-held model authentication |
 | `WORLD_OPENAI_UPSTREAM`, `WORLD_ANTHROPIC_UPSTREAM` | Trusted provider roots |
 | `WORLD_PRICE_TABLE`, `WORLD_POLICY_FILE` | Reviewed price table and gateway policy |
@@ -111,7 +117,9 @@ No paid experiment, scientific pilot, 14-day life, day-30 reading or 90-day
 company study has completed here. The heuristic injection scanner is explicitly
 uncalibrated; category/terms tables need operator review. A real native Claude
 Code 2.1.308 fixture pilot passed with two concurrent MCP fetches and reconciled
-usage; paid Claude studies and native Harbor/OpenHands pilots remain unrun.
+usage. Native OpenEnv, Inspect and OpenHands SDK checks and an actual fenced
+Harbor environment have also run against local fixtures. Paid provider studies
+and real external venue cohorts remain unrun.
 G/V/J/S remain separate, and missing evidence is unmeasured rather than zero.
 
 ## Validate

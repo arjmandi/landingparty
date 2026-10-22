@@ -8,21 +8,34 @@ gates or establish real-provider billing agreement.
 | --- | --- |
 | Frozen all-extras installation and lock consistency | Passed |
 | Ruff and formatting | Passed |
-| Complete test suite, with Docker skill tests enabled | 686 passed, zero skipped; 79.37 seconds |
+| Complete test suite, with Docker skill tests enabled | 1,049 passed, zero skipped; 210.90 seconds |
 | Actual isolated skill-worker cases within that suite | Eight passed |
-| Wheel build and resource inspection | Passed; 178 files, all eight package groups present |
-| Installed-wheel check outside checkout, without editable activation | Imports, packaged resources and initialization of all 27 services passed |
-| Running four-interface server | Eleven smoke checks passed; sealed record and ledger remained valid after restart |
+| Wheel build and resource inspection | Passed; 218 wheel entries, all eight package groups, 188 implementation files and 87 packaged resources checked against source |
+| Installed-wheel check outside checkout, without editable activation | Python `-I`, sanitized environment, 30 initialized services; protected create/deliver/seal, record/ledger and separate control/agent/public authority passed |
+| Frozen dependency resolution and installed compatibility | 228 lock records; 222 compatible dependencies plus installed project, including cryptography 45.0.7 |
+| Running five-interface server | Eleven smoke checks passed; optional public listener enabled; public control/agent routes absent; sealed record and ledger unchanged after owned-process restart |
 | Passive debrief and twelve-run study planning | Passed; no paid calls or study execution |
 | Native Claude Code 2.1.308 fixture pilot | Passed through the generated launcher and real MCP subprocess; two concurrent fetches, two model calls, valid seal and ledger |
-| Final world and minimal-agent images | Built successfully; `c56c3372d9a0` and `9e8278a7c8ac` |
-| Final image inventory and source identity | Eight checks passed; world modules match the checkout, packaged resources exist, and both image users are correct |
+| Native OpenEnv/Inspect/OpenHands SDK fixture pilots | Passed using actual pinned SDKs, real metered model/MCP interfaces and sanitized child environments; zero fallback external attempts |
+| Native Harbor 0.24 fenced deployment | Eleven checks passed against the final agent image: actual environment factory/start/exec, trial logs, chunked transfers, path restrictions, firewall drops and bound-agent cleanup |
+| Final world and minimal-agent images | Built successfully; `6acd1f556818` and `7290f171e014` |
+| Final image inventory and source identity | Thirteen checks passed; packaged modules/resources match the checkout, 30 services initialize, the checkpoint worker runs, and agent/server separation and image users are correct |
 | Actual fenced-agent deployment | Fourteen checks passed, including blocked direct/DNS/control egress and absence of researcher/server modules |
 | Actual sandboxed Chromium | Five checks passed; PID namespace and Seccomp-BPF sandboxes enabled |
 | Containerized world authorization, agent scope and sealing | Six checks passed |
-| Browser console packaged in the final world image | Eleven checks passed, without source bind mounts |
+| Actual Docker harness binding | Eight checks passed |
+| Cross-user sealed workspace import | Seven checks passed using only packaged implementation |
+| Signed host observer in final world image | Fifteen checks passed, including exact packaged modules, one-use configuration binding, protected submission, activation and actual world-process death/fence survival |
+| Browser console packaged in the final world image | Sixteen checks passed, without source overrides |
+| Browser login/site-tool paths packaged in the final world image | Eleven checks passed, including native/declarative tools and HTTP MCP SSE; no source overrides |
+| Actual MP3 decode and vendor quotes in final world image | Five checks passed, network disabled; 2.088-second decoded stream, three exact quotes, zero spend |
 
-The native pilot used deterministic provider/website responses. Its declared
+The validated wheel SHA-256 is
+`caf3a1664e454ed0229a70882fad5093167245afd889c1333f6c884deadfd408`;
+its canonical packaged implementation manifest is
+`7bc20106b09161a537a0ca75f09a37fb275c2483fe89430e2423466e6e027faa`.
+
+The native pilots used deterministic provider/website responses. Claude's declared
 fixture usage reconciled to $0.0018; it made zero paid external calls and the
 denying fallback proxy observed zero attempts. It does not verify a provider's
 actual bill. The test suite emitted two upstream Starlette/httpx deprecation
@@ -44,8 +57,8 @@ Live model/search/perception services need securely configured credentials and
 reviewed prices. Account and payment operations need the corresponding owned
 identities, approved venues and scopes. Research needs frozen tasks and hidden
 banks, calibrated instruments, registered budgets and gates, current terms and,
-where applicable, IRB/consent. Native OpenHands/Harbor deployments and real-provider
-cohorts have not been run here.
+where applicable, IRB/consent. The native pilots establish adapter/software
+behavior; real-provider cohorts have not been run here.
 
 Section 11.4 additionally requires the twelve-run scientific shakedown, R1,
 a 14-day life with a day-30 reading, and a company life with a 90-day window.

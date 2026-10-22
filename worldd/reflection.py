@@ -175,16 +175,40 @@ class ReflectionService:
 
     def _context(self, run_id, event, *, companion=False):
         records = self._beliefs().fold(run_id)
+        open_tickets = set()
+        asks = getattr(self.world, "services", {}).get("asks")
+        if asks is not None:
+            for source in self._scope_runs(run_id):
+                open_tickets.update(
+                    ticket["ticket_id"]
+                    for ticket in asks.list_tickets(source["run_id"])
+                    if ticket["state"] in {"open", "accepted"}
+                )
+        else:
+            for record in records:
+                for ticket in record.get("assumptions", []):
+                    resolved = self._beliefs()._resolve_evidence(run_id, ticket)
+                    if resolved and resolved.get("state") in {"open", "accepted"}:
+                        open_tickets.add(ticket)
+        entities = {
+            (record.get("triple") or {}).get("subject")
+            for record in records
+            if open_tickets.intersection(record.get("assumptions", []))
+        }
+        entities.discard(None)
         # Put open-ticket entities first, then sort by entity and observation time.
         records.sort(
             key=lambda record: (
-                not bool(record.get("assumptions")),
+                not (
+                    bool(open_tickets.intersection(record.get("assumptions", [])))
+                    or (record.get("triple") or {}).get("subject") in entities
+                ),
                 (record.get("triple") or {}).get("subject", ""),
                 record["recorded_at"],
                 record["id"],
             )
         )
-        context = {"event": event, "beliefs": []}
+        context = {"event": event, "open_ticket_ids": sorted(open_tickets), "beliefs": []}
         for record in records:
             candidate = {**context, "beliefs": context["beliefs"] + [record]}
             if len(_canonical(candidate).encode()) > 11000:
@@ -236,7 +260,7 @@ class ReflectionService:
                 author="reflector" if companion else "agent",
             )
             results.append(result)
-        if inference_count > 5:
+        if inference_count > 5 and self._beliefs().beliefs(run_id).enable_flags:
             self.database.audit(
                 run_id,
                 "belief_flag",

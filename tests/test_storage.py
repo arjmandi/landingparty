@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -76,6 +77,139 @@ def test_reservations_prevent_concurrent_unmetered_spend(store):
     assert not store.settle(hold, "model", "0.3")
     assert store.debit(run_id, "search", "0.7")
     assert store.reconcile(run_id)["valid"]
+
+
+def test_ledger_observer_sees_committed_charge_and_can_append_its_record(store):
+    run_id = start(store)
+    observed = []
+
+    def capture(source, event):
+        assert source == run_id and not store.db.in_transaction
+        assert store._mirror_offsets is None
+        assert store._ledger_observation == (source, event["seq"], event["hash"])
+        assert store.records(source)[-1] == event
+        observed.append((event, store.total_spent(source)))
+        store.append_record(source, "workspace_checkpoint", debit_seq=event["seq"])
+
+    store.ledger_observer = capture
+    assert store.debit(run_id, "model", ".2")
+    hold = store.reserve(run_id, ".5")
+    assert len(observed) == 1
+    assert not store.settle(hold, "model", ".6")
+    assert len(observed) == 1
+    store.update_run(run_id, state="stopping")
+    assert store.settle(hold, "model", ".3")
+    assert not store.settle(hold, "model", ".3")
+    assert [total for _, total in observed] == [0.2, 0.5]
+    assert observed[1][0]["reservation_id"] == hold
+    assert store.records(run_id)[-1]["kind"] == "workspace_checkpoint"
+    assert store._ledger_observation is None
+    assert store.verify_record(run_id)["valid"] and store.reconcile(run_id)["valid"]
+
+
+def test_reentrant_ledger_observation_restores_outer_trusted_context(store):
+    run_id = start(store)
+    contexts = []
+
+    def observe(source, event):
+        expected = (source, event["seq"], event["hash"])
+        assert store._ledger_observation == expected
+        contexts.append(expected)
+        if event["category"] == "outer":
+            assert store.debit(source, "inner", ".1")
+            assert store._ledger_observation == expected
+
+    store.ledger_observer = observe
+    assert store.debit(run_id, "outer", ".1")
+    assert len(contexts) == 2 and contexts[0] != contexts[1]
+    assert store._ledger_observation is None
+    assert store.total_spent(run_id) == 0.2 and store.verify_record(run_id)["valid"]
+
+
+def test_ledger_rollback_never_calls_observer(store, monkeypatch):
+    run_id = start(store)
+    observed = []
+    store.ledger_observer = lambda *args: observed.append(args)
+    charge = store._charge
+
+    def fail(*args, **kwargs):
+        charge(*args, **kwargs)
+        raise OSError("charge commit interrupted")
+
+    monkeypatch.setattr(store, "_charge", fail)
+    with pytest.raises(OSError):
+        store.debit(run_id, "model", ".2")
+    assert observed == [] and store.total_spent(run_id) == 0
+    hold = store.reserve(run_id, ".5")
+    with pytest.raises(OSError):
+        store.settle(hold, "model", ".2")
+    assert observed == [] and store.reserved(run_id) == 0.5
+    assert store.verify_record(run_id)["valid"]
+
+
+@pytest.mark.parametrize("error", [RuntimeError, asyncio.CancelledError])
+def test_ledger_observer_failure_does_not_change_actual_billing_result(store, error):
+    run_id = start(store)
+
+    def fail(*args):
+        raise error("capture interrupted after charge")
+
+    store.ledger_observer = fail
+    assert store.debit(run_id, "model", ".2")
+    assert store.total_spent(run_id) == 0.2
+    event = store.records(run_id)[-1]
+    assert event["kind"] == "checkpoint_capture_error"
+    assert event["error"] == error.__name__
+    assert event["debit_ref"]["hash"] == store.records(run_id)[-2]["hash"]
+    assert store.verify_record(run_id)["valid"] and store.reconcile(run_id)["valid"]
+
+
+def test_ledger_observer_never_adds_failure_after_callback_seals_source(store):
+    run_id = start(store)
+
+    def seal_then_fail(source, event):
+        store.append_record(source, "seal")
+        store.update_run(source, state="sealed")
+        raise ValueError("observer cleanup after seal")
+
+    store.ledger_observer = seal_then_fail
+    assert store.debit(run_id, "model", ".2")
+    assert store.records(run_id)[-1]["kind"] == "seal"
+    assert store.verify_record(run_id)["valid"] and store.reconcile(run_id)["valid"]
+
+
+def test_terminal_source_cannot_settle_a_hold_or_notify_an_observer(store):
+    run_id = start(store)
+    hold = store.reserve(run_id, ".5")
+    observed = []
+    store.ledger_observer = lambda *args: observed.append(args)
+    store.append_record(run_id, "seal")
+    store.update_run(run_id, state="sealed")
+    before = store.records(run_id)
+    assert not store.settle(hold, "model", ".2")
+    assert store.reserved(run_id) == 0.5 and store.total_spent(run_id) == 0
+    assert observed == [] and store.records(run_id) == before
+
+
+def test_parallel_ledger_observer_completes_under_lock_before_next_charge(store):
+    run_id = start(store)
+    observed = []
+
+    def capture(source, event):
+        assert not store.db.in_transaction
+        total_nano = store._row(source)["spent_nano"]
+        observed.append((event["seq"], total_nano))
+        store.append_record(source, "workspace_checkpoint", debit_seq=event["seq"])
+
+    store.ledger_observer = capture
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: store.debit(run_id, "model", ".05"), range(30)))
+    assert sum(results) == len(observed) == 20
+    assert [nano for _, nano in observed] == [50_000_000 * index for index in range(1, 21)]
+    events = store.records(run_id)
+    for seq, _ in observed:
+        assert events[seq]["kind"] == "workspace_checkpoint" and events[seq]["debit_seq"] == seq
+    assert store.verify_record(run_id)["valid"] and store.reconcile(run_id)["valid"]
 
 
 def test_oversettlement_preserves_hold_until_explicit_release(store):
@@ -159,6 +293,64 @@ def test_inbox_pagination_survives_restart(store):
         assert second.verify_record(run_id)["valid"]
     finally:
         second.close()
+
+
+def test_inbox_source_delivery_is_once_across_connections_and_restart(store):
+    run_id = start(store)
+    second = Store(store.data_dir)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            delivered = list(
+                pool.map(
+                    lambda instance: instance.push_event_once(
+                        run_id,
+                        {"type": "message_received", "body": "actual inbound"},
+                        source_key="late:source:event",
+                    ),
+                    [store, second],
+                )
+            )
+        assert delivered[0] == delivered[1]
+        assert store.inbox(run_id)["events"] == delivered[:1]
+        store.append_record(run_id, "seal")
+        store.update_run(run_id, state="sealed")
+        before = store.records(run_id)
+    finally:
+        second.close()
+    restarted = Store(store.data_dir)
+    try:
+        assert (
+            restarted.push_event_once(
+                run_id,
+                {"type": "message_received", "body": "retry after lost ack"},
+                source_key="late:source:event",
+            )
+            == delivered[0]
+        )
+        assert restarted.records(run_id) == before
+        assert restarted.verify_record(run_id)["valid"]
+    finally:
+        restarted.close()
+
+
+def test_inbox_once_rolls_back_dedupe_with_failed_record_append(store, monkeypatch):
+    run_id = start(store)
+    append = store._append_record
+
+    def fail(*args, **kwargs):
+        append(*args, **kwargs)
+        raise OSError("simulated failed commit")
+
+    monkeypatch.setattr(store, "_append_record", fail)
+    with pytest.raises(OSError):
+        store.push_event_once(run_id, {"type": "job_done"}, source_key="job:one")
+    assert store.inbox(run_id)["events"] == []
+    assert store.db.execute("SELECT COUNT(*) FROM inbox_sources").fetchone()[0] == 0
+    assert store.verify_record(run_id)["valid"]
+    monkeypatch.setattr(store, "_append_record", append)
+    event = store.push_event_once(run_id, {"type": "job_done"}, source_key="job:one")
+    assert event["cursor"] == 1
+    assert store.verify_record(run_id)["valid"]
 
 
 def test_run_identity_is_immutable_and_local_metadata_retained(store):

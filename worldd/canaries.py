@@ -608,6 +608,7 @@ class CanaryService:
                 goal=None,
                 budget={"usd": 0.01, "wall_s": 7200},
                 harness_id="block-profile@1",
+                breaker_policy={"mode": "log_only"},
                 metering_lane="probe",
                 measurement_of=run_id,
                 browser_identity=source.get("browser_identity", "unsigned"),

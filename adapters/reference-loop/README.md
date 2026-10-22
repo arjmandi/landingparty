@@ -21,3 +21,13 @@ by the world's pinned table, so an unpriced model is refused.
 The tests use mock provider/world transports, including native parallel calls
 and a stopped harness. A live run requires a supported provider and a key
 configured for the model lane; the script never calls a provider directly.
+
+Life orchestration can call `run_reference(..., run_info=created_run)` to use
+an already-created session without issuing a second creation request. A
+successful sleep tool reply ends that invocation immediately; the life service
+owns sealing. The next invocation begins with the new world's actual briefing.
+`initial_messages` plus nonempty `context_refs` restore actual prior captured
+user/assistant/tool messages, without synthesizing history or reusing an old
+system briefing. The coordinator must verify those source captures. Fresh
+workspace sessions pass neither argument. Returned `messages` contain the
+actual provider conversation for the coordinator's durable context artifact.

@@ -73,6 +73,19 @@ def test_private_provider_capture_is_owned_and_expires_with_hash(setup):
     assert retention.resources(run_id)[0]["hash"]
 
 
+def test_late_discovery_never_restarts_ninety_day_capture_clock(setup):
+    store, retention, clock, run_id, fetched = setup
+    raw = fetched / "late.txt"
+    raw.write_text("Old capture discovered after restart")
+    created_at = store.get_run(run_id)["created_at"]
+    clock.now += timedelta(days=91)
+    resource = retention.register(run_id, raw)
+    assert datetime.fromisoformat(resource["retention_until"]) <= datetime.fromisoformat(
+        created_at
+    ) + timedelta(days=90)
+    assert len(retention.sweep()["pruned"]) == 1
+
+
 def test_workspace_record_beliefs_and_outside_paths_cannot_be_registered(setup, tmp_path):
     store, retention, _, run_id, _ = setup
     root = store.run_dir(run_id)

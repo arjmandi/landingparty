@@ -10,12 +10,14 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
+import yaml
 
 
 def parser():
     command = argparse.ArgumentParser(description="Read or append Landing Party beliefs")
     command.add_argument("--url", default=os.environ.get("WORLD_BASE_URL", "http://127.0.0.1:7777"))
     command.add_argument("--run-id", default=os.environ.get("WORLD_RUN_ID"))
+    command.add_argument("--format", choices=("json", "yaml"), default="json")
     sub = command.add_subparsers(dest="command", required=True)
     all_ = sub.add_parser("all", help="Read the current fold")
     all_.add_argument("--as-of")
@@ -45,6 +47,8 @@ def parser():
         "relation",
         choices=("supports", "contradicts", "derived_from", "supersedes", "operationalised_by"),
     )
+    for child in sub.choices.values():
+        child.add_argument("--format", choices=("json", "yaml"), default=argparse.SUPPRESS)
     return command
 
 
@@ -113,7 +117,13 @@ def run(argv=None, *, client=None):
             print(f"beliefctl: world returned HTTP {response.status_code}", file=sys.stderr)
             return 2
         result = response.json()
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if args.format == "yaml":
+            print(
+                yaml.safe_dump(result, allow_unicode=True, sort_keys=False, explicit_start=True),
+                end="",
+            )
+        else:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
         return 2 if result.get("kind") == "blocked" else 0
     except (httpx.HTTPError, ValueError, TypeError, OSError):
         print("beliefctl: world request or JSON input failed", file=sys.stderr)

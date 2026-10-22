@@ -87,9 +87,16 @@ class BreakerService:
         exhausted_content = len(novel) >= no_content and not any(novel[-no_content:])
         if (current and signatures.count(current) >= red) or exhausted_content:
             store.append_record(
-                run_id, "intervention", reason="agent_loop", action_id=action_id, signature=current
+                run_id,
+                "breaker_would_intervene" if policy.get("mode") == "log_only" else "intervention",
+                reason="agent_loop",
+                action_id=action_id,
+                signature=current,
+                trigger="no_new_content" if exhausted_content else "identical_outcomes",
+                mode=policy.get("mode", "enforce"),
             )
-            asyncio.create_task(self._freeze(run_id))
+            if policy.get("mode") != "log_only":
+                asyncio.create_task(self._freeze(run_id))
 
     async def _freeze(self, run_id):
         if self.world.store.get_run(run_id)["state"] == "running":

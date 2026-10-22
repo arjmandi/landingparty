@@ -15,3 +15,7 @@ It schedules no calls and claims no R1 result.
 `analysis.probes.expectation_calibration` keeps unresolved, expired, void, held,
 and missed outcomes distinct. It publishes a Brier score only with at least 30
 resolved expectations. Callers must stratify resolver and venue before scoring.
+Late final-grace resolutions remain in resolution coverage but are excluded
+from Brier/ECE when their actual outcome marks `headline_eligible:false` or
+`late_final:true`. Redirected batch results and browser destinations enter the
+whole-item exposure exclusion set, including URLs carried by async events.

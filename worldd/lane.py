@@ -18,6 +18,7 @@ import asyncio
 import codecs
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import time
@@ -26,6 +27,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import APIRouter, Request
@@ -112,17 +114,23 @@ def load_prices() -> dict:
 
 WORLD_TOOL_PRICES = {
     "search_usd_per_call": "0.005",
+    "exa_search_usd_per_call": "0.005",
     "browser_usd_per_hour": "0.12",
     "public_fetch_usd": "0",
 }
 
 
-def price_table_id(prices: dict | None = None) -> str:
+def price_table_id(prices: dict | None = None, *, perception_prices=None) -> str:
+    if perception_prices is None:
+        from .perception import default_pricing_identity
+
+        perception_prices = default_pricing_identity()
     return _hash(
         json.dumps(
             {
                 "provider_prices": prices if prices is not None else load_prices(),
                 "world_tool_prices": WORLD_TOOL_PRICES,
+                "perception_prices": perception_prices,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -324,6 +332,7 @@ def create_lane_router(
     *,
     client: httpx.AsyncClient | None = None,
     prices: dict | None = None,
+    perception_prices=None,
     internal_token: str | None = None,
     capabilities=None,
     usage_observer=None,
@@ -335,7 +344,7 @@ def create_lane_router(
     router.lane_manager = manager
     price_table = prices if prices is not None else load_prices()
     models = price_table.get("models", price_table)
-    table_id = price_table_id(price_table)
+    table_id = price_table_id(price_table, perception_prices=perception_prices)
 
     async def forward(request: Request, provider: str, endpoint: str, run_id: str | None = None):
         run_id = (
@@ -397,9 +406,17 @@ def create_lane_router(
                 and datetime.fromisoformat(r["ts"]).timestamp() >= cutoff
             )
             if recent_spend >= float(minute_cap):
-                store.update_run(run_id, state="frozen")
-                store.append_record(run_id, "intervention", reason="dollars_per_minute")
-                return _error(429, "spend_rate", "Dollars-per-minute guard reached")
+                if policy.get("mode") == "log_only":
+                    store.append_record(
+                        run_id,
+                        "breaker_would_intervene",
+                        reason="dollars_per_minute",
+                        mode="log_only",
+                    )
+                else:
+                    store.update_run(run_id, state="frozen")
+                    store.append_record(run_id, "intervention", reason="dollars_per_minute")
+                    return _error(429, "spend_rate", "Dollars-per-minute guard reached")
         wall = run.get("config", {}).get("budget", {}).get("wall_s")
         created = run.get("activated_at", run.get("created_at"))
         if wall and created:
@@ -520,12 +537,37 @@ def create_lane_router(
         upstream_client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(120, connect=15), follow_redirects=False
         )
+        upstream = urlsplit(root)
+        host = upstream.hostname or ""
+        private_origin = (
+            upstream.scheme != "https"
+            or "." not in host
+            or host.endswith((".test", ".invalid", ".localhost", ".internal", ".local"))
+        )
+        try:
+            private_origin |= not ipaddress.ip_address(host).is_global
+        except ValueError:
+            pass
+        transport = upstream_client._transport
+        fixture_transport = (
+            True
+            if private_origin or isinstance(transport, (httpx.MockTransport, httpx.ASGITransport))
+            else False
+            if isinstance(transport, httpx.AsyncHTTPTransport)
+            else None
+        )
+        upstream_provenance = {
+            "upstream_origin": f"{upstream.scheme}://{host}",
+            "fixture_transport": fixture_transport,
+            "transport_type": type(transport).__name__,
+        }
         started = time.monotonic()
         call_id = "m_" + uuid.uuid4().hex
         finished = False
         response: httpx.Response | None = None
         captured = bytearray()
         capture_enabled = bool(run.get("config", {}).get("capture_model_io"))
+        capture_saved = False
 
         def uncertain(reason: str) -> None:
             nonlocal finished
@@ -545,6 +587,7 @@ def create_lane_router(
                 provider=provider,
                 model=model,
                 usage=None,
+                **upstream_provenance,
                 usd=None,
                 reservation_id=reservation,
                 reservation_usd=float(maximum),
@@ -556,6 +599,7 @@ def create_lane_router(
                 if requested_tag
                 else (["model.perception"] if _perception(body) else []),
             )
+            save_capture()
 
         def finish(usage: dict | None, observed_model: str | None = None) -> bool:
             nonlocal finished
@@ -590,6 +634,7 @@ def create_lane_router(
                 provider=provider,
                 model=model,
                 usage=normal,
+                **upstream_provenance,
                 reservation_id=reservation,
                 usd=float(cost),
                 request_hash=_hash(raw),
@@ -600,6 +645,7 @@ def create_lane_router(
                 else (["model.perception"] if _perception(body) else []),
                 spent_after=store.spend(run_id),
             )
+            save_capture()
             if usage_observer is not None:
                 try:
                     usage_observer(
@@ -616,7 +662,10 @@ def create_lane_router(
             return True
 
         def save_capture() -> None:
-            if not capture_enabled:
+            nonlocal capture_saved
+            if not capture_enabled or capture_saved:
+                return
+            if store.get_run(run_id)["state"] in {"sealed", "ended", "killed"}:
                 return
             directory = store.run_dir(run_id) / "model-io"
             directory.mkdir(mode=0o700, exist_ok=True)
@@ -625,8 +674,21 @@ def create_lane_router(
                 "request": _redact(body, secrets),
                 "response": _redact(captured.decode("utf-8", errors="replace"), secrets),
             }
-            target.write_text(json.dumps(output, ensure_ascii=False))
+            serialized = json.dumps(output, ensure_ascii=False).encode("utf-8")
+            target.write_bytes(serialized)
             target.chmod(0o600)
+            store.append_record(
+                run_id,
+                "model_capture",
+                call_id=call_id,
+                provider=provider,
+                model=model,
+                capture_ref=f"model-io/{call_id}.json",
+                capture_hash=_hash(serialized),
+                response_hash=_hash(captured),
+                request_hash=_hash(raw),
+            )
+            capture_saved = True
 
         async def close_upstream() -> None:
             if response is not None:

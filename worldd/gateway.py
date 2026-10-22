@@ -33,7 +33,13 @@ from .transport import pinned_client
 
 DEFAULT_POLICY = {
     "user_agent": "landing-party/0.1",
-    "provider_hosts": ["api.openai.com", "api.anthropic.com", "api.search.brave.com"],
+    "provider_hosts": [
+        "api.openai.com",
+        "api.anthropic.com",
+        "api.search.brave.com",
+        "api.exa.ai",
+        "api.mistral.ai",
+    ],
     "denied_hosts": [],
     "researcher_hosts": [],
     "domain_interval_s": 2.0,
@@ -45,6 +51,8 @@ DEFAULT_POLICY = {
     "max_redirects": 5,
     "robots_cache_s": 3600,
     "cooldown_s": 900,
+    "allowed_hosts": None,
+    "researcher_page": None,
 }
 SAFE_HEADERS = {"accept", "accept-language", "if-modified-since", "if-none-match", "range"}
 PRIVATE_NAMES = {"localhost", "metadata.google.internal", "metadata", "instance-data"}
@@ -58,6 +66,61 @@ SECRET_PATTERN = re.compile(
     re.IGNORECASE,
 )
 ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
+
+
+class CaptureHeaders(httpx.Headers):
+    def __init__(self, headers, *, stream_stop=None, request_headers=None):
+        super().__init__(headers)
+        self.stream_stop = stream_stop
+        self.request_headers = request_headers
+
+
+class RPCEventReader:
+    """Incremental SSE framing, bounded by the enclosing response byte/time limits."""
+
+    def __init__(self, response_id):
+        self.response_id = response_id
+        self.pending = bytearray()
+        self.data = []
+        self.scan = 0
+
+    def feed(self, chunk):
+        self.pending.extend(chunk)
+        while True:
+            positions = [
+                position
+                for marker in (b"\r", b"\n")
+                if (position := self.pending.find(marker, self.scan)) >= 0
+            ]
+            if not positions:
+                self.scan = len(self.pending)
+                return False
+            end = min(positions)
+            if self.pending[end] == 13 and end + 1 == len(self.pending):
+                self.scan = end
+                return False
+            width = 2 if self.pending[end : end + 2] == b"\r\n" else 1
+            line = bytes(self.pending[:end])
+            del self.pending[: end + width]
+            self.scan = 0
+            if line.startswith(b"data:"):
+                self.data.append(line[5:].lstrip(b" "))
+            elif not line:
+                data, self.data = self.data, []
+                if not data:
+                    continue
+                try:
+                    packet = json.loads(b"\n".join(data))
+                except (ValueError, UnicodeError):
+                    continue
+                if (
+                    isinstance(packet, dict)
+                    and packet.get("jsonrpc") == "2.0"
+                    and type(packet.get("id")) is type(self.response_id)
+                    and packet.get("id") == self.response_id
+                    and ("result" in packet or "error" in packet)
+                ):
+                    return True
 
 
 def now() -> str:
@@ -172,6 +235,30 @@ class Gateway:
             else {}
         )
         self.policy = {**DEFAULT_POLICY, "category_hosts": categories, **(policy or {})}
+        page = self.policy.get("researcher_page")
+        if page is not None:
+            parsed_page = urlsplit(page)
+            if (
+                parsed_page.scheme != "https"
+                or not parsed_page.hostname
+                or parsed_page.username is not None
+                or parsed_page.password is not None
+                or any(ord(char) < 33 or ord(char) > 126 for char in page)
+            ):
+                raise ValueError(
+                    "Researcher identity must be a public HTTPS page without credentials"
+                )
+        for name, minimum in (
+            ("domain_burst", 1),
+            ("domain_interval_s", 0),
+            ("domain_max_requests", 1),
+            ("global_requests_per_minute", 1),
+            ("timeout_s", 0.001),
+            ("max_bytes", 1),
+        ):
+            value = self.policy[name]
+            if not isinstance(value, (int, float)) or not minimum <= value < float("inf"):
+                raise ValueError(f"Invalid gateway policy value: {name}")
         self.classifier_id = CLASSIFIER_ID
         self._client = client or pinned_client(timeout=self.policy["timeout_s"])
         self._owns_client = client is None
@@ -182,6 +269,7 @@ class Gateway:
         self.payment_handler = None
         self._locks = defaultdict(asyncio.Lock)
         self._rate_lock = asyncio.Lock()
+        self._pace_locks = defaultdict(asyncio.Lock)
         self._domain_tokens: dict[tuple[str, str], tuple[float, float]] = {}
         self._counts = defaultdict(int)
         self._global_times = defaultdict(deque)
@@ -193,6 +281,27 @@ class Gateway:
     async def aclose(self):
         if self._owns_client:
             await self._client.aclose()
+            if hasattr(self._resolver, "aclose"):
+                await self._resolver.aclose()
+
+    def _provider_policy(self, url, trusted=None):
+        try:
+            host = (urlsplit(url).hostname or "").lower().rstrip(".")
+        except ValueError:
+            return None
+        if any(
+            host == entry or host.endswith("." + entry) for entry in self.policy["provider_hosts"]
+        ) and not (
+            trusted
+            and trusted.get("allow")
+            and trusted.get("provider_operation") in {"perception", "payment", "search"}
+            and trusted.get("allowed_provider_host") == host
+            and trusted.get("reservation_id")
+        ):
+            return blocked(
+                "policy_deny", "Provider traffic must use the metered lane", "provider_bypass"
+            )
+        return None
 
     def _run_dir(self, run_id: str) -> Path:
         if not ID_PATTERN.fullmatch(run_id):
@@ -222,16 +331,8 @@ class Gateway:
             return blocked(
                 "policy_deny", "Nonstandard destination ports are denied", "destination_port"
             )
-        if host in self.policy["provider_hosts"] and not (
-            trusted
-            and trusted.get("allow")
-            and trusted.get("provider_operation") in {"perception", "payment", "search"}
-            and trusted.get("allowed_provider_host") == host
-            and trusted.get("reservation_id")
-        ):
-            return blocked(
-                "policy_deny", "Provider traffic must use the metered lane", "provider_bypass"
-            )
+        if denial := self._provider_policy(url, trusted):
+            return denial
         denied = self.policy["denied_hosts"] + self.policy["researcher_hosts"]
         if any(host == entry or host.endswith("." + entry) for entry in denied):
             return blocked(
@@ -250,24 +351,58 @@ class Gateway:
                 )
         if LOGIN_PATH.search(unquote(parsed.path)) and not (trusted and trusted.get("allow_login")):
             return blocked("policy_deny", "Login and OAuth require a vault lease", "login_path")
+        allowlist = self.policy.get("allowed_hosts")
+        if allowlist is not None and not any(
+            host == name or host.endswith("." + name) for name in allowlist
+        ):
+            return blocked(
+                "policy_deny",
+                "Destination is outside the registered host allowlist",
+                "host_allowlist",
+            )
         if contains_sensitive_data(url):
             return blocked(
                 "policy_deny", "Sensitive data detected in the outbound URL", "exfiltration"
             )
         if headers:
             for key, value in headers.items():
-                if contains_sensitive_data(str(value)) and not (
+                protocol_header = bool(
                     trusted
-                    and trusted.get("allow_credentials")
-                    and key.lower()
-                    in (
-                        {"authorization", "cookie"}
-                        | {
-                            str(name).lower()
-                            for name in trusted.get(
-                                "credential_header_names", trusted.get("credential_headers", [])
-                            )
-                        }
+                    and trusted.get("allow")
+                    and key.lower() == "mcp-session-id"
+                    and key.lower() in trusted.get("protocol_header_names", [])
+                )
+                if key.lower() in {
+                    "host",
+                    "proxy-authorization",
+                    "content-length",
+                    "transfer-encoding",
+                    "connection",
+                    "signature",
+                    "signature-input",
+                    "signature-agent",
+                } or key.lower().startswith("x-world-"):
+                    return blocked(
+                        "policy_deny",
+                        "Transport and world identity headers cannot be overridden",
+                        "unsafe_header",
+                    )
+                if (
+                    contains_sensitive_data(str(value))
+                    and not protocol_header
+                    and not (
+                        trusted
+                        and trusted.get("allow_credentials")
+                        and key.lower()
+                        in (
+                            {"authorization", "cookie"}
+                            | {
+                                str(name).lower()
+                                for name in trusted.get(
+                                    "credential_header_names", trusted.get("credential_headers", [])
+                                )
+                            }
+                        )
                     )
                 ):
                     return blocked(
@@ -295,6 +430,7 @@ class Gateway:
                     or "\n" in str(key)
                     or (
                         SECRET_PATTERN.search(str(value))
+                        and not protocol_header
                         and not (
                             trusted
                             and trusted.get("allow_credentials")
@@ -397,6 +533,15 @@ class Gateway:
             window.append(clock)
         return None
 
+    async def _pace(self, run_id, host):
+        """Queue same-domain jobs at bucket pace; cancellation never sends a request."""
+        async with self._pace_locks[(run_id, host)]:
+            while True:
+                denial = await self._rate(run_id, host)
+                if not denial or denial.get("rule_id") != "domain_rate":
+                    return denial
+                await asyncio.sleep(max(0.001, denial["retry_after"]))
+
     @staticmethod
     def _retry_after(headers: dict) -> float | None:
         value = headers.get("retry-after", "")
@@ -437,18 +582,23 @@ class Gateway:
         body: bytes = b"",
         signed: bool = False,
         user_agent_run_id: str | None = None,
+        jsonrpc_response_id=None,
     ) -> tuple[int, dict, bytes]:
         parsed = urlsplit(url)
         host = parsed.hostname or ""
         address_host = f"[{address}]" if ":" in address else address
         authority = address_host + (f":{parsed.port}" if parsed.port else "")
         pinned_url = urlunsplit((parsed.scheme, authority, parsed.path or "/", parsed.query, ""))
-        host_header = host + (f":{parsed.port}" if parsed.port else "")
+        host_header = (f"[{host}]" if ":" in host else host) + (
+            f":{parsed.port}" if parsed.port else ""
+        )
         outbound = {
-            "Accept": "*/*",
-            **(headers or {}),
-            "Host": host_header,
-            "User-Agent": f"{self.policy['user_agent']} (run {user_agent_run_id or run_id})",
+            "accept": "*/*",
+            **{key.lower(): value for key, value in (headers or {}).items()},
+            "host": host_header,
+            "user-agent": f"{self.policy['user_agent']} ("
+            + (f"+{self.policy['researcher_page']}; " if self.policy.get("researcher_page") else "")
+            + f"run {user_agent_run_id or run_id})",
         }
         if signed:
             if self.signer is None:
@@ -459,16 +609,50 @@ class Gateway:
         async with asyncio.timeout(self.policy["timeout_s"]):
             response = await self._client.send(request, stream=True, follow_redirects=False)
             try:
-                if int(response.headers.get("content-length", "0")) > self.policy["max_bytes"]:
+                if (
+                    method != "HEAD"
+                    and response.status_code not in {204, 304}
+                    and int(response.headers.get("content-length", "0")) > self.policy["max_bytes"]
+                ):
                     raise ResponseTooLarge
                 chunks = []
                 size = 0
-                async for chunk in response.aiter_bytes():
-                    size += len(chunk)
-                    if size > self.policy["max_bytes"]:
-                        raise ResponseTooLarge
-                    chunks.append(chunk)
-                return response.status_code, dict(response.headers), b"".join(chunks)
+                stream_stop = None
+                rpc = (
+                    RPCEventReader(jsonrpc_response_id)
+                    if (
+                        jsonrpc_response_id is not None
+                        and 200 <= response.status_code < 300
+                        and response.headers.get("content-type", "")
+                        .split(";", 1)[0]
+                        .strip()
+                        .lower()
+                        == "text/event-stream"
+                    )
+                    else None
+                )
+                if method != "HEAD" and response.status_code not in {204, 304}:
+                    async for chunk in response.aiter_bytes():
+                        size += len(chunk)
+                        if size > self.policy["max_bytes"]:
+                            raise ResponseTooLarge
+                        chunks.append(chunk)
+                        if rpc is not None and rpc.feed(chunk):
+                            stream_stop = "jsonrpc_response_complete"
+                            break
+                normalized = CaptureHeaders(
+                    response.headers,
+                    stream_stop=stream_stop,
+                    request_headers=request.headers.copy(),
+                )
+                if method != "HEAD" and response.status_code != 304:
+                    normalized.pop("content-encoding", None)
+                normalized.pop("transfer-encoding", None)
+                if response.status_code == 204:
+                    normalized.pop("content-length", None)
+                elif method != "HEAD" and response.status_code != 304:
+                    normalized["content-length"] = str(size)
+                return response.status_code, normalized, b"".join(chunks)
             finally:
                 await response.aclose()
 
@@ -498,7 +682,7 @@ class Gateway:
                 address, denial = await self._target(robot_url)
                 if denial:
                     return blocked("robots", "Robots policy is unavailable", "robots_unavailable")
-                denial = await self._rate(run_id, urlsplit(robot_url).hostname or "")
+                denial = await self._pace(run_id, urlsplit(robot_url).hostname or "")
                 if denial:
                     return denial
                 try:
@@ -536,20 +720,78 @@ class Gateway:
         return None
 
     async def _archive_transaction(
-        self, run_id: str, url: str, status: int, headers: dict, body: bytes, *, method: str = "GET"
+        self,
+        run_id: str,
+        url: str,
+        status: int,
+        headers: dict,
+        body: bytes,
+        *,
+        method: str = "GET",
+        request_body=b"",
+        request_headers=None,
+        credential_body=False,
+        private_header_names=(),
     ):
         root = self._run_dir(run_id)
         async with self._locks[run_id]:
             # Decoded bytes are archived, so transport encodings must not be retained.
+            representation_only = method == "HEAD" or status == 304
             safe_headers = [
                 (k, v)
                 for k, v in headers.items()
-                if k.lower()
-                not in {"set-cookie", "content-encoding", "transfer-encoding", "content-length"}
+                if k.lower() not in {"set-cookie", "transfer-encoding", "content-length"}
+                and (k.lower() != "content-encoding" or representation_only)
+                and k.lower()
+                not in {"mcp-session-id", *[name.lower() for name in private_header_names]}
             ]
-            safe_headers.append(("Content-Length", str(len(body))))
+            if status != 204:
+                length = (
+                    headers.get("content-length", "0") if representation_only else str(len(body))
+                )
+                safe_headers.append(("Content-Length", length))
+            public_request_headers = [
+                (k, v)
+                for k, v in (
+                    getattr(headers, "request_headers", None) or request_headers or {}
+                ).items()
+                if k.lower()
+                in SAFE_HEADERS
+                | {
+                    "content-type",
+                    "host",
+                    "user-agent",
+                    "accept-encoding",
+                    "signature",
+                    "signature-input",
+                    "signature-agent",
+                }
+                and k.lower() not in {name.lower() for name in private_header_names}
+            ]
+            retained_body = (
+                b"" if credential_body or contains_sensitive_data(request_body) else request_body
+            )
+            request_redacted = retained_body != request_body
+            parsed = urlsplit(url)
+            target = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+            request_metadata = {
+                "WARC-Request-Body-SHA256": digest(request_body),
+                "WARC-Request-Body-Redacted": str(request_redacted).lower(),
+            }
             with (root / "archive.warc.gz").open("ab") as stream:
                 writer = WARCWriter(stream, gzip=True)
+                request_record = writer.create_warc_record(
+                    url,
+                    "request",
+                    payload=BytesIO(retained_body),
+                    http_headers=StatusAndHeaders(
+                        f"{method} {target} HTTP/1.1",
+                        [*public_request_headers, ("Content-Length", str(len(retained_body)))],
+                        is_http_request=True,
+                    ),
+                    warc_headers_dict=request_metadata,
+                )
+                writer.write_record(request_record)
                 record = writer.create_warc_record(
                     url,
                     "response",
@@ -559,6 +801,19 @@ class Gateway:
                         safe_headers,
                         protocol="HTTP/1.1",
                     ),
+                    warc_headers_dict={
+                        "WARC-Concurrent-To": request_record.rec_headers.get_header(
+                            "WARC-Record-ID"
+                        ),
+                        **(
+                            {
+                                "WARC-Truncated": "unspecified",
+                                "WARC-Truncation-Reason": headers.stream_stop,
+                            }
+                            if getattr(headers, "stream_stop", None)
+                            else {}
+                        ),
+                    },
                 )
                 writer.write_record(record)
             har_path = root / "archive.har"
@@ -579,8 +834,24 @@ class Gateway:
                     "request": {
                         "method": method,
                         "url": url,
-                        "headers": [],
+                        "headers": [{"name": k, "value": v} for k, v in public_request_headers],
                         "httpVersion": "HTTP/1.1",
+                        "bodySize": len(request_body),
+                        "_bodyHash": digest(request_body),
+                        "_bodyRedacted": request_redacted,
+                        **(
+                            {
+                                "postData": {
+                                    "mimeType": (request_headers or {}).get(
+                                        "content-type", "application/octet-stream"
+                                    ),
+                                    "text": base64.b64encode(retained_body).decode(),
+                                    "_encoding": "base64",
+                                }
+                            }
+                            if retained_body
+                            else {}
+                        ),
                     },
                     "response": {
                         "status": status,
@@ -590,6 +861,11 @@ class Gateway:
                             "size": len(body),
                             "mimeType": headers.get("content-type", "application/octet-stream"),
                         },
+                        **(
+                            {"_captureStop": headers.stream_stop, "_streamComplete": False}
+                            if getattr(headers, "stream_stop", None)
+                            else {}
+                        ),
                     },
                     "cache": {},
                     "timings": {"send": 0, "wait": 0, "receive": 0},
@@ -744,6 +1020,8 @@ class Gateway:
         _signed: bool = False,
     ) -> dict:
         method, request_body = _method.upper(), _body
+        if denial := self._provider_policy(url, _trusted):
+            return denial
         if method not in {"GET", "HEAD", "OPTIONS"} and not (
             _trusted and _trusted.get("allow") and _trusted.get("allow_write")
         ):
@@ -788,6 +1066,7 @@ class Gateway:
         original_url = url
         redirects = []
         for step in range(self.policy["max_redirects"] + 1):
+            response_block = None
             denial = self._syntax_policy(url, headers, trusted=_trusted)
             if denial:
                 return denial
@@ -805,7 +1084,7 @@ class Gateway:
                 if denial:
                     return denial
             host = urlsplit(url).hostname or ""
-            denial = await self._rate(run_id, host)
+            denial = await self._pace(run_id, host)
             if denial:
                 return denial
             try:
@@ -818,6 +1097,7 @@ class Gateway:
                     body=request_body,
                     signed=_signed,
                     user_agent_run_id=(_trusted or {}).get("user_agent_run_id"),
+                    jsonrpc_response_id=self._browser_rpc_id(_trusted, method, request_body),
                 )
             except ResponseTooLarge:
                 return blocked(
@@ -839,7 +1119,16 @@ class Gateway:
             except (httpx.HTTPError, OSError, ValueError):
                 return blocked("timeout", "The request could not be completed", "request_error")
             await self._archive_transaction(
-                run_id, url, status, response_headers, body, method=method
+                run_id,
+                url,
+                status,
+                response_headers,
+                body,
+                method=method,
+                request_body=request_body,
+                request_headers=headers,
+                credential_body=bool(_trusted and _trusted.get("credential_body")),
+                private_header_names=self._private_header_names(_trusted),
             )
             self._observe_status(run_id, host, status, response_headers)
             if status == 402 and not provider_api:
@@ -925,14 +1214,34 @@ class Gateway:
                             "payment_access_failed",
                             receipt_ref=paid["receipt_ref"],
                         )
-                    if any(len(proof) >= 8 and proof.encode() in body for proof in access.values()):
+                    if any(
+                        len(proof) >= 8
+                        and (
+                            proof.encode() in body
+                            or any(
+                                proof in value
+                                for key, value in response_headers.items()
+                                if key.lower() != "set-cookie"
+                            )
+                        )
+                        for proof in access.values()
+                    ):
                         return blocked(
                             "policy_deny",
                             "The site reflected a private payment proof",
                             "credential_reflection",
                         )
                     await self._archive_transaction(
-                        run_id, url, status, response_headers, body, method=method
+                        run_id,
+                        url,
+                        status,
+                        response_headers,
+                        body,
+                        method=method,
+                        request_body=request_body,
+                        request_headers=headers,
+                        credential_body=bool(_trusted and _trusted.get("credential_body")),
+                        private_header_names=self._private_header_names(_trusted),
                     )
                     if status == 402:
                         return blocked(
@@ -955,10 +1264,17 @@ class Gateway:
                         **reply,
                         **{key: value for key, value in quote.items() if value is not None},
                     }
-                    await self._index(
-                        run_id, original_url, reply, method=_method, request_body=_body
-                    )
-                    return reply
+                    if (
+                        _trusted
+                        and _trusted.get("browser_session")
+                        and _trusted.get("response_private")
+                    ):
+                        response_block = reply
+                    else:
+                        await self._index(
+                            run_id, original_url, reply, method=_method, request_body=_body
+                        )
+                        return reply
             if (
                 status in {301, 302, 303, 307, 308}
                 and response_headers.get("location")
@@ -988,10 +1304,17 @@ class Gateway:
                 else self._classify(status, response_headers, body)
             )
             if classification:
-                await self._index(
-                    run_id, original_url, classification, method=_method, request_body=_body
-                )
-                return classification
+                if (
+                    _trusted
+                    and _trusted.get("browser_session")
+                    and _trusted.get("response_private")
+                ):
+                    response_block = response_block or classification
+                else:
+                    await self._index(
+                        run_id, original_url, classification, method=_method, request_body=_body
+                    )
+                    return classification
             content_type = (
                 response_headers.get("content-type", "application/octet-stream")
                 .split(";", 1)[0]
@@ -1057,6 +1380,11 @@ class Gateway:
                 reference = "n_" + action_id
                 reply["private_response_ref"] = reference
                 self._private_response_paths[(run_id, reference)] = destination
+                if response_block:
+                    reply["response_block"] = response_block
+            if getattr(response_headers, "stream_stop", None):
+                reply["stream_stop"] = response_headers.stream_stop
+                reply["stream_complete"] = False
             else:
                 self._attach_inline(reply, body, inline, max_inline_chars)
             if private or (_trusted and _trusted.get("allow_credentials")):
@@ -1068,6 +1396,43 @@ class Gateway:
             )
             return reply
         return blocked("policy_deny", "The redirect limit was reached", "redirect_limit")
+
+    @staticmethod
+    def _browser_rpc_id(trusted, method, body):
+        if not (
+            trusted
+            and trusted.get("allow")
+            and trusted.get("browser_session")
+            and trusted.get("response_private")
+            and method == "POST"
+        ):
+            return None
+        response_id = trusted.get("jsonrpc_response_id")
+        if type(response_id) not in {int, str}:
+            return None
+        try:
+            request = json.loads(body)
+        except (ValueError, UnicodeError):
+            return None
+        return (
+            response_id
+            if (
+                isinstance(request, dict)
+                and request.get("jsonrpc") == "2.0"
+                and request.get("method")
+                and type(request.get("id")) is type(response_id)
+                and request.get("id") == response_id
+            )
+            else None
+        )
+
+    @staticmethod
+    def _private_header_names(trusted):
+        trusted = trusted or {}
+        return {
+            *trusted.get("credential_header_names", trusted.get("credential_headers", [])),
+            *trusted.get("protocol_header_names", []),
+        }
 
     @staticmethod
     def payment_quote(url, headers, body):
@@ -1112,7 +1477,7 @@ class Gateway:
         quote["quote_hash"] = digest(
             json.dumps(quote, sort_keys=True, separators=(",", ":")).encode()
         )
-        return {key: value for key, value in quote.items() if key != "url"}
+        return {"quote_url": url, **{key: value for key, value in quote.items() if key != "url"}}
 
     @staticmethod
     def _archive_key(url, method="GET", request_body=b""):

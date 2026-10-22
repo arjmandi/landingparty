@@ -89,6 +89,8 @@ class Store:
         (self.data_dir / "runs").mkdir(exist_ok=True, mode=0o700)
         self._lock = threading.RLock()
         self._mirror_offsets: dict[Path, int | None] | None = None
+        self.ledger_observer = None
+        self._ledger_observation = None
         db_path = self.data_dir / "world.sqlite3"
         self.db = sqlite3.connect(
             db_path, isolation_level=None, check_same_thread=False, timeout=30
@@ -128,6 +130,12 @@ class Store:
                 event_id TEXT NOT NULL UNIQUE,
                 payload TEXT NOT NULL,
                 PRIMARY KEY(run_id, cursor)
+            );
+            CREATE TABLE IF NOT EXISTS inbox_sources (
+                run_id TEXT NOT NULL REFERENCES runs(run_id),
+                source_key TEXT NOT NULL,
+                event_id TEXT NOT NULL REFERENCES inbox(event_id),
+                PRIMARY KEY(run_id, source_key)
             );
             CREATE TABLE IF NOT EXISTS reservations (
                 reservation_id TEXT PRIMARY KEY,
@@ -329,7 +337,9 @@ class Store:
             (run_id,),
         ).fetchone()[0]
 
-    def _charge(self, run_id: str, category: str, amount_nano: int, **fields: Any) -> None:
+    def _charge(
+        self, run_id: str, category: str, amount_nano: int, **fields: Any
+    ) -> dict[str, Any]:
         self.db.execute(
             "UPDATE runs SET spent_nano=spent_nano+? WHERE run_id=?", (amount_nano, run_id)
         )
@@ -338,7 +348,7 @@ class Store:
             "ON CONFLICT(run_id,category) DO UPDATE SET spent_nano=spent_nano+excluded.spent_nano",
             (run_id, category, amount_nano),
         )
-        self._append_record(
+        return self._append_record(
             run_id,
             "ledger_debit",
             category=category,
@@ -347,16 +357,45 @@ class Store:
             **fields,
         )
 
+    def _observe_ledger(self, run_id: str, debit_record: dict[str, Any]) -> None:
+        if self.ledger_observer is None:
+            return
+        previous = self._ledger_observation
+        self._ledger_observation = (run_id, debit_record["seq"], debit_record["hash"])
+        try:
+            self.ledger_observer(run_id, json.loads(canonical_json(debit_record)))
+        except BaseException as error:  # noqa: BLE001 - cancellation cannot change committed billing
+            try:
+                head = self.db.execute(
+                    "SELECT payload FROM records WHERE run_id=? ORDER BY seq DESC LIMIT 1",
+                    (run_id,),
+                ).fetchone()
+                if self._row(run_id)["state"] not in {"sealed", "ended", "killed"} and (
+                    head is None or json.loads(head[0])["kind"] != "seal"
+                ):
+                    self.append_record(
+                        run_id,
+                        "checkpoint_capture_error",
+                        error=type(error).__name__,
+                        debit_ref={"seq": debit_record["seq"], "hash": debit_record["hash"]},
+                    )
+            except BaseException:  # noqa: BLE001 - recovery identifies missing capture; billing remains committed
+                return
+        finally:
+            self._ledger_observation = previous
+
     def debit(self, run_id: str, category: str, usd: Decimal | str | float) -> bool:
         amount_nano = _nanodollars(usd)
         category = _category(category)
-        with self._transaction():
-            row = self._row(run_id)
-            if row["state"] != "running":
-                return False
-            if row["spent_nano"] + self._held_nano(run_id) + amount_nano > row["cap_nano"]:
-                return False
-            self._charge(run_id, category, amount_nano)
+        with self._lock:
+            with self._transaction():
+                row = self._row(run_id)
+                if row["state"] != "running":
+                    return False
+                if row["spent_nano"] + self._held_nano(run_id) + amount_nano > row["cap_nano"]:
+                    return False
+                record = self._charge(run_id, category, amount_nano)
+            self._observe_ledger(run_id, record)
             return True
 
     def spend(self, run_id: str) -> dict[str, float]:
@@ -404,24 +443,30 @@ class Store:
     def settle(self, reservation_id: str, category: str, actual_usd: Decimal | str | float) -> bool:
         amount_nano = _nanodollars(actual_usd)
         category = _category(category)
-        with self._transaction():
-            reservation = self.db.execute(
-                "SELECT * FROM reservations WHERE reservation_id=?", (reservation_id,)
-            ).fetchone()
-            if reservation is None:
-                raise KeyError(reservation_id)
-            if reservation["state"] != "held" or amount_nano > reservation["amount_nano"]:
-                return False
-            self.db.execute(
-                "UPDATE reservations SET state='settled',actual_nano=? WHERE reservation_id=?",
-                (amount_nano, reservation_id),
-            )
-            self._charge(
-                reservation["run_id"],
-                category,
-                amount_nano,
-                reservation_id=reservation_id,
-            )
+        with self._lock:
+            with self._transaction():
+                reservation = self.db.execute(
+                    "SELECT * FROM reservations WHERE reservation_id=?", (reservation_id,)
+                ).fetchone()
+                if reservation is None:
+                    raise KeyError(reservation_id)
+                if (
+                    reservation["state"] != "held"
+                    or amount_nano > reservation["amount_nano"]
+                    or self._row(reservation["run_id"])["state"] in {"sealed", "ended", "killed"}
+                ):
+                    return False
+                self.db.execute(
+                    "UPDATE reservations SET state='settled',actual_nano=? WHERE reservation_id=?",
+                    (amount_nano, reservation_id),
+                )
+                record = self._charge(
+                    reservation["run_id"],
+                    category,
+                    amount_nano,
+                    reservation_id=reservation_id,
+                )
+            self._observe_ledger(reservation["run_id"], record)
             return True
 
     def release(self, reservation_id: str) -> None:
@@ -479,23 +524,49 @@ class Store:
     def push_event(self, run_id: str, event: dict[str, Any]) -> dict[str, Any]:
         event = json.loads(canonical_json(event))
         with self._transaction():
+            return self._push_event(run_id, event)
+
+    def push_event_once(
+        self, run_id: str, event: dict[str, Any], *, source_key: str
+    ) -> dict[str, Any]:
+        """Deliver a durable source once, including a retry after lost acknowledgement."""
+        if not isinstance(source_key, str) or not source_key or len(source_key) > 1000:
+            raise ValueError("Inbox source keys must contain between one and 1000 characters")
+        event = json.loads(canonical_json(event))
+        with self._transaction():
             self._row(run_id)
-            cursor = self.db.execute(
-                "SELECT COALESCE(MAX(cursor),0)+1 FROM inbox WHERE run_id=?", (run_id,)
-            ).fetchone()[0]
-            payload = {
-                **event,
-                "event_id": "e_" + uuid.uuid4().hex,
-                "cursor": cursor,
-                "run_id": run_id,
-                "ts": utc_now(),
-            }
+            existing = self.db.execute(
+                "SELECT i.payload FROM inbox_sources s JOIN inbox i ON i.event_id=s.event_id "
+                "WHERE s.run_id=? AND s.source_key=?",
+                (run_id, source_key),
+            ).fetchone()
+            if existing:
+                return json.loads(existing[0])
+            payload = self._push_event(run_id, event)
             self.db.execute(
-                "INSERT INTO inbox(run_id,cursor,event_id,payload) VALUES(?,?,?,?)",
-                (run_id, cursor, payload["event_id"], canonical_json(payload)),
+                "INSERT INTO inbox_sources(run_id,source_key,event_id) VALUES(?,?,?)",
+                (run_id, source_key, payload["event_id"]),
             )
-            self._append_record(run_id, "event_pushed", event=payload)
             return payload
+
+    def _push_event(self, run_id: str, event: dict[str, Any]) -> dict[str, Any]:
+        self._row(run_id)
+        cursor = self.db.execute(
+            "SELECT COALESCE(MAX(cursor),0)+1 FROM inbox WHERE run_id=?", (run_id,)
+        ).fetchone()[0]
+        payload = {
+            **event,
+            "event_id": "e_" + uuid.uuid4().hex,
+            "cursor": cursor,
+            "run_id": run_id,
+            "ts": utc_now(),
+        }
+        self.db.execute(
+            "INSERT INTO inbox(run_id,cursor,event_id,payload) VALUES(?,?,?,?)",
+            (run_id, cursor, payload["event_id"], canonical_json(payload)),
+        )
+        self._append_record(run_id, "event_pushed", event=payload)
+        return payload
 
     def inbox(self, run_id: str, since: int = 0, limit: int = 50) -> dict[str, Any]:
         if isinstance(since, bool) or not isinstance(since, int) or since < 0:

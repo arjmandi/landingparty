@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .approvals import action_hash
-from .lane import WORLD_TOOL_PRICES
+from .search import PROVIDERS, provider_request, search_price
 from .util import blocked, digest, identifier
 
 
@@ -89,6 +89,7 @@ VENDOR_ENDPOINTS = {
     "openai": ("api.openai.com", {("POST", "/v1/audio/transcriptions")}),
     "deepgram": ("api.deepgram.com", {("POST", "/v1/listen")}),
     "assemblyai": ("api.assemblyai.com", {("POST", "/v2/upload"), ("POST", "/v2/transcript")}),
+    "mistral-ocr": ("api.mistral.ai", {("POST", "/v1/ocr")}),
 }
 
 
@@ -198,6 +199,8 @@ async def _private_exchange(
             status=reply.get("status"),
             resource_hash=reply.get("hash"),
             rule_id=reply.get("rule_id"),
+            response_headers_subset=reply.get("headers_subset", {}),
+            response_headers_hash=digest(reply.get("headers_subset", {})),
         )
         if reply.get("kind") != "result":
             return {**reply, "egress_submitted": reply.get("type") in {"timeout", "platform_block"}}
@@ -324,6 +327,12 @@ async def submit_provider(
             "provider_reservation",
         )
     payload = json.loads(quote["payload"])
+    if row["amount_nano"] != Decimal(payload["usd"]) * 1_000_000_000:
+        return blocked(
+            "policy_deny",
+            "Reservation differs from the exact accepted quote",
+            "provider_reservation_amount",
+        )
     if payload.get("provider") != provider:
         return blocked("policy_deny", "Provider differs from the accepted quote", "provider_quote")
     target = VENDOR_ENDPOINTS.get(provider)
@@ -347,6 +356,37 @@ async def submit_provider(
             "Destination is not a registered endpoint for this provider",
             "provider_destination",
         )
+    if provider == "mistral-ocr":
+        from .perception import MISTRAL_OCR_MODEL
+
+        try:
+            await request.aread()
+            submitted = json.loads(request.content)
+            document = submitted["document"]
+            prefix = "data:application/pdf;base64,"
+            encoded = document["document_url"]
+            if not isinstance(encoded, str) or not encoded.startswith(prefix):
+                raise ValueError("OCR input must be the quoted PDF bytes")
+            source = base64.b64decode(encoded[len(prefix) :], validate=True)
+            expected = {
+                "model": MISTRAL_OCR_MODEL,
+                "document": {"type": "document_url", "document_url": encoded},
+                "include_image_base64": False,
+            }
+            if payload["options"].get("pages"):
+                expected["pages"] = [page - 1 for page in payload["options"]["pages"]]
+            if (
+                payload["operation"] != "parse_document"
+                or digest(source) != payload["source_hash"]
+                or submitted != expected
+            ):
+                raise ValueError("OCR request differs from quote")
+        except (KeyError, TypeError, ValueError):
+            return blocked(
+                "policy_deny",
+                "OCR body/model/pages differ from the accepted quote",
+                "provider_quote_body",
+            )
     return await _private_exchange(
         world,
         run_id,
@@ -372,16 +412,21 @@ async def submit_search(world, run_id, action_id, request: httpx.Request, *, res
     if run["state"] != "running" or run["config"].get("mode", "live") != "live":
         return blocked("policy_deny", "Search API requires an active live run", "search_state")
     target = request.url
+    provider = run["config"].get("search_provider", "brave")
+    spec = PROVIDERS[provider]
+    endpoint = httpx.URL(spec["url"])
     if (
-        request.method != "GET"
+        request.method != spec["method"]
         or target.scheme != "https"
-        or target.host != "api.search.brave.com"
-        or target.path != "/res/v1/web/search"
+        or target.host != endpoint.host
+        or target.path != endpoint.path
         or target.port not in {None, 443}
+        or target.username
+        or target.password
     ):
         return blocked(
             "policy_deny",
-            "Search destination is not the registered Brave endpoint",
+            "Search destination is not the registered provider endpoint",
             "search_destination",
         )
     denial = _admission(world, run_id)
@@ -394,8 +439,7 @@ async def submit_search(world, run_id, action_id, request: httpx.Request, *, res
         not reservation
         or reservation["run_id"] != run_id
         or reservation["state"] != "held"
-        or reservation["amount_nano"]
-        != Decimal(WORLD_TOOL_PRICES["search_usd_per_call"]) * 1_000_000_000
+        or reservation["amount_nano"] != Decimal(search_price(provider)) * 1_000_000_000
     ):
         return blocked(
             "policy_deny",
@@ -413,14 +457,12 @@ async def submit_search(world, run_id, action_id, request: httpx.Request, *, res
         None,
     )
     params = action.get("params", {}) if action else {}
-    expected_query = (
-        f"{params['query']} site:{params['site']}" if params.get("site") else params.get("query")
+    expected = (
+        provider_request(provider, "boundary-validation", params, submitted_at=action["ts"])
+        if action
+        else None
     )
-    if (
-        target.params.get("q") != expected_query
-        or target.params.get("count") != str(params.get("k", 10))
-        or target.params.get("freshness") != params.get("freshness")
-    ):
+    if expected is None or request.url != expected.url or request.content != expected.content:
         return blocked(
             "policy_deny",
             "Search parameters changed after recorded submission",
@@ -480,8 +522,8 @@ async def submit_search(world, run_id, action_id, request: httpx.Request, *, res
         {
             "allow": True,
             "allow_credentials": True,
-            "allow_write": False,
-            "credential_header_names": ["x-subscription-token"],
+            "allow_write": provider == "exa",  # POST carries a paid read, never a venue write.
+            "credential_header_names": [spec["header"]],
             "provider_operation": "search",
             "allowed_provider_host": target.host,
             "reservation_id": reservation_id,

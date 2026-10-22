@@ -21,13 +21,13 @@ COPY . .
 RUN chmod -R a+rX /opt/landingparty && uv sync --frozen --extra full --no-dev
 
 FROM base AS world
-RUN apt-get update && apt-get install -y --no-install-recommends chromium && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends chromium ffmpeg && rm -rf /var/lib/apt/lists/*
 COPY --from=build /opt/landingparty /opt/landingparty
 RUN groupadd --gid 10002 harness && useradd --uid 10001 --gid 10002 --create-home world \
     && mkdir -p /data && chown world:harness /data
 USER 10001:10002
 ENV WORLD_DATA_DIR=/data WORLD_CHROMIUM_EXECUTABLE=/usr/bin/chromium
-EXPOSE 7777 7778 8080 8081
+EXPOSE 7777 7778 7779 8080 8081
 ENTRYPOINT ["worldd"]
 CMD ["--host", "0.0.0.0", "--port", "7777"]
 

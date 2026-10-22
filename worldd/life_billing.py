@@ -197,6 +197,7 @@ class LifeBilling:
                     hold_id=hold_id,
                     billing_run_id=hold["billing_run_id"],
                 )
+            self._notify_state(hold["life_id"])
         except (OSError, KeyError, ValueError):
             self._freeze_billing(hold_id)
             raise ValueError("The life is held pending human billing reconciliation") from None
@@ -287,6 +288,9 @@ class LifeBilling:
                 if life["state"] == "billing_hold" and not self._other_unresolved(hold):
                     life["state"] = life.pop("billing_previous_state", "ready")
                 self._save(life, "human_time_charged", **receipt)
+            self._notify_state(hold["life_id"])
+            self._schedule(hold["life_id"])
+            self._enforce_money_end(hold["life_id"])
             return receipt
         except (OSError, ValueError, KeyError):
             self._freeze_billing(reservation_id)
@@ -336,15 +340,26 @@ class LifeBilling:
             hold = self._human_hold(reservation_id)
         if hold["state"] == "released":
             return hold
-        if hold["state"] != "reserved":
+        if hold["state"] not in {"reserved", "unresolved"} or hold.get("actual_usd") is not None:
             raise ValueError("Human work already incurred must be reconciled")
+        if self.store.get_run(hold["billing_run_id"])["state"] not in {
+            "running",
+            "frozen",
+            "stopping",
+        }:
+            raise ValueError("A terminal source ledger cannot release an unresolved human hold")
         self.store.release(hold["backing_reservation_id"])
         if hold["accounting"]:
             self._seal_human(hold["billing_run_id"])
         with self.store._transaction():
             hold["state"] = "released"
             self._write_human(hold)
-            self._save(self._load(hold["life_id"]), "human_time_released", hold_id=reservation_id)
+            life = self._load(hold["life_id"])
+            if life["state"] == "billing_hold" and not self._other_unresolved(hold):
+                life["state"] = life.pop("billing_previous_state", "ready")
+            self._save(life, "human_time_released", hold_id=reservation_id)
+        self._notify_state(hold["life_id"])
+        self._schedule(hold["life_id"])
         return hold
 
     def _other_unresolved(self, hold):

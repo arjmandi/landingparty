@@ -1,6 +1,7 @@
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 
@@ -232,9 +233,18 @@ async def test_configured_afterlife_rubric_retries_without_refetching_reading(se
 
         async def life(self, life_id, *, checkpoint):
             scored.append(checkpoint)
-            if len(scored) == 1:
+            if checkpoint == "after30" and scored.count("after30") == 1:
                 raise ValueError("fixture interrupted scoring")
-            return {"life_id": life_id, "checkpoint": checkpoint, "unmeasured": True}
+            report = {"life_id": life_id, "checkpoint": checkpoint, "unmeasured": True}
+            relative = f"lives/{life_id}/rubric/{checkpoint}/fixture.json"
+            path = world.store.data_dir / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(report, sort_keys=True, separators=(",", ":")))
+            return {
+                "report": report,
+                "artifact_ref": relative,
+                "artifact_hash": content_hash(report),
+            }
 
     pipeline = Pipeline()
     world.services.update(footprint=Footprint(), pipeline=pipeline)
@@ -247,8 +257,12 @@ async def test_configured_afterlife_rubric_retries_without_refetching_reading(se
     await lives.tick(life_id)
     assert lives.get(life_id)["afterlife"]["30"]["rubric_state"] == "failed"
     await lives.tick(life_id)
+    clock.now += timedelta(hours=1)
     await lives.tick(life_id)
-    assert readings == [30] and scored == ["after30", "after30"]
+    assert readings == [30] and [item for item in scored if item == "after30"] == [
+        "after30",
+        "after30",
+    ]
     assert lives.get(life_id)["afterlife"]["30"]["rubric_state"] == "complete"
 
 
@@ -334,6 +348,68 @@ async def test_bankruptcy_cannot_be_rescued_by_income(setup):
     lives.session_ended(run_id)
     await lives.tasks[life_id + ":bankruptcy"]
     assert lives.get(life_id)["ended"]["reason"] == "bankruptcy"
+
+
+async def test_money_driver_floor_uses_exact_nanodollars_beyond_ui_float_precision(setup):
+    world, lives, _ = setup
+    life_id = lives.create(
+        {
+            "budget": {"usd_life": 1},
+            "driver": {
+                "metric": "usd_balance",
+                "reading_at_start": 1000000000,
+                "floor": 999999999.9999999,
+            },
+        }
+    )["life_id"]
+    run_id = session(world, lives, life_id, 1)
+    assert world.store.debit(run_id, "model", "0.000000099")
+    driver = lives.status(life_id)["driver"]
+    assert driver["reading"] == driver["floor"]  # Display rounding loses the one-nano margin.
+    assert not driver["at_floor"]
+    assert world.store.debit(run_id, "model", "0.000000001")
+    assert lives.status(life_id)["driver"]["at_floor"]
+
+
+async def test_lifetime_cap_and_income_remain_exact_when_public_floats_round(setup):
+    _, lives, _ = setup
+    life_id = lives.create(
+        {
+            "stage": 2,
+            "budget": {"usd_life": "1000000000.000000001"},
+            "income_rail": {"kind": "market", "usd_per_credit": 1},
+        }
+    )["life_id"]
+    assert lives._available(lives.get(life_id)) == Decimal("1000000000.000000001")
+    value = "1000000000.000000003"
+    lives.credit(life_id, value, "market", evidence_ref="market:large-exact")
+    lives.credit(life_id, value, "market", evidence_ref="market:large-exact")
+    assert lives._income(lives.get(life_id)) == Decimal(value)
+    assert lives._available(lives.get(life_id)) == Decimal("2000000000.000000004")
+
+
+async def test_state_write_notification_observes_committed_financial_transition(setup):
+    world, lives, _ = setup
+    observations = []
+
+    class Forecast:
+        def notify_state_write(self, *, life_id, world_ref):
+            assert not world.store.db.in_transaction
+            observations.append((lives.status(life_id)["driver"]["reading"], world_ref))
+
+    world.services["forecast"] = Forecast()
+    life_id = lives.create(
+        {
+            "stage": 2,
+            "budget": {"usd_life": 10},
+            "driver": {"metric": "usd_balance"},
+            "income_rail": {"kind": "market", "usd_per_credit": 1},
+        }
+    )["life_id"]
+    lives.credit(life_id, 2, "market", evidence_ref="market:actual-settlement")
+    assert [reading for reading, _ in observations] == [10, 12]
+    assert observations[-1][1].startswith(f"life:{life_id}:")
+    assert lives.verify(life_id)["valid"]
 
 
 async def test_fresh_and_resume_continuity_remain_distinct(setup):

@@ -114,3 +114,101 @@ Software fixtures do not satisfy scientific gates or prove static egress/rDNS,
 live billing, signature acceptance or long-horizon outcomes. Injected clients,
 resolvers and `test_allowed_hosts` are trusted test facilities only; never enable
 them for an untrusted harness or derive them from public tool parameters.
+
+## Design follow-through
+
+The provider gate is the first match, including denied POSTs to model/search
+providers. An optional registered `allowed_hosts` list restricts otherwise public
+destinations; an empty list denies all. World identity and transport headers cannot
+be overridden. A configured HTTPS `researcher_page` joins the stable run-tagged
+User-Agent. Same-domain jobs queue at the token bucket's pace and remain cancellable
+before a request is sent; episode, global-window and cooldown limits remain typed
+refusals.
+
+WARC now pairs each request with its response using `WARC-Concurrent-To`. HAR
+records method, safe request headers, request-body hash and redaction status.
+Ordinary request bodies are retained as base64 HAR postData; credential bodies,
+scanned sensitive bodies and explicitly private header names are withheld.
+Decoded response bytes have matching length/encoding metadata. HEAD/204/304 do
+not consume response bodies; repeated Set-Cookie headers remain separate in the
+world-private browser channel. Browser 401/403/CAPTCHA bodies can render privately
+for re-login/human takeover; a proxy-created `X-World-Response-Block-Type` records
+the observed refusal. Upstream X-World headers cannot supply that marker. A policy
+or network denial never receives this body-preserving treatment.
+
+Anonymous site-MCP sessions can use the exact trusted `mcp-session-id` protocol
+header without enabling account credentials. Session values stay out of WARC/HAR
+and return through the single-use private header channel. Account Authorization
+and Cookie still require their separate vault authority.
+
+For an exact active browser site-MCP JSON-RPC request, a persistent SSE response
+can end after the matching completed result/error event. Split CR/LF frames,
+multiline data and unrelated/server-request IDs are handled incrementally. Normal
+byte and time limits still apply; no public fetch or mismatched request selects
+this behavior. WARC marks the intentional cutoff as truncated, and HAR/index
+metadata records `jsonrpc_response_complete` rather than claiming stream EOF.
+
+Empty script-bearing HTML receives `dynamic_page` from explicit extraction;
+there is no automatic browser launch. JSON/text angle brackets are not treated as
+HTML metadata. The outbound scanner additionally checks URL/HTML/JSON escapes,
+printable base64, configured world-held secret encodings and formatted phones.
+These remain heuristics. Researchers can measure a private labeled holdout with:
+
+```bash
+PYTHONPATH=. .venv/bin/python -m worldd.scanning private-cases.json --output report.json
+```
+
+Cases are `{id,label,body}`; duplicate IDs/content and invalid scores are rejected.
+Reports contain hashes, scores, confusion counts, error rates and Brier score,
+never input bodies. Missing classes remain unmeasured. The default classifier
+stays explicitly uncalibrated; fixture measurements do not satisfy L0.
+
+`/v1/preflight/bind` registers literal researcher-selected Docker agent/fence IDs.
+The host adapter verifies run/role labels, exact internal network namespace,
+capabilities, read-only rootfs, scoped mounts and the actual nonroot user. The
+registered executor supplies real per-run probes; connected-subnet control denial
+also corroborates drop counters when no public route exists. The public CA is
+published without issuing an agent capability before environment inspection.
+
+Containerized worldd can instead consume a short-lived signed host-observer
+receipt through the protected control API. The Docker host reconstructs the fixed
+local probe plan; worldd accepts no arbitrary execution endpoint and needs no
+Docker socket. A fresh marker observed through `/world` binds the actual storage,
+and work/world named-volume subpaths must agree. Challenge nonce, configuration,
+observer key, namespace and record anchor are rechecked before activation.
+
+The source observer records actual configured browser version and signing key,
+verified first model-capture usage, pinned metering and the search provider's
+sealed HTTP Date/body receipt. Public-IP/PTR observations use recorded gateway
+reads and verified DNS where configured. Research requires registered immutable
+source artifacts; missing sources remain unmeasured and fixture transports cannot
+stand in for live providers. Reported token usage can be repriced, but it is never
+presented as a provider-reported dollar bill.
+
+Preflight compares the declared iota with the sealed donor's anchored workspace
+manifest and both trusted and harness-visible work/belief hashes. The registered
+life t=0 artifact must match its immutable fingerprint and sealed probe children;
+arbitrary private files containing completed/forked booleans cannot substitute.
+The life's initial driver reading is checked separately.
+
+Workspace snapshots traverse directory descriptors with no-follow opens, preserve
+symlinks only as metadata, omit unsupported/special entries and atomically publish
+private storage. Sealed-record manifests bind relative paths, file hashes,
+executable meaning and link targets. Import rejects missing anchors, tampering,
+absolute/escaping/cyclic links and special files. Safe internal links keep their
+meaning. Shared-group permissions are applied with descriptor-based chmod without
+following links; snapshots stay private. See the actual container checks in the
+deployment guide.
+
+Spending checkpoints retain actual work at the first committed debit crossing
+10%, 25%, 50% and 100% of the run cap. One debit crossing several fractions shares
+one private snapshot and the same actual dollar/action coordinates. Captures use
+the same no-follow traversal, with a declared limit of 256 entries, 1 MiB and
+0.15 seconds of traversal, inside a trusted worker with a 0.5-second process
+deadline. These limits bound passive work; they are not claims about filesystem
+latency. Concurrent file changes, unsafe links, special files, limits and failures
+produce explicit unmeasured receipts without grading, feedback or parent taint.
+Settlements while frozen/stopping remain eligible until sealing. Startup recovery
+anchors missed historical crossings as unmeasured; current files and orphaned
+captures never substitute for a missing historical receipt. Offline grading
+verifies the exact receipt, first committed ledger crossing and captured manifest.

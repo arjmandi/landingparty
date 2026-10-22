@@ -25,9 +25,11 @@ class WorldFixture:
 
 
 @pytest.fixture
-def kernel(tmp_path):
-    world = WorldFixture(tmp_path)
+def kernel(tmp_path, monkeypatch):
     clock = [datetime(2026, 10, 22, 12, tzinfo=UTC)]
+    monkeypatch.setattr("worldd.storage.utc_now", lambda: clock[0].isoformat())
+    monkeypatch.setattr("worldd.kernel.now", lambda: clock[0].isoformat())
+    world = WorldFixture(tmp_path)
     run = world.store.create_run(
         {"budget": {"usd": 20}, "series_id": "s_test", "reflection_policy": "none"}
     )
@@ -831,3 +833,91 @@ async def test_actual_world_boundary_accepts_hash_notes_and_explicit_slot_propos
         assert world.store.verify_record(run_id)["valid"]
     finally:
         await world.aclose()
+
+
+async def test_companion_formation_requires_explicit_acceptance_and_retains_provenance_on_edits(
+    kernel,
+):
+    world, service, _, _ = kernel
+    run_id = world.store.create_run({"budget": {"usd": 1}, "reflection_policy": "companion"})[
+        "run_id"
+    ]
+    world.store.append_record(run_id, "outcome", action_id="a_page")
+    original = (await service.handle(run_id, "a_agent", "believe", {"record": proposal(rank=1)}))[
+        "data"
+    ]
+    proposed = (
+        await service.handle(
+            run_id,
+            "a_proposal",
+            "believe",
+            {"record": proposal(rank=1, author="reflector", status="proposed")},
+            author="reflector",
+        )
+    )["data"]
+    assert len(service.fold(run_id)) == 2 and service.formation_fold(run_id)["included_n"] == 0
+    await service.handle(run_id, "a_edit", "revise", {"id": proposed["id"], "delta": {"rank": 2}})
+    assert service.formation_fold(run_id)["included_n"] == 0
+    accepted = await service.handle(
+        run_id, "a_accept", "revise", {"id": proposed["id"], "delta": {"status": "held", "rank": 1}}
+    )
+    marker = accepted["data"]["reconfirmed_from"]
+    edited = await service.handle(
+        run_id, "a_edit_again", "revise", {"id": proposed["id"], "delta": {"rank": 2}}
+    )
+    assert (
+        edited["data"]["origin_author"] == "reflector"
+        and edited["data"]["reconfirmed_from"] == marker
+    )
+    eligible = service.formation_fold(run_id)
+    assert eligible["included_n"] == 1 and eligible["excluded_n"] == 1
+    signed = service.export_formation_bundle(run_id)
+    assert signed["manifest"]["belief_ids"] == [proposed["id"]]
+    assert signed["projection"][0]["rank"] == 2  # Formation mount includes confirmed low ranks.
+    assert service.validate_bundle(signed)["valid"]
+    await service.handle(
+        run_id, "a_confirm_own", "revise", {"id": original["id"], "delta": {"status": "held"}}
+    )
+    assert service.formation_fold(run_id)["included_n"] == 2
+
+
+async def test_failed_strategy_and_authoritative_injection_score_survive_signed_transfer(kernel):
+    world, service, source, _ = kernel
+    world.store.append_record(
+        source, "outcome", action_id="a_scored", reply={"provenance": {"injection_score": 0.82}}
+    )
+    strategy = (
+        await service.handle(
+            source,
+            "a_strategy",
+            "believe",
+            {
+                "record": proposal(
+                    kind="strategy",
+                    triple=None,
+                    rank=1,
+                    evidence=[{"ref": "a_scored", "class": "fetched_content"}],
+                )
+            },
+        )
+    )["data"]
+    await service.handle(source, "a_failure", "retract", {"id": strategy["id"]})
+    bundle = service.export_bundle(source)
+    assert bundle["manifest"]["belief_ids"] == [strategy["id"]]
+    assert bundle["projection"][0]["status"] == "retracted"
+    assert bundle["evidence_index"]["a_scored"]["injection_score"] == 0.82
+    target = world.store.create_run({"budget": {"usd": 1}})["run_id"]
+    service.import_bundle(target, bundle)
+    why = service.query(target, query="why", id="a_scored")
+    assert why["resolution"] == "provenance_only" and why["provenance"]["injection_score"] == 0.82
+    scored = await service.handle(
+        target,
+        "a_reuse",
+        "believe",
+        {
+            "record": proposal(
+                evidence=[{"ref": "a_scored", "class": "fetched_content", "injection_score": 0}]
+            )
+        },
+    )
+    assert scored["data"]["evidence"][0]["injection_score"] == 0.82

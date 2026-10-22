@@ -75,10 +75,10 @@ def extract(data_dir: Path, run_id: str, handle: str, view: str, *, banner: bool
         return _blocked("Captured provenance is unavailable", "provenance_missing")
     if view == "metadata":
         data = {
-            "title": soup.title.get_text(strip=True) if soup.title else None,
+            "title": soup.title.get_text(strip=True) if html and soup.title else None,
             "meta": {
                 tag.get("name") or tag.get("property"): tag.get("content")
-                for tag in soup.find_all("meta")
+                for tag in (soup.find_all("meta") if html else [])
                 if tag.get("name") or tag.get("property")
             },
             "bytes": len(raw),
@@ -107,7 +107,8 @@ def extract(data_dir: Path, run_id: str, handle: str, view: str, *, banner: bool
             else []
         )
     else:
-        for tag in soup(["script", "style", "noscript"]):
+        client_rendered = bool(html and soup.find("script"))
+        for tag in soup(["script", "style", "noscript", "head"]):
             tag.decompose()
         if view == "markdown" and html:
             for heading in soup.find_all(re.compile(r"^h[1-6]$")):
@@ -128,9 +129,11 @@ def extract(data_dir: Path, run_id: str, handle: str, view: str, *, banner: bool
         if not data.strip():
             return {
                 "kind": "blocked",
-                "type": "empty_extraction",
-                "detail": "No text was extracted from this resource",
-                "rule_id": "empty_extraction",
+                "type": "dynamic_page" if client_rendered else "empty_extraction",
+                "detail": "The page needs client rendering; use an explicit browser action"
+                if client_rendered
+                else "No text was extracted from this resource",
+                "rule_id": "client_rendered_page" if client_rendered else "empty_extraction",
             }
     provenance = None
     if banner:

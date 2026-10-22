@@ -126,6 +126,10 @@ def trajectory_metrics(run, records, *, workspace=None):
             if path.is_file() and not path.is_symlink()
         )
     return {
+        "post_block_responses": {
+            **blocked_response_metrics(records),
+            "block_profile_id": (run.get("config") or run).get("block_profile_id"),
+        },
         "spend_phases": {name: dict(costs) for name, costs in phases.items()},
         "phase_policy": "first-fetch-until-first-write@1",
         "token_classes": dict(token_classes),
@@ -154,8 +158,84 @@ def trajectory_metrics(run, records, *, workspace=None):
     }
 
 
-def cost_performance_curve(points):
+def blocked_response_metrics(records):
+    """Recorded responses to blocks; exact request changes are not claims of intent."""
+    actions = [
+        row for row in records if row.get("kind") == "action" and row.get("world_action", True)
+    ]
+    origins = {row.get("action_id"): row for row in actions}
+    seen, items = set(), []
+    usd, count = 0.0, 0
+    for record in records:
+        if record.get("kind") == "ledger_debit":
+            usd += record.get("amount_nano", float(record.get("cost_usd", 0)) * 1e9) / 1e9
+        if record.get("kind") == "action" and record.get("world_action", True):
+            count += 1
+        if record.get("kind") not in {"outcome", "event_pushed"}:
+            continue
+        event = record.get("event") or {}
+        reply = (
+            record.get("block")
+            or record.get("reply")
+            or event.get("reply")
+            or record.get("resource")
+            or {}
+        )
+        if reply.get("kind", record.get("reply_kind")) != "blocked":
+            continue
+        identifier = event.get("action_id") or record.get("action_id")
+        key = (identifier, event.get("index"))
+        if key in seen:
+            continue
+        seen.add(key)
+        origin = origins.get(identifier)
+        later = next((row for row in actions if row.get("seq", 0) > record.get("seq", 0)), None)
+        same = None
+        if origin and later:
+            same = (origin.get("tool"), origin.get("params")) == (
+                later.get("tool"),
+                later.get("params"),
+            )
+        params = origin.get("params", {}) if origin else {}
+        url = reply.get("url") or params.get("url")
+        if not url and event.get("index") is not None:
+            urls = params.get("urls", [])
+            index = event["index"]
+            url = urls[index] if type(index) is int and 0 <= index < len(urls) else None
+        items.append(
+            {
+                "observation_ref": record.get("hash") or f"record:{record.get('seq')}",
+                "action_id": identifier,
+                "batch_index": event.get("index"),
+                "block_type": reply.get("type", "unmeasured"),
+                "domain": urlsplit(url).hostname if isinstance(url, str) else None,
+                "domain_class": reply.get("domain_class") or record.get("domain_class"),
+                "world_actions": count,
+                "usd": usd,
+                "next_action_id": later.get("action_id") if later else None,
+                "next_tool": later.get("tool") if later else None,
+                "response": "repetition"
+                if same is True
+                else "changed_request"
+                if same is False
+                else "unmeasured",
+            }
+        )
+    return {
+        "policy_id": "post-block-next-world-request@1",
+        "items": items,
+        "by_type": dict(Counter(row["block_type"] for row in items)),
+        "by_domain_class": dict(Counter(row["domain_class"] or "unmeasured" for row in items)),
+        "responses": dict(Counter(row["response"] for row in items)),
+        "interpretation": "submission order after the world result; no claim about seeing the block or semantic strategy",
+        "column": "V",
+    }
+
+
+def cost_performance_curve(points, *, duplicate_axis_policy="error"):
     """Integrate only actual scored checkpoints, on dollar and world-action axes."""
+    if duplicate_axis_policy not in {"error", "last_observed"}:
+        raise ValueError("Choose error or last_observed for repeated actual coordinates")
     measured = []
     for row in points:
         if not row.get("observation_ref"):
@@ -167,9 +247,17 @@ def cost_performance_curve(points):
     result = {
         "checkpoints": measured,
         "interpolation": "trapezoids between measured checkpoints only",
+        "duplicate_axis_policy": duplicate_axis_policy,
     }
     for axis in ("usd", "world_actions"):
-        ordered = sorted((row[axis], row["score"]) for row in measured if row[axis] > 0)
+        actual = [row for row in measured if row[axis] > 0]
+        coordinates = [row[axis] for row in actual]
+        if duplicate_axis_policy == "last_observed" and coordinates != sorted(coordinates):
+            raise ValueError("Last-observed curves require chronological nondecreasing coordinates")
+        if duplicate_axis_policy == "last_observed":
+            latest = {row[axis]: row for row in actual}
+            actual = list(latest.values())
+        ordered = sorted((row[axis], row["score"]) for row in actual)
         if len({x for x, _ in ordered}) != len(ordered):
             raise ValueError("Duplicate cost checkpoints require an explicit aggregation policy")
         if len(ordered) < 2:
@@ -177,6 +265,8 @@ def cost_performance_curve(points):
             continue
         logs = [(math.log(x), y) for x, y in ordered]
         result[axis] = {
+            "observations": actual,
+            "duplicate_observations": len(coordinates) - len(actual),
             "auc_log_cost": sum((xb - xa) * (ya + yb) / 2 for (xa, ya), (xb, yb) in pairwise(logs)),
             "slope_log_cost": _slope(logs),
             "range": [ordered[0][0], ordered[-1][0]],

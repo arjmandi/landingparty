@@ -136,7 +136,9 @@ def test_active_human_seconds_capped_and_parallel_is_not_agent_spend(world):
     run_id = world.run()
     asks, ticket_id = world.services["asks"], ticket(world, run_id)
     asks.touch(ticket_id)
-    world.clock.advance(900)
+    for _ in range(30):
+        world.clock.advance(25)
+        asks.touch(ticket_id)
     reply = asks.answer(ticket_id, "reject")
     assert reply["human_seconds"] == 600
     assert asks.human_spend(run_id)["seconds"] == 600
@@ -149,6 +151,67 @@ def test_in_budget_human_time_is_actually_debited(world):
     asks.answer(ticket(world, run_id), "approve", human_seconds=30)
     assert world.store.spend(run_id)["human"] == 0.3
     assert world.store.reconcile(run_id)["valid"]
+
+
+def test_lost_console_pause_cannot_bill_an_abandoned_tab(world):
+    run_id = world.run(human_time_priced="in_budget", human_rate_usd_per_minute=0.6)
+    asks, pending = world.services["asks"], ticket(world, run_id)
+    asks.touch(pending)
+    world.clock.advance(900)
+    assert asks.answer(pending, "reject")["human_seconds"] == 30
+    assert world.store.spend(run_id)["human"] == 0.3
+
+
+def test_parallel_time_has_no_implicit_zero_dollar_exchange_rate(world):
+    run_id = world.run(human_time_priced="parallel", human_rate_usd_per_minute=0.6)
+    asks = world.services["asks"]
+    answer = asks.answer(ticket(world, run_id), "reject", human_seconds=12)
+    assert answer["answer"]["usd"] is None
+    assert world.store.total_spent(run_id) == 0
+
+
+def test_console_activity_cursor_standing_revoke_and_contamination_are_durable(world):
+    run_id = world.run()
+    asks = world.services["asks"]
+    asks.answer(ticket(world, run_id), "reject", standing=True)
+    first = asks.console_state(run_id)
+    assert len(first["standing_rejections"]) == 1
+    asks.revoke_standing(first["standing_rejections"][0]["rule_id"])
+    item = asks.record_contamination(
+        run_id, kind="hint", owner="operator", detail="Unscheduled hint", human_seconds=8
+    )
+    state = asks.console_state(run_id, since=first["cursor"])
+    assert state["standing_rejections"] == []
+    assert state["contamination"] == [item]
+    assert state["human"]["seconds"] == 8
+    assert state["activity"][-1]["kind"] == "contamination"
+    assert world.store.get_run(run_id)["tainted"]
+    assert world.store.inbox(run_id)["events"][-1]["type"] == "ask_resolved"
+
+
+def test_ticket_and_vault_state_notifiers_observe_committed_values(world):
+    from types import SimpleNamespace
+
+    seen = []
+    asks, vault = world.services["asks"], world.services["vault"]
+
+    def notify(**item):
+        if item["world_ref"].startswith("ask:"):
+            ticket_id = item["world_ref"].split(":")[1]
+            seen.append((item["world_ref"], asks.get(ticket_id)["state"]))
+        else:
+            event_id = item["world_ref"].split(":")[1]
+            assert vault.database.db.execute(
+                "SELECT payload FROM vault_mutations WHERE event_id=?", (event_id,)
+            ).fetchone()
+            seen.append((item["world_ref"], vault.get_account("fixture")["state"]))
+
+    world.services["forecast"] = SimpleNamespace(notify_state_write=notify)
+    run_id = world.run()
+    world.provision(run_id)
+    asks.answer(ticket(world, run_id), "reject")
+    vault.revoke("fixture")
+    assert [state for _, state in seen] == ["ready", "rejected", "revoked"]
 
 
 def test_approval_cannot_be_tampered_in_database(world):
@@ -180,6 +243,53 @@ async def test_agent_cannot_invent_pending_action_for_approval(world):
     assert result["kind"] == "blocked" and result["rule_id"] == "ask_action_ref"
 
 
+async def test_agent_words_attach_to_actual_pending_gate_without_rebinding_hash(world):
+    run_id = world.run()
+    world.provision(run_id)
+    asks, vault = world.services["asks"], world.services["vault"]
+    request = {
+        "url": "https://fixture.test/send",
+        "recipient": "new@example.test",
+        "body": "Original",
+    }
+    world.store.append_record(run_id, "action", action_id="a_send", tool="send", params=request)
+    pending = await vault.authorize(run_id, "a_send", "fixture", "message", request)
+    original = asks.get(pending["ticket_id"])
+    repeated = await asks.handle(
+        run_id,
+        "a_explain",
+        "ask",
+        {
+            "kind": "approval",
+            "text": "Please approve this exact first message",
+            "action_ref": "a_send",
+        },
+    )
+    assert repeated["ticket_id"] == pending["ticket_id"]
+    updated = asks.get(pending["ticket_id"])
+    assert updated["body"] == original["body"] and updated["action_hash"] == original["action_hash"]
+    assert updated["agent_text"] == "Please approve this exact first message"
+    asks.answer(pending["ticket_id"], "approve")
+    assert (await vault.authorize(run_id, "a_retry", "fixture", "message", request))[
+        "kind"
+    ] == "result"
+    world.store.append_record(
+        run_id,
+        "action",
+        action_id="a_read",
+        tool="fetch",
+        params={"url": "https://fixture.test/public"},
+    )
+    assert (
+        await asks.handle(
+            run_id,
+            "a_not_pending",
+            "ask",
+            {"kind": "approval", "text": "approve", "action_ref": "a_read"},
+        )
+    )["rule_id"] == "ask_pending_action"
+
+
 def test_takeover_approval_completes_only_after_human_done(world):
     run_id = world.run()
     asks = world.services["asks"]
@@ -197,7 +307,9 @@ def test_active_in_budget_human_work_reserves_before_spend_and_settles_on_stop(w
     assert asks.touch(ticket_id)["active"]
     assert world.store.reserved(run_id) == 6
     assert not world.store.debit(run_id, "model", 15)
-    world.clock.advance(60)
+    world.clock.advance(30)
+    asks.touch(ticket_id)
+    world.clock.advance(30)
     world.store.update_run(run_id, state="stopping")
     asks.cancel_run(run_id)
     assert world.store.reserved(run_id) == 0
@@ -269,7 +381,9 @@ async def test_sleep_preserves_blocker_and_settles_human_time_but_cancels_takeov
     asks, pending = world.services["asks"], ticket(world, run_id)
     takeover = asks.raise_ticket(run_id, "a_take", "takeover", pending_action={"session_id": "s"})
     asks.touch(pending)
-    world.clock.advance(60)
+    world.clock.advance(30)
+    asks.touch(pending)
+    world.clock.advance(30)
     world.store.update_run(run_id, state="stopping")
     assert asks.cancel_run(run_id, preserve_pending=True) == 1
     assert asks.get(pending)["state"] == "open"
@@ -322,7 +436,9 @@ async def test_late_priced_console_reserves_lifetime_budget_without_mutating_sou
     sealed = world.store.records(source)
     assert asks.touch(pending)["active"]
     assert lives.status(life_id)["reserved_usd"] == 6
-    world.clock.advance(60)
+    world.clock.advance(30)
+    asks.touch(pending)
+    world.clock.advance(30)
     assert asks.answer(pending, "reject")["human_seconds"] == 60
     assert lives.status(life_id)["reserved_usd"] == 0
     assert lives.status(life_id)["spent_usd"] == 0.6

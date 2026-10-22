@@ -83,6 +83,83 @@ async def test_scope_origin_identity_and_stage_cannot_be_overridden(world):
     )["rule_id"] == "stage_gate"
 
 
+async def test_outside_scope_approval_does_not_itself_expand_delegation(world):
+    run_id = world.run()
+    world.provision(run_id, scope_classes=["read"], scope_rules={"read": ["https://fixture.test/"]})
+    vault, asks = world.services["vault"], world.services["asks"]
+    request = {"url": "https://fixture.test/settings", "body": {"name": "Fixture"}}
+    pending = await vault.authorize(run_id, "a_settings", "fixture", "settings", request)
+    assert pending["kind"] == "ticket" and asks.get(pending["ticket_id"])["kind"] == "approval"
+    asks.answer(pending["ticket_id"], "approve")
+    assert (await vault.authorize(run_id, "a_retry", "fixture", "settings", request))[
+        "kind"
+    ] == "ticket"
+    vault.update_scope(
+        "fixture",
+        run_id=run_id,
+        scope_classes=["read", "settings"],
+        scope_rules={scope: ["https://fixture.test/"] for scope in ["read", "settings"]},
+    )
+    assert (await vault.authorize(run_id, "a_after_amendment", "fixture", "settings", request))[
+        "kind"
+    ] == "result"
+    with pytest.raises(ValueError, match="escape"):
+        vault.update_scope(
+            "fixture",
+            run_id=run_id,
+            scope_classes=["read"],
+            scope_rules={"read": ["https://other.test/"]},
+        )
+
+
+async def test_actual_accounts_held_driver_tracks_same_identity_provision_revoke(world):
+    from worldd.identity import IdentityService
+    from worldd.lives import LifeService
+
+    lives, identities = LifeService(world, clock=world.clock), IdentityService(world)
+    world.services.update(lives=lives, identity=identities)
+    try:
+        life = lives.create(
+            {
+                "stage": 2,
+                "budget": {"usd_life": 20},
+                "driver": {"metric": "accounts_held", "reading_at_start": 1, "floor": -1},
+            }
+        )
+        identity = identities.create(
+            life_id=life["life_id"],
+            principal="researcher_fixture",
+            name="Fixture agent",
+            mailbox="fixture@example.test",
+            homepage="https://fixture.test/agent",
+        )
+        config = lives.prepare_session(life["life_id"], {"budget": {"usd": 20, "wall_s": 7200}})
+        run_id = world.store.create_run(config)["run_id"]
+        lives.attach_session(life["life_id"], run_id)
+        world.provision(run_id, identity_id=identity["identity_id"])
+        assert lives.get(life["life_id"])["driver"]["reading"] == 1
+        world.provision(run_id, alias="second", identity_id=identity["identity_id"])
+        assert lives.get(life["life_id"])["driver"]["reading"] == 2
+        world.services["vault"].revoke("fixture")
+        assert lives.get(life["life_id"])["driver"]["reading"] == 1
+        world.services["vault"].replace_credential("fixture", {"api_key": "replacement-private"})
+        assert lives.get(life["life_id"])["driver"]["reading"] == 2
+        mutation = (
+            world.services["vault"]
+            .database.db.execute(
+                "SELECT payload,signature FROM vault_mutations ORDER BY rowid DESC LIMIT 1"
+            )
+            .fetchone()
+        )
+        assert (
+            world.services["vault"].database.sign(json.loads(mutation["payload"]))
+            == mutation["signature"]
+        )
+    finally:
+        await lives.aclose()
+        await identities.aclose()
+
+
 async def test_purchase_and_first_contact_require_exact_approval(world):
     run_id = world.run()
     world.provision(run_id)

@@ -107,6 +107,14 @@ class LifeRubricPipeline:
             if not isinstance(value, dict):
                 raise TypeError("life rubric configuration artifacts must contain objects")
             config[name], config["provenance"][name] = value, provenance
+        if config["calibration"] is not None:
+            from .classifier_evidence import verify_saved_allocation
+
+            # A frozen file containing claimed kappa/miss-rate scalars is not
+            # a calibrated instrument. Rebuild from real expert/capture rows.
+            config["calibration"] = verify_saved_allocation(
+                self.world, source_run_id, config["calibration"]
+            )
         errors = validate_rubric_policy(config["policy"])
         if errors:
             raise ValueError("; ".join(errors))
@@ -122,9 +130,63 @@ class LifeRubricPipeline:
                 raise ValueError(
                     "footprint evidence mappings require parameter, column, kind and class"
                 )
+        for mapping in config["binding"].get("classifier_mappings", []):
+            if (
+                mapping.get("parameter") not in PARAMETERS
+                or mapping.get("label")
+                not in {
+                    "instrumental",
+                    "non_instrumental",
+                    "content_class",
+                    "play",
+                    "reiteration",
+                    "revisit",
+                }
+                or not mapping.get("evidence_class")
+            ):
+                raise ValueError(
+                    "classifier mappings require a life parameter, actual label and evidence class"
+                )
+        self._validate_configuration(life, config)
         body = _bytes(config)
         _save(self._folder(life_id) / "config.json", body)
+        schedule = getattr(self.world.services["lives"], "schedule_rubric", None)
+        if schedule:
+            schedule(life_id)
         return {"life_id": life_id, "config_hash": _hash(body), "configured": True}
+
+    def _validate_configuration(self, life, config):
+        allowed = [session["run_id"] for session in life["sessions"]]
+        for name in ("policy", "binding"):
+            body, _ = load_artifact(
+                self.store,
+                config["source_run_id"],
+                config["provenance"][name],
+                allowed_run_ids=allowed,
+            )
+            if json.loads(body) != config[name]:
+                raise ValueError("life rubric configuration differs from its frozen artifact")
+        if life.get("research_mode") != "research":
+            return
+        registry = self.world.services.get("registry")
+        source = self.store.get_run(config["source_run_id"])
+        series_id = source["config"].get("series_id") or life.get("series_id")
+        if not registry or not series_id:
+            raise ValueError("research life rubric requires its actual registered series")
+        series = registry.get_series(series_id)
+        first_session = min(
+            (_time(session["started_at"]) for session in life["sessions"]),
+            default=_time(source["created_at"]),
+        )
+        if (
+            _time(series["created_at"]) > first_session
+            or series["prereg"].get("life_rubric_policy_hash")
+            != config["provenance"]["policy"]["hash"]
+            or series["prereg"].get("life_binding_hash") != config["provenance"]["binding"]["hash"]
+        ):
+            raise ValueError(
+                "research life rubric policy and binding hashes must be preregistered before the first session"
+            )
 
     def _footprint(self, life_id, checkpoint, binding, *, through):
         footprint = self.world.services.get("footprint")
@@ -163,6 +225,90 @@ class LifeRubricPipeline:
                         }
                     )
         return evidence, originals
+
+    def _classifier_evidence(self, life, checkpoint, config, *, through):
+        from .classifier_evidence import verify_saved_allocation
+        from .publication import load_measurements
+
+        evidence, calibration, provenance = [], [], []
+        mappings = config["binding"].get("classifier_mappings", [])
+        if not mappings and config["calibration"] is None:
+            return evidence, None, provenance
+        for session in life["sessions"]:
+            run_id = session["run_id"]
+            records = self.store.records(run_id)
+            if not records or records[-1]["kind"] != "seal" or _time(records[-1]["ts"]) > through:
+                continue
+            measured = load_measurements(self.store, run_id)
+            payload = measured.get("allocation")
+            if payload is None and run_id == config["source_run_id"]:
+                payload = config["calibration"]
+            if not payload or payload.get("status") != "measured":
+                continue
+            verified = verify_saved_allocation(self.world, run_id, payload)
+            provenance.append(
+                {
+                    "run_id": run_id,
+                    "source_record_head": verified["source_record_head"],
+                    "instrument": verified["instrument_ref"],
+                    "protocol_hash": verified["protocol_hash"],
+                    "measurement_run_ids": [
+                        row["measurement_run_id"]
+                        for row in verified["segments"] + verified["calibration_judgments"]
+                    ],
+                }
+            )
+            for mapping in mappings:
+                label = mapping["label"]
+                key = "instrumental" if label == "non_instrumental" else label
+                tasks = {key}
+                if label in {"non_instrumental", "revisit"}:
+                    tasks.update({"instrumental", "content_class"})
+                agreements = [verified["calibration"][task] for task in tasks]
+                qualified = all(row.get("column") == "V" for row in agreements)
+                if qualified:
+                    calibration.extend(agreements)
+                expected = mapping.get("equals", label != "non_instrumental")
+                for segment in verified["segments"]:
+                    for reading in segment["readings"]:
+                        if reading.get(key) is None or reading.get(key) != expected:
+                            continue
+                        if label == "revisit" and reading.get("instrumental") is not False:
+                            continue
+                        if (
+                            mapping.get("content_class")
+                            and reading.get("content_class") != mapping["content_class"]
+                        ):
+                            continue
+                        evidence.append(
+                            {
+                                "parameter": mapping["parameter"],
+                                "column": "V" if qualified else "J",
+                                "evidence_class": mapping["evidence_class"],
+                                "event_kind": mapping.get("event_kind", label),
+                                "value": reading["interval_usd"]
+                                if mapping.get("value") == "interval_usd"
+                                else 1,
+                                "success": True,
+                                "checkpoint": checkpoint,
+                                "observation_ref": reading["action_ref"],
+                                "source_run_id": run_id,
+                                "measurement_run_id": segment["measurement_run_id"],
+                                "judge_dependent": True,
+                            }
+                        )
+        if calibration:
+            bound = {
+                "kappa": min(row["kappa"] for row in calibration),
+                "miss_rate": max(
+                    row["miss_rate"] for row in calibration if row.get("miss_rate") is not None
+                ),
+                "receipts_verified": True,
+                "combination": "minimum actual task kappa and maximum actual task miss rate across mapped labels/sessions",
+            }
+        else:
+            bound = None
+        return evidence, bound, provenance
 
     def _checkpoint(self, descriptor):
         if not isinstance(descriptor, dict):
@@ -218,10 +364,29 @@ class LifeRubricPipeline:
                 profile = event.get("block_profile")
                 if event["kind"] == "preflight" and isinstance(profile, dict):
                     block_profiles.append(profile)
+        points = [
+            event
+            for run in runs
+            for event in self.store.records(run["run_id"])
+            if _time(event["ts"]) <= through
+        ]
         return {
             "version_tuples": [item["tuple"] for item in settings],
             "binding_hash": config["provenance"]["binding"]["hash"],
             "budget": life["budget"],
+            "axes": {
+                "usd": sum(
+                    event.get("amount_nano", float(event.get("cost_usd", 0)) * 1e9)
+                    for event in points
+                    if event["kind"] == "ledger_debit"
+                )
+                / 1e9,
+                "world_actions": sum(
+                    event["kind"] == "action" and event.get("world_action", True)
+                    for event in points
+                ),
+                "calendar_days": (through - _time(life["created_at"])).total_seconds() / 86400,
+            },
             "calendar": {
                 "start_iso_week": _time(life["created_at"]).strftime("%G-W%V"),
                 "checkpoint": checkpoint,
@@ -269,6 +434,7 @@ class LifeRubricPipeline:
         config = json.loads(config_path.read_bytes())
         lives = self.world.services["lives"]
         life = lives.get(life_id)
+        self._validate_configuration(life, config)
         now = lives._now()  # A world-owned clock; API input never supplies an observation time.
         through = now
         if life.get("active_run_id"):
@@ -312,6 +478,10 @@ class LifeRubricPipeline:
                             "grounded evidence must preserve actual footprint provenance"
                         )
             evidence_provenance = loaded["provenance"]
+        classifier_rows, calibration, classifier_provenance = self._classifier_evidence(
+            life, checkpoint, config, through=through
+        )
+        evidence.extend(classifier_rows)
         t0_path = self.store.data_dir / "lives" / life_id / "t0.json"
         t0 = json.loads(t0_path.read_bytes()) if t0_path.is_file() else None
         if t0 is not None and life.get("t0_fingerprint_ref"):
@@ -319,19 +489,29 @@ class LifeRubricPipeline:
 
             if content_hash(t0) != life["t0_fingerprint_ref"]:
                 raise ValueError("the registered t=0 battery artifact failed integrity")
+        prior_checkpoints = []
+        horizon = (through - _time(life["created_at"])).total_seconds() / 86400
+        for reference in life.get("rubric_checkpoints", []):
+            prior = self._checkpoint(reference)
+            position = prior.get("matching", {}).get("axes", {}).get("calendar_days")
+            if isinstance(position, (int, float)) and position <= horizon:
+                prior_checkpoints.append(prior)
         report = score_life(
             life,
             evidence,
             binding=config["binding"],
             policy=config["policy"],
             checkpoint=checkpoint,
-            judge_calibration=config["calibration"],
+            judge_calibration=calibration,
             t0=t0,
+            checkpoint_reports=prior_checkpoints,
         )
         report["provenance"] = {
             "config_hash": _hash(config_path.read_bytes()),
             "configuration": config["provenance"],
             "evidence": evidence_provenance,
+            "classifiers": classifier_provenance,
+            "judge_calibration": calibration,
             "scientific_gate_passed": False,
         }
         report["matching"] = self._matching(life, config, checkpoint, through)
@@ -377,6 +557,32 @@ class LifeRubricPipeline:
         register = getattr(lives, "record_rubric", None)
         if register:
             register(life_id, report, artifact_ref=artifact_ref, artifact_hash=digest)
+        # Publication is a separate derived artifact. It cannot change the
+        # immutable rubric payload or reopen any source session record.
+        from .publication import export_publication
+
+        export_folder = (
+            self.store.data_dir / "lives" / life_id / "publication" / digest.split(":", 1)[1]
+        )
+        publication = self.world.life_report(life_id)["publication"]
+        publication.pop("figure_svgs", None)
+        export_manifest = export_folder / "exports.json"
+        if export_manifest.is_symlink():
+            raise ValueError("life publication manifests cannot be symbolic links")
+        expected_publication_hash = _hash(
+            (
+                json.dumps(
+                    publication, sort_keys=True, ensure_ascii=False, indent=2, allow_nan=False
+                )
+                + "\n"
+            ).encode()
+        )
+        if (
+            not export_manifest.exists()
+            or json.loads(export_manifest.read_bytes()).get("files", {}).get("report.json")
+            != expected_publication_hash
+        ):
+            export_publication(publication, export_folder)
         return {
             "life_id": life_id,
             "checkpoint": checkpoint,

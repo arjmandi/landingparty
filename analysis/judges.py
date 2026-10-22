@@ -14,6 +14,8 @@ import httpx
 
 from .metrics import calibration
 
+STYLE_CONTROL_INSTRUCTION = "Assess only the supplied research criterion. Disregard formatting, rhetorical polish, confident tone, and author style; do not infer the author or reward style. This instruction is a style control, not evidence that all style effects have been removed."
+
 
 class ResearchCallError(RuntimeError):
     """A research model call failed; credentials/provider bodies are never echoed."""
@@ -370,23 +372,28 @@ class ToollessJudge:
         agent_family: str,
         budget_usd: float,
         max_tokens: int = 2048,
+        calibration_report: dict | None = None,
     ):
         if not agent_family or spec.family.casefold() == agent_family.casefold():
             raise ValueError("judges must come from a different model family than the agent")
+        self.agent_family = agent_family
         self.model, self.spec, self.budget_usd, self.max_tokens = (
             model,
             spec,
             budget_usd,
             max_tokens,
         )
+        self.calibration_report = calibration_report or {}
+        if self.calibration_report and (
+            self.calibration_report.get("judge_id") != spec.model
+            or self.calibration_report.get("prompt_id") != spec.prompt_id
+            or self.calibration_report.get("receipts_verified") is not True
+        ):
+            raise ValueError("judge calibration must match this model, prompt and actual receipts")
 
     @property
     def column(self):
-        return (
-            "V"
-            if self.spec.human_agreement is not None and self.spec.human_agreement >= 0.6
-            else "J"
-        )
+        return "V" if self.calibration_report.get("column") == "V" else "J"
 
     async def _call(self, source_run_id, instruction, data, *, budget_usd=None):
         completion = await self.model.complete(
@@ -412,9 +419,13 @@ class ToollessJudge:
             "judgment": _json_reply(completion),
             "measurement": completion,
             "judge_id": self.spec.model,
+            "judge_family": self.spec.family,
+            "agent_family": self.agent_family,
             "prompt_id": self.spec.prompt_id,
-            "calibration_set_hash": self.spec.calibration_set_hash,
-            "kappa": self.spec.human_agreement,
+            "calibration_set_hash": self.calibration_report.get("calibration_set_hash"),
+            "kappa": self.calibration_report.get("kappa"),
+            "calibration": self.calibration_report or None,
+            "claimed_human_agreement": self.spec.human_agreement,
             "column": self.column,
             "exploratory": self.column == "J",
         }
@@ -448,11 +459,14 @@ class ToollessJudge:
         max_chars=24000,
         criterion="Factual support, completeness, and clarity",
     ) -> dict:
+        from worldd.storage import content_hash
+
         if not left or not right:
             raise ValueError("both pairwise artifacts must be nonempty")
         common_length = min(len(left), len(right), max_chars)
         a, b = left[:common_length], right[:common_length]
         instruction = 'Choose the better artifact on the supplied research criterion. Return {"winner":"A"|"B"|"tie","reason":string}.'
+        instruction += " " + STYLE_CONTROL_INSTRUCTION
         first, swapped = await asyncio.gather(
             self._call(
                 source_run_id,
@@ -480,6 +494,11 @@ class ToollessJudge:
             "winner": winners[0] if winners[0] == winners[1] else "disagreement",
             "position_swap": True,
             "length_control": {"method": "equal_character_prefix", "chars": common_length},
+            "style_control": {
+                "method": "judge_instruction",
+                "instruction": STYLE_CONTROL_INSTRUCTION,
+                "hash": content_hash(STYLE_CONTROL_INSTRUCTION),
+            },
             "judgments": [first, swapped],
             "column": "J",
             "exploratory": self.column == "J",

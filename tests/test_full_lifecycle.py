@@ -1,6 +1,9 @@
 """Exercise stage-aware life transitions through the actual HTTP application."""
 
 import asyncio
+import io
+import json
+import tarfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -66,6 +69,194 @@ async def act(client, run_id, tool, **params):
 async def wait_for_sleep(world, life_id):
     task = world.services["lives"].tasks[life_id + ":sleep"]
     await asyncio.wait_for(asyncio.shield(task), 2)
+
+
+async def test_actual_life_export_preserves_event_chain_snapshots_and_accounting_metadata(full_app):
+    app, client = full_app
+    world = app.state.world
+    life_id = await new_life(client)
+    created = await new_session(client, life_id, packs=["deliver"])
+    run_id = created["run_id"]
+    original = world.store.run_dir(run_id) / "work" / "artifact.txt"
+    original.write_text("Frozen agent artifact")
+    with pytest.raises(ValueError, match="Seal active"):
+        world.services["lives"].export(life_id)
+    assert (await client.post("/v1/beam-up", json={"run_id": run_id})).status_code == 200
+    original.write_text("Mutable local researcher edit after seal")
+    assert (await client.post(f"/v1/lives/{life_id}/end", json={})).status_code == 200
+    body = world.services["lives"].export(life_id)
+    with tarfile.open(fileobj=io.BytesIO(body), mode="r:gz") as archive:
+        manifest = json.load(archive.extractfile(f"{life_id}/manifest.json"))
+        assert (
+            manifest["verification"]["valid"] and manifest["verification"]["materialized_verified"]
+        )
+        assert not manifest["partial"]
+        accounting = json.load(archive.extractfile(f"{life_id}/accounting/runs.json"))
+        assert accounting[0]["run_id"] == run_id and accounting[0]["ledger"]["valid"]
+        nested = archive.extractfile(f"{life_id}/sessions/{run_id}.tar.gz").read()
+        with tarfile.open(fileobj=io.BytesIO(nested), mode="r:gz") as session:
+            assert (
+                session.extractfile(f"{run_id}/work-snapshot/artifact.txt").read()
+                == b"Frozen agent artifact"
+            )
+            assert not any(
+                "grant-signing.key" in name or "/vault/" in name for name in session.getnames()
+            )
+
+
+async def test_actual_incident_is_anchored_to_life_without_mutating_other_lives(full_app):
+    app, client = full_app
+    first, other = await new_life(client), await new_life(client)
+    identity = await client.post(
+        "/v1/identities",
+        json={
+            "life_id": first,
+            "name": "fixture-life",
+            "principal": "researcher",
+            "mailbox": "fixture@example.org",
+            "homepage": "https://example.org/fixture",
+        },
+    )
+    assert identity.status_code == 201, identity.text
+    created = await new_session(client, first)
+    response = await client.post(
+        "/v1/incidents",
+        json={
+            "run_id": created["run_id"],
+            "platform": "fixture",
+            "incident_kind": "complaint",
+            "owner": "researcher",
+            "detail": "Actual operator-recorded platform complaint",
+        },
+    )
+    assert response.status_code == 201, response.text
+    item_id = response.json()["item"]["item_id"]
+    lives = app.state.world.services["lives"]
+    assert lives.get(first)["incidents"][0]["incident_ref"] == item_id
+    assert lives.get(other)["incidents"] == []
+    lives.record_incident(first, item_id)
+    assert len(lives.get(first)["incidents"]) == 1
+    with pytest.raises(ValueError, match="does not belong"):
+        lives.record_incident(other, item_id)
+    assert lives.verify(first)["valid"]
+
+
+async def test_inbound_during_sleep_seal_handoff_reaches_next_context_once(full_app):
+    app, client = full_app
+    world = app.state.world
+    life_id = await new_life(client)
+    source = (await new_session(client, life_id, packs=["schedule"]))["run_id"]
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = world.end_run
+
+    async def delayed_end(run_id, **options):
+        if run_id == source and not release.is_set():
+            entered.set()
+            await release.wait()
+        return await original(run_id, **options)
+
+    world.end_run = delayed_end
+    try:
+        assert (await act(client, source, "sleep", wake_on=["message_received"]))[
+            "kind"
+        ] == "silence"
+        await asyncio.wait_for(entered.wait(), 1)
+        assert world.store.get_run(source)["state"] == "running"
+        world.push(source, {"type": "message_received", "body": "First pre-seal handoff"})
+        world.push(source, {"type": "message_received", "body": "Second while waking"})
+        release.set()
+        await wait_for_sleep(world, life_id)
+        next_run = (await new_session(client, life_id))["run_id"]
+        messages = [
+            event["body"]
+            for event in world.store.inbox(next_run)["events"]
+            if event["type"] == "message_received"
+        ]
+        assert messages == ["First pre-seal handoff", "Second while waking"]
+        assert world.store.records(source)[-1]["kind"] == "seal"
+        assert world.store.verify_record(source)["valid"]
+    finally:
+        release.set()
+        world.end_run = original
+
+
+async def test_stasis_handoff_rebuilds_queue_after_inbox_commit_without_late_commit(full_app):
+    app, client = full_app
+    world = app.state.world
+    lives = world.services["lives"]
+    life_id = await new_life(client)
+    source = (await new_session(client, life_id, packs=["schedule"]))["run_id"]
+    world.push(source, {"type": "message_received", "body": "Already seen before stasis"})
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_end, original_append = world.end_run, world.late_events.append
+
+    async def delayed_end(run_id, **options):
+        if run_id == source and not release.is_set():
+            entered.set()
+            await release.wait()
+        return await original_end(run_id, **options)
+
+    def interrupted_queue(*args, **kwargs):
+        raise OSError("crash after authoritative inbox commit")
+
+    world.end_run = delayed_end
+    try:
+        await act(client, source, "sleep", wake_on=["message_received"])
+        await asyncio.wait_for(entered.wait(), 1)
+        world.late_events.append = interrupted_queue
+        with pytest.raises(OSError):
+            world.push(source, {"type": "message_received", "body": "Durable handoff body"})
+        world.late_events.append = original_append
+        assert world.late_events.pending(life_id) == []
+        assert lives.get(life_id)["state"] == "sleeping"
+        release.set()
+        await wait_for_sleep(world, life_id)
+        await lives.recover()
+        await lives.recover()
+        assert lives.get(life_id)["state"] == "waking"
+        assert len(world.late_events.pending(life_id)) == 1
+        target = (await new_session(client, life_id))["run_id"]
+        messages = [
+            event["body"]
+            for event in world.store.inbox(target)["events"]
+            if event["type"] == "message_received"
+        ]
+        assert messages == ["Durable handoff body"]
+        assert world.store.verify_record(source)["valid"]
+    finally:
+        release.set()
+        world.end_run, world.late_events.append = original_end, original_append
+
+
+async def test_forward_retry_after_lost_delivery_ack_does_not_duplicate_inbox_or_record(full_app):
+    app, client = full_app
+    world = app.state.world
+    life_id = await new_life(client)
+    source = (await new_session(client, life_id, packs=["schedule"]))["run_id"]
+    await act(client, source, "sleep", wake_on=["message_received"])
+    await wait_for_sleep(world, life_id)
+    queued = world.push(source, {"type": "message_received", "body": "One actual response"})
+    target = (await new_session(client, life_id))["run_id"]
+    original = world.store.inbox(target)
+    records = world.store.records(target)
+    world.late_events.db.execute(
+        "UPDATE events SET delivered_to=NULL WHERE event_id=?", (queued["event_id"],)
+    )
+    for event in world.late_events.pending(life_id):
+        world.push(
+            target,
+            {
+                **event,
+                "source_run_id": event["run_id"],
+                "late_event_id": event["event_id"],
+                "observed_at": event["ts"],
+            },
+        )
+        world.late_events.delivered(event["event_id"], target)
+    assert world.store.inbox(target) == original
+    assert world.store.records(target) == records
+    assert world.late_events.pending(life_id) == []
+    assert world.store.verify_record(target)["valid"]
 
 
 async def test_real_sleep_wake_restores_workspace_and_registered_tools(full_app):

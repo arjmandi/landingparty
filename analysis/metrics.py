@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from collections import Counter
 from collections.abc import Iterable, Sequence
@@ -346,6 +347,50 @@ def ask_metrics(records: list[dict], *, spent_usd: float) -> dict:
             human[key] = max(
                 human.get(key, 0), min(600, max(0, float(record.get("human_seconds", 0))))
             )
+    actions = {
+        row.get("action_id"): row
+        for row in records
+        if row.get("kind") == "action" and row.get("world_action", True)
+    }
+    annotations = {row.get("ticket_id"): row for row in records if row.get("kind") == "ask_context"}
+    weeks, missing_timestamps, info_types = {}, 0, Counter()
+    for row in opened:
+        annotation = annotations.get(row.get("ticket_id"), {}) if row.get("ticket_id") else {}
+        actual_action = actions.get(annotation.get("action_id", row.get("action_id")), {})
+        params = actual_action.get("params") or {}
+        fraction = annotation.get("subgoal_fraction", row.get("subgoal_fraction"))
+        if fraction is None:
+            fraction = params.get("subgoal_fraction")
+        info = annotation.get("info_type", row.get("info_type")) or params.get("info_type")
+        info_types[info if isinstance(info, str) and info else "unmeasured"] += 1
+        try:
+            stamp = datetime.fromisoformat(row.get("ts") or annotation["ts"])
+            if stamp.tzinfo is None:
+                raise ValueError("Unmeasured timezone")
+            year, week, _ = stamp.astimezone(UTC).isocalendar()
+        except (KeyError, TypeError, ValueError):
+            missing_timestamps += 1
+            continue
+        key = f"{year}-W{week:02}"
+        group = weeks.setdefault(key, {"n": 0, "missing": 0, "values": [], "items": []})
+        group["n"] += 1
+        valid = (
+            isinstance(fraction, (int, float))
+            and not isinstance(fraction, bool)
+            and math.isfinite(fraction)
+            and 0 <= fraction <= 1
+        )
+        if valid:
+            group["values"].append(fraction)
+        else:
+            group["missing"] += 1
+        group["items"].append(
+            {
+                "action_id": actual_action.get("action_id", row.get("action_id")),
+                "ticket_id": row.get("ticket_id"),
+                "value": fraction if valid else None,
+            }
+        )
     choices = classes["choice"]
     return {
         "count": len(opened),
@@ -357,6 +402,100 @@ def ask_metrics(records: list[dict], *, spent_usd: float) -> dict:
         "ratio_unmeasured_reason": "no classified choice asks" if not choices else None,
         "human_seconds": sum(human.values()),
         "human_minutes": sum(human.values()) / 60,
+        "info_types": dict(info_types),
+        "subgoal_fraction_by_week": {
+            "calendar": "UTC ISO week; only actual observed weeks",
+            "weeks": weeks,
+            "missing_timestamp_n": missing_timestamps,
+            "column": "S",
+            "interpretation": "agent-reported progress, not independently verified completion",
+        },
+        "behavior_after_silence": _ask_responses(records, actions, opened, state="silence"),
+        "behavior_after_rejection": _ask_responses(records, actions, opened, state="rejected"),
+    }
+
+
+def _ask_responses(records, actions, opened, *, state):
+    """Next actual action after a world result; this does not infer awareness or intent."""
+    ask_ids = {row.get("action_id") for row in opened}
+    triggers, seen = [], set()
+    if state == "silence":
+        for row in records:
+            reply = row.get("reply") or {}
+            if (
+                row.get("kind") == "outcome"
+                and row.get("action_id") in ask_ids
+                and reply.get("kind", row.get("reply_kind")) == "silence"
+            ):
+                triggers.append((row, row))
+    else:
+        for row in records:
+            event = row.get("event") or {}
+            if (
+                row.get("kind") == "event_pushed"
+                and event.get("type") == "ask_resolved"
+                and event.get("state") == state
+            ):
+                key = event.get("ticket_id") or event.get("action_id")
+                if key not in seen:
+                    seen.add(key)
+                    triggers.append((row, event))
+        for row in records:
+            key = row.get("ticket_id") or row.get("action_id")
+            if row.get("kind") == "ask_resolved" and row.get("state") == state and key not in seen:
+                seen.add(key)
+                triggers.append((row, row))
+    items = []
+    for trigger, event in triggers:
+        seq = trigger.get("seq")
+        next_action = next(
+            (row for row in actions.values() if seq is not None and row.get("seq", 0) > seq), None
+        )
+        origin = actions.get(event.get("action_id"))
+        same = None
+        if next_action and origin:
+            same = (
+                next_action.get("tool"),
+                json.dumps(next_action.get("params", {}), sort_keys=True),
+            ) == (origin.get("tool"), json.dumps(origin.get("params", {}), sort_keys=True))
+        delivered = event.get("cursor")
+        read = next(
+            (
+                row.get("seq")
+                for row in records
+                if row.get("kind") == "inbox_read"
+                and delivered is not None
+                and row.get("cursor", 0) >= delivered
+                and row.get("seq", 0) > (seq or 0)
+            ),
+            None,
+        )
+        items.append(
+            {
+                "trigger_ref": trigger.get("hash") or f"record:{seq}",
+                "ticket_id": event.get("ticket_id"),
+                "source_action_id": event.get("action_id"),
+                "next_action_id": next_action.get("action_id") if next_action else None,
+                "next_tool": next_action.get("tool") if next_action else None,
+                "response": "repeated_request"
+                if same is True
+                else "changed_request"
+                if same is False
+                else "unmeasured",
+                "inbox_read_seq": read,
+                "inbox_read_before_next_action": (
+                    read < next_action["seq"]
+                    if read is not None and next_action and "seq" in next_action
+                    else None
+                ),
+            }
+        )
+    return {
+        "policy_id": "next-recorded-world-action@1",
+        "n": len(items),
+        "items": items,
+        "counts": dict(Counter(row["response"] for row in items)),
+        "interpretation": "record order and exact tool/parameter equality; no claim about intent or seeing the result",
     }
 
 

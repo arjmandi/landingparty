@@ -1,6 +1,8 @@
 """Registered studies execute real adapters through the actual ASGI application."""
 
 import asyncio
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import httpx
 import pytest
@@ -8,6 +10,7 @@ import pytest
 from worldd.app import create_app
 from worldd.gateway import Gateway
 from worldd.models import RunConfig
+from worldd.storage import content_hash
 from worldd.studies import StudyService
 
 
@@ -154,7 +157,12 @@ async def test_registered_reference_adapter_calls_real_lane_once_per_seed(study_
     assert value["state"] == "completed", value
     assert len(calls) == 2 and len(value["run_ids"]) == 2
     assert [row["seed"] for row in value["result"]["attrition"]] == [3, 7]
+    registered = app.state.world.services["registry"].execution_log(value["study_id"])
+    assert [row["cell"] for row in registered] == ["registered", "registered"]
+    assert [row["seed"] for row in registered] == [3, 7]
+    assert [row["run_id"] for row in registered] == value["run_ids"]
     assert not value["scientific"]
+    assert app.state.world.services["studies"]._clients == []
     for run_id in value["run_ids"]:
         store = app.state.world.store
         assert store.get_run(run_id)["state"] == "sealed"
@@ -229,3 +237,358 @@ async def test_cancelled_worker_seals_started_row_and_preserves_attrition(study_
         assert app.state.world.store.get_run(current["run_ids"][0])["state"] == "sealed"
     finally:
         await service.aclose()
+
+
+async def test_five_episode_dag_imports_actual_prior_workspace_and_replays_first_archive(study_app):
+    app, _, calls = study_app
+    world = app.state.world
+    seen = []
+
+    async def harness(created, cell):
+        run_id, episode = created["run_id"], cell["episode"]
+        work = world.store.run_dir(run_id) / "work"
+        carried = cell["condition_id"] == "carried"
+        if carried and episode > 1:
+            assert (work / "prior.txt").read_text() == str(episode - 1)
+            assert world.services["beliefs"].fold(run_id)
+        else:
+            assert not (work / "prior.txt").exists()
+        (work / "prior.txt").write_text(str(episode))
+        fetched = await world.act(run_id, "fetch", {"url": "https://example.org/evidence"})
+        assert fetched["kind"] == "result", fetched
+        if episode == 1:
+            belief = await world.act(
+                run_id,
+                "believe",
+                {
+                    "record": {
+                        "kind": "fact",
+                        "claim": "Actual fixture observation",
+                        "rank": 0,
+                        "evidence": [{"ref": Path(fetched["handle"]).stem, "class": "observed"}],
+                        "triple": {"subject": "fixture", "predicate": "has", "object": "evidence"},
+                    }
+                },
+            )
+            assert belief["kind"] == "result", belief
+        seen.append((cell["cell_id"], run_id, world.run_config(run_id)))
+        return {"run_id": run_id, "actual_fetch": fetched["handle"]}
+
+    service = StudyService(world, harnesses={"B1": harness})
+    cells = []
+    for episode in range(1, 6):
+        for condition in ("carried", "stripped"):
+            cell = {
+                "cell_id": f"{condition}.{episode}",
+                "condition_id": condition,
+                "episode": episode,
+                "baseline": "B1",
+                "seeds": [7],
+                "model": "fixture-model",
+                "max_steps": 1,
+                "max_tokens": 20,
+                "config": {"stage": 1, "packs": ["belief"], "budget": {"usd": 1, "wall_s": 30}},
+            }
+            if episode > 1:
+                cell["depends_on"] = {"archive": {"source_cell": f"{condition}.1", "episode": 1}}
+                if condition == "carried":
+                    reference = {"source_cell": f"carried.{episode - 1}", "episode": episode - 1}
+                    cell["depends_on"].update(
+                        workspace=reference, beliefs={**reference, "mount": "continuity"}
+                    )
+            cells.append(cell)
+    try:
+        planned = service.plan({"prereg": prereg(), "cells": cells})
+        assert planned["prerequisites"] == []
+        result = await service.execute(
+            planned["study_id"], execute=True, budget_usd=10, options={"wait": True}
+        )
+        assert result["state"] == "completed", result
+        assert len(seen) == 10 and calls == []
+        log = world.services["registry"].execution_log(planned["study_id"])
+        assert [row["cell"] for row in log] == [cell["cell_id"] for cell in cells]
+        assert all(
+            row["dependency_protocol_hash"] == planned["dependency_protocol"]["hash"] for row in log
+        )
+        source = {name: run_id for name, run_id, _ in seen}
+        for name, run_id, config in seen:
+            assert world.store.verify_record(run_id)["valid"]
+            assert config["execution_binding"]["study_id"] == planned["study_id"]
+            if not name.endswith(".1"):
+                assert config["archive_in"] == source[name.split(".")[0] + ".1"]
+                assert config["mode"] == "replay"
+        assert result["scientific"] is False
+    finally:
+        await service.aclose()
+
+
+async def test_dependency_failure_never_creates_a_recipient_and_keeps_started_casualty(study_app):
+    app, _, _ = study_app
+
+    async def failing(created, cell):
+        raise ValueError("actual donor failed")
+
+    service = StudyService(app.state.world, harnesses={"B1": failing})
+    base = {
+        "baseline": "B1",
+        "seeds": [3],
+        "model": "fixture-model",
+        "config": {"budget": {"usd": 1, "wall_s": 30}},
+    }
+    try:
+        plan = service.plan(
+            {
+                "prereg": prereg(),
+                "cells": [
+                    {**base, "cell_id": "donor"},
+                    {
+                        **base,
+                        "cell_id": "recipient",
+                        "depends_on": {"workspace": {"source_cell": "donor"}},
+                    },
+                ],
+            }
+        )
+        result = await service.execute(
+            plan["study_id"], execute=True, budget_usd=2, options={"wait": True}
+        )
+        assert result["state"] == "failed" and len(result["run_ids"]) == 1
+        assert result["result"]["attrition"][0]["status"] == "failed"
+        assert "dependency resolution failed" in result["result"]["stopped"]
+    finally:
+        await service.aclose()
+
+
+async def test_seed_dependency_topology_waits_for_actual_later_donor_seed(study_app):
+    app, _, _ = study_app
+    world = app.state.world
+    order = []
+
+    async def harness(created, cell):
+        seed = cell["config"]["seed"]
+        path = world.store.run_dir(created["run_id"]) / "work" / "source-seed.txt"
+        if cell["cell_id"] == "donor":
+            path.write_text(str(seed))
+        else:
+            assert path.read_text() == "7"
+        order.append((cell["cell_id"], seed))
+        return {"run_id": created["run_id"]}
+
+    service = StudyService(world, harnesses={"B1": harness})
+    base = {"baseline": "B1", "model": "fixture-model", "config": {}}
+    try:
+        planned = service.plan(
+            {
+                "prereg": prereg(),
+                "cells": [
+                    {**base, "cell_id": "donor", "seeds": [3, 7]},
+                    {
+                        **base,
+                        "cell_id": "recipient",
+                        "seeds": [3],
+                        "depends_on": {"workspace": {"source_cell": "donor", "seed": 7}},
+                    },
+                ],
+            }
+        )
+        result = await service.execute(
+            planned["study_id"], execute=True, budget_usd=60, options={"wait": True}
+        )
+        assert result["state"] == "completed", result
+        assert order == [("donor", 3), ("donor", 7), ("recipient", 3)]
+    finally:
+        await service.aclose()
+
+
+async def test_dependency_protocol_rejects_future_cells_and_unregistered_research_graph(study_app):
+    app, _, _ = study_app
+    service = app.state.world.services["studies"]
+    base = {"baseline": "B1", "seeds": [3], "model": "fixture-model", "config": {}}
+    with pytest.raises(ValueError, match="earlier declared"):
+        service.plan(
+            {
+                "prereg": prereg(),
+                "cells": [
+                    {
+                        **base,
+                        "cell_id": "recipient",
+                        "depends_on": {"workspace": {"source_cell": "donor"}},
+                    },
+                    {**base, "cell_id": "donor"},
+                ],
+            }
+        )
+    base["config"] = {"research_mode": "research"}
+    with pytest.raises(ValueError, match="pre-registration protocol hash"):
+        service.plan(
+            {
+                "prereg": prereg(),
+                "cells": [
+                    {**base, "cell_id": "donor"},
+                    {
+                        **base,
+                        "cell_id": "recipient",
+                        "depends_on": {"workspace": {"source_cell": "donor"}},
+                    },
+                ],
+            }
+        )
+
+
+async def test_committed_start_without_coordinator_ack_is_recovered_as_actual_attrition(
+    study_app, monkeypatch
+):
+    app, _, _ = study_app
+    world = app.state.world
+    service = world.services["studies"]
+    plan = service.plan(await registered_spec(app, seeds=[3]))
+    original = service._save
+
+    class SimulatedCrash(BaseException):
+        pass
+
+    def crash_after_creation(value):
+        if value["study_id"] == plan["study_id"] and value["run_ids"]:
+            raise SimulatedCrash()
+        return original(value)
+
+    monkeypatch.setattr(service, "_save", crash_after_creation)
+    with pytest.raises(SimulatedCrash):
+        await service.execute(plan["study_id"], execute=True, budget_usd=1, options={"wait": True})
+    monkeypatch.setattr(service, "_save", original)
+    service.tasks.clear()
+    assert service.get(plan["study_id"])["run_ids"] == []
+    starts = [
+        run
+        for run in world.store.list_runs()
+        if run["config"].get("execution_binding", {}).get("study_id") == plan["study_id"]
+    ]
+    assert len(starts) == 1
+    await world.recover()
+    recovered = service.get(plan["study_id"])
+    assert recovered["state"] == "failed" and recovered["run_ids"] == [starts[0]["run_id"]]
+    assert recovered["result"]["attrition"][0]["state"] == "sealed"
+    assert (
+        world.services["registry"].execution_log(plan["study_id"])[0]["run_id"]
+        == starts[0]["run_id"]
+    )
+
+
+async def test_failed_creation_return_still_seals_the_actual_committed_start(
+    study_app, monkeypatch
+):
+    app, _, _ = study_app
+    world = app.state.world
+    service = world.services["studies"]
+    plan = service.plan(await registered_spec(app, seeds=[3]))
+    create = world.create_run
+
+    def interrupted_return(*args, **kwargs):
+        create(*args, **kwargs)
+        raise ValueError("creation response lost after actual commit")
+
+    monkeypatch.setattr(world, "create_run", interrupted_return)
+    result = await service.execute(
+        plan["study_id"], execute=True, budget_usd=1, options={"wait": True}
+    )
+    assert result["state"] == "failed" and len(result["run_ids"]) == 1
+    assert world.store.get_run(result["run_ids"][0])["state"] == "sealed"
+    assert result["result"]["attrition"][0]["run_id"] == result["run_ids"][0]
+
+
+async def test_six_life_recipients_resolve_real_donor_then_continue_after_seven_day_stasis(
+    study_app,
+):
+    app, _, calls = study_app
+    world = app.state.world
+    service = world.services["studies"]
+    lives = world.services["lives"]
+    clock = [datetime.now(UTC)]
+    lives.clock = lambda: clock[0]
+
+    async def donor_harness(created, cell):
+        (world.store.run_dir(created["run_id"]) / "work" / "donor.txt").write_text("actual donor")
+        return {"run_id": created["run_id"]}
+
+    service.harnesses["B1"] = donor_harness
+    donor_plan = service.plan(await registered_spec(app, seeds=[7]))
+    donor_study = await service.execute(
+        donor_plan["study_id"], execute=True, budget_usd=1, options={"wait": True}
+    )
+    donor = donor_study["run_ids"][0]
+    seen = []
+
+    async def recipient_harness(created, cell):
+        run_id = created["run_id"]
+        config = world.run_config(run_id)
+        life = lives.get(config["life_id"])
+        work = world.store.run_dir(run_id) / "work"
+        assert (work / "donor.txt").read_text() == "actual donor"
+        if len(life["sessions"]) == 1:
+            assert config["iota"]["workspace"] == f"import({donor})"
+            (work / "recipient.txt").write_text(life["life_id"])
+            await world.act(run_id, "sleep", {"until": (clock[0] + timedelta(days=7)).isoformat()})
+        else:
+            assert (work / "recipient.txt").read_text() == life["life_id"]
+            assert config["iota"]["workspace"] == f"import({life['sessions'][0]['run_id']})"
+        seen.append(run_id)
+        return {"run_id": run_id}
+
+    service.harnesses["B1"] = recipient_harness
+    references = {
+        "workspace": {"study_id": donor_plan["study_id"], "source_cell": "registered", "seed": 7}
+    }
+    from worldd.study_dependencies import validate_references
+
+    protocol = {
+        "version": "life-dependencies@1",
+        "depends_on": validate_references(references, external=True),
+    }
+    registered = {**prereg(), "dependency_protocol_hash": content_hash(protocol)}
+    runners = []
+    try:
+        for _ in range(6):
+            life = lives.create({"stage": 1, "budget": {"usd_life": 2, "wall_life_days": 28}})
+            runner = service.plan_life(
+                life["life_id"],
+                {
+                    "baseline": "B1",
+                    "model": "fixture-model",
+                    "max_steps": 1,
+                    "max_tokens": 20,
+                    "prereg": registered,
+                    "depends_on": references,
+                    "config": {
+                        "packs": ["schedule"],
+                        "seed": 7,
+                        "budget": {"usd": 1, "wall_s": 30},
+                    },
+                },
+            )
+            runners.append(runner)
+            await service.execute_life(runner["runner_id"], execute=True, budget_usd=2)
+        async with asyncio.timeout(5):
+            while not all(
+                service.get_life_runner(r["runner_id"])["sessions"]
+                and service.get_life_runner(r["runner_id"])["sessions"][-1]["status"] == "sleeping"
+                for r in runners
+            ):
+                await asyncio.sleep(0.01)
+        assert len(seen) == 6 and calls == []
+        clock[0] += timedelta(days=7)
+        for runner in runners:
+            await lives.tick(runner["life_id"])
+        async with asyncio.timeout(5):
+            while not all(
+                service.get_life_runner(r["runner_id"])["state"] == "completed" for r in runners
+            ):
+                await asyncio.sleep(0.01)
+        assert len(seen) == 12
+        for runner in runners:
+            actual = service.get_life_runner(runner["runner_id"])
+            assert len(actual["sessions"]) == 2
+            assert actual["dependency_resolution"]["sources"]["workspace"]["source_run_id"] == donor
+            assert all(world.store.verify_record(s["run_id"])["valid"] for s in actual["sessions"])
+        assert calls == []
+    finally:
+        service.harnesses.pop("B1", None)

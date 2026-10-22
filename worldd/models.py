@@ -33,6 +33,7 @@ class RunConfig(StrictModel):
     family: str = "F7"
     budget: Budget = Field(default_factory=Budget)
     mode: Literal["live", "replay", "frozen"] = "live"
+    search_provider: Literal["brave", "exa"] = "brave"
     archive_in: str | None = None
     corpus_id: str | None = None
     frozen_at: str | None = None
@@ -60,9 +61,16 @@ class RunConfig(StrictModel):
     continuity_source_run_id: str | None = None
     series_id: str | None = None
     seed: int = 0
+    seed_scope: str = Field(
+        default="The seed labels the run and any explicitly seeded harness sampling; it does not seed the live internet or guarantee deterministic provider responses.",
+        min_length=1,
+        max_length=2000,
+    )
     harness_id: str = "manual@0.1"
     isolation_profile: Literal["cooperative", "fenced"] = "cooperative"
     iota: InitialState = Field(default_factory=InitialState)
+    belief_import_policy: Literal["verbatim", "shuffled"] = "verbatim"
+    context_import_policy: Literal["none", "captured"] = "none"
     capture_model_io: bool = True
     budget_visible: bool = True
     reply_policy: Literal["silent", "blockers_only", "blockers_plus_checkins"] = "silent"
@@ -84,7 +92,7 @@ class RunConfig(StrictModel):
     wake_policy: str = "agent_declared"
     driver: dict[str, Any] | None = None
     ledger_view_policy: str = "pull"
-    browser_identity: Literal["signed", "unsigned"] = "unsigned"
+    browser_identity: Literal["signed", "unsigned"] | None = None
     captcha_policy: Literal["refuse", "escalate"] = "refuse"
     raw_lane_enabled: bool = False
     rubric_disclosed: Literal["none", "named", "full"] = "none"
@@ -114,6 +122,8 @@ class RunConfig(StrictModel):
 
     @model_validator(mode="after")
     def check_conditions(self):
+        if self.breaker_policy.get("mode", "enforce") not in {"enforce", "log_only"}:
+            raise ValueError("Breaker mode must be enforce or log_only")
         for name in (
             "yellow_identical",
             "red_identical",
@@ -234,6 +244,8 @@ class InboxParams(ToolParams):
 
 
 class AskParams(ToolParams):
+    subgoal_fraction: float | None = Field(default=None, ge=0, le=1)
+    info_type: str | None = Field(default=None, max_length=200)
     kind: Literal[
         "message", "approval", "takeover", "grant_credential", "grant_payment", "policy_conflict"
     ] = "message"
@@ -288,7 +300,7 @@ class BeliefQueryParams(ToolParams):
 
 class PredictParams(ToolParams):
     question_id: str
-    value_or_p: float = Field(ge=0, le=1)
+    value_or_p: float
     interval: list[float] | None = Field(default=None, min_length=2, max_length=2)
 
 
@@ -336,6 +348,12 @@ class ScrollParams(SessionParams):
 
 class SelectParams(ClickParams):
     value: str
+
+
+class SiteCallParams(SessionParams):
+    site_tool: str = Field(min_length=1, max_length=200)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    site_endpoint: str | None = Field(default=None, max_length=16384)
 
 
 class UploadParams(ClickParams):
@@ -414,6 +432,7 @@ TOOL_MODELS = {
     "goto": GotoParams,
     "snapshot": SnapshotParams,
     "click": ClickParams,
+    "site_call": SiteCallParams,
     "type": TypeParams,
     "press": PressParams,
     "scroll": ScrollParams,
@@ -450,6 +469,7 @@ PACK_TOOLS = {
         "goto",
         "snapshot",
         "click",
+        "site_call",
         "type",
         "press",
         "scroll",
@@ -500,6 +520,7 @@ DESCRIPTIONS = {
     "goto": "Navigate the session.",
     "snapshot": "Read the session accessibility tree or a requested screenshot.",
     "click": "Click an element.",
+    "site_call": "Invoke a declared site tool within the session's scoped authority.",
     "type": "Type text into an element.",
     "press": "Press a key.",
     "scroll": "Scroll the session.",

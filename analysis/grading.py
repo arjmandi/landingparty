@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import math
 from collections import Counter
 
@@ -190,3 +191,169 @@ async def validate_claims(claims: list[dict], checkers: dict) -> dict:
             "unregistered mathematical truth is not adjudicated by this instrument"
         ),
     }
+
+
+class GradingRunner:
+    """Execute bounded built-in checks on the actual anchored sealed snapshot.
+
+    Private answer keys stay in the world. No code from the workspace is executed.
+    Additional claim checkers are trusted Python callbacks registered by the host.
+    """
+
+    def __init__(self, world, *, checkers=None):
+        self.world, self.store, self.checkers = world, world.store, dict(checkers or {})
+
+    async def run(self, run_id, *, protocol_artifact, archive, checkpoint_anchor=None):
+        from worldd.workspaces import snapshot_manifest
+
+        from .instruments import load_artifact
+        from .report import verify_citations
+
+        body, provenance = load_artifact(self.store, run_id, protocol_artifact)
+        protocol = json.loads(body)
+        if not isinstance(protocol, dict) or not protocol.get("protocol_id"):
+            raise ValueError("grading requires an identified frozen protocol")
+        run = self.store.get_run(run_id)
+        goal_metadata = protocol.get("goal_metadata")
+        if goal_metadata is not None:
+            from .goals import validate_goal_protocol
+
+            goal = run["config"].get("goal", "")
+            goal_text = goal.get("text", "") if isinstance(goal, dict) else goal
+            validation = validate_goal_protocol(goal_text, goal_metadata)
+            if not validation["valid"]:
+                raise ValueError("frozen goal metadata invalid: " + "; ".join(validation["errors"]))
+        registry = self.world.services.get("registry")
+        registered = False
+        if registry and run["config"].get("series_id"):
+            series = registry.get_series(run["config"]["series_id"])
+            registered = (
+                series["prereg"].get("grading_protocol_hash") == provenance["hash"]
+                and series["created_at"] <= run["created_at"]
+            )
+        if run["config"].get("research_mode") == "research" and not registered:
+            raise ValueError(
+                "research grading protocol must be frozen in the actual pre-run series registration"
+            )
+        root = self.store.run_dir(run_id)
+        records = self.store.records(run_id)
+        if checkpoint_anchor is None:
+            snapshot = root / "work-snapshot"
+            anchor = next(
+                (row for row in reversed(records) if row["kind"] == "workspace_snapshot"),
+                None,
+            )
+            actual = snapshot_manifest(snapshot)
+            if not anchor or any(anchor.get(key) != value for key, value in actual.items()):
+                raise ValueError("grading snapshot differs from its sealed workspace anchor")
+        else:
+            anchor = next((row for row in records if row["hash"] == checkpoint_anchor), None)
+            service = self.world.services.get("workspace_checkpoints")
+            if (
+                not anchor
+                or anchor["kind"] != "workspace_checkpoint"
+                or anchor.get("status") != "measured"
+                or service is None
+            ):
+                raise ValueError("historical grading needs an actual verified workspace checkpoint")
+            actual = service.verify_checkpoint(run_id, anchor)
+            snapshot = root / anchor["path"]
+
+        def file(name):
+            if not isinstance(name, str) or not name.startswith("work-snapshot/"):
+                raise ValueError("grader inputs must belong to the sealed workspace snapshot")
+            path = snapshot / name.removeprefix("work-snapshot/")
+            if path.resolve() != path or not path.is_relative_to(snapshot):
+                raise ValueError("grader input cannot follow links or escape the sealed snapshot")
+            if path.is_file() and path.stat().st_size > 8_000_000:
+                raise ValueError("grader input exceeds the registered bounded file size")
+            return path
+
+        def pointer(value, path):
+            if not isinstance(path, str) or (path and not path.startswith("/")):
+                raise ValueError("JSON pointer must be empty or begin with a slash")
+            for key in path.split("/")[1:]:
+                key = key.replace("~1", "/").replace("~0", "~")
+                value = value[int(key)] if isinstance(value, list) else value[key]
+            return value
+
+        checklist, observations = protocol.get("checklist", []), {}
+        for item in checklist:
+            check = item.get("check", {})
+            kind = check.get("kind")
+            path = file(check.get("path"))
+            observation = {
+                "observation_ref": anchor["hash"],
+                "snapshot_root_hash": anchor["root_hash"],
+                "path": check["path"],
+                "check_kind": kind,
+            }
+            if kind == "file_exists":
+                passed = path.is_file()
+            elif kind == "sha256_matches":
+                expected = check.get("expected")
+                if not isinstance(expected, str) or not expected.startswith("sha256:"):
+                    raise ValueError("hash checks require a frozen SHA256 expectation")
+                entry = actual["entries"].get(str(path.relative_to(snapshot)), {})
+                passed = entry.get("sha256") == expected
+            elif kind == "json_equals":
+                if "expected" not in check:
+                    raise ValueError("JSON checks require a frozen expected value")
+                try:
+                    passed = (
+                        pointer(json.loads(path.read_bytes()), check.get("pointer", ""))
+                        == check["expected"]
+                    )
+                except (FileNotFoundError, ValueError, TypeError, KeyError, IndexError):
+                    passed = False
+            elif kind == "citation_quotes":
+                claims = json.loads(path.read_bytes()) if path.is_file() else []
+                quotes = verify_citations(claims, archive)
+                observation["quote_check"] = quotes
+                passed = bool(claims) and all(
+                    row["status"] == "quote_present" for row in quotes["items"]
+                )
+            else:
+                raise ValueError("only registered built-in check kinds can execute in this grader")
+            observations[item["item_id"]] = {**observation, "passed": passed}
+        core = (
+            score_checklist(checklist, observations, core_threshold=protocol["core_threshold"])
+            if checklist
+            else unmeasured("no frozen programmatic checklist")
+        )
+        hidden = unmeasured("no frozen hidden answer key")
+        if protocol.get("hidden_items"):
+            path = file(protocol["answers_path"])
+            answers = json.loads(path.read_bytes()) if path.is_file() else {}
+            if not isinstance(answers, dict):
+                raise TypeError("delivered answers must map frozen item IDs to answers")
+            hidden = {
+                **score_answers(protocol["hidden_items"], answers),
+                "observation_ref": anchor["hash"],
+            }
+        claims = unmeasured("claims validator was not selected by the frozen protocol")
+        if protocol.get("claims_validator"):
+            path = file(protocol.get("claims_path", "work-snapshot/out/claims.json"))
+            claims = await validate_claims(
+                json.loads(path.read_bytes()) if path.is_file() else [], self.checkers
+            )
+        return {
+            "status": "measured",
+            "column": "V",
+            "protocol_id": protocol["protocol_id"],
+            "protocol": provenance,
+            "goal_metadata": goal_metadata
+            or unmeasured("no complete frozen goal metadata was supplied"),
+            "preregistered": registered,
+            "checklist": core,
+            "check_observations": observations,
+            "hidden_items": hidden,
+            "claims": claims,
+            "workspace_snapshot_ref": anchor["hash"],
+            "checkpoint": {
+                key: anchor[key]
+                for key in ("fraction", "usd", "world_actions", "trigger_record_seq")
+                if key in anchor
+            },
+            "scientific_gate_passed": False,
+        }

@@ -70,12 +70,19 @@ class RetentionService:
         retention_until: str | None = None,
         content_type: str | None = None,
     ) -> dict:
-        self.store.get_run(run_id)
+        run = self.store.get_run(run_id)
         target = self._path(run_id, path)
         if not target.is_file():
             raise ValueError("Retention resources must be existing regular files")
         created = self._timestamp(self.clock())
-        expires = created + timedelta(days=self.days)
+        # Discovery/recovery can happen long after capture. Never renew raw
+        # content's age by starting its retention clock at discovery time.
+        captured = min(
+            created,
+            self._timestamp(run["created_at"]),
+            datetime.fromtimestamp(target.stat().st_mtime, UTC),
+        )
+        expires = captured + timedelta(days=self.days)
         if retention_until:
             expires = min(expires, self._timestamp(retention_until))
         relative = str(target.relative_to(self.store.run_dir(run_id)))
@@ -93,6 +100,7 @@ class RetentionService:
                     "run_id": run_id,
                     "path": relative,
                     "registered_at": created.isoformat(),
+                    "captured_at_bound": captured.isoformat(),
                     "retention_until": expires.isoformat(),
                     "content_type": content_type,
                     "state": "raw",
@@ -261,7 +269,7 @@ class RetentionService:
             except (OSError, ValueError, TypeError, ImportError):
                 outcome["failed"].append({"run_id": run_id, "path": resource["path"]})
         outcome["services"] = {}
-        for name in ("communications", "perception"):
+        for name in ("communications", "perception", "incident_reports"):
             service = getattr(self.world, "services", {}).get(name)
             if service and hasattr(service, "prune_expired"):
                 try:

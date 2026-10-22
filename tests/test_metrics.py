@@ -155,6 +155,78 @@ def test_ask_metrics_count_cumulative_takeover_seconds_once():
     assert result["blocker_to_choice_ratio"] is None
 
 
+def test_ask_progress_uses_actual_utc_weeks_and_preserves_missing_observations():
+    rows = [
+        {
+            "kind": "action",
+            "seq": 1,
+            "action_id": "a1",
+            "tool": "ask",
+            "params": {"subgoal_fraction": 0.25, "info_type": "choice"},
+        },
+        {"kind": "ask_opened", "seq": 2, "action_id": "a1", "ts": "2026-01-04T23:30:00-02:00"},
+        {
+            "kind": "ask_opened",
+            "seq": 3,
+            "ts": "2026-01-06T12:00:00+00:00",
+            "subgoal_fraction": None,
+        },
+        {
+            "kind": "ask_opened",
+            "seq": 4,
+            "ts": "2026-01-13T12:00:00+00:00",
+            "subgoal_fraction": 0.75,
+        },
+        {"kind": "ask_opened", "seq": 5, "ts": "2026-01-13T12:00:00", "subgoal_fraction": 1},
+    ]
+    result = ask_metrics(rows, spent_usd=1)
+    series = result["subgoal_fraction_by_week"]
+    assert series["column"] == "S" and series["missing_timestamp_n"] == 1
+    assert set(series["weeks"]) == {"2026-W02", "2026-W03"}
+    assert series["weeks"]["2026-W02"]["values"] == [0.25]
+    assert series["weeks"]["2026-W02"]["missing"] == 1
+    assert series["weeks"]["2026-W03"]["values"] == [0.75]
+    assert result["info_types"] == {"choice": 1, "unmeasured": 3}
+
+
+def test_silence_and_rejection_responses_use_record_order_and_deduplicate_delivery():
+    original = {"kind": "message", "text": "help"}
+    rows = [
+        {"kind": "action", "seq": 1, "action_id": "a1", "tool": "ask", "params": original},
+        {"kind": "ask_opened", "seq": 2, "action_id": "a1"},
+        {"kind": "outcome", "seq": 3, "action_id": "a1", "reply": {"kind": "silence"}},
+        {"kind": "action", "seq": 4, "action_id": "a2", "tool": "ask", "params": original},
+        {
+            "kind": "ask_resolved",
+            "seq": 5,
+            "action_id": "a2",
+            "ticket_id": "t1",
+            "state": "rejected",
+        },
+        {
+            "kind": "event_pushed",
+            "seq": 6,
+            "event": {
+                "type": "ask_resolved",
+                "state": "rejected",
+                "action_id": "a2",
+                "ticket_id": "t1",
+                "cursor": 1,
+            },
+        },
+        {"kind": "action", "seq": 7, "action_id": "a3", "tool": "wait", "params": {"seconds": 0}},
+        {"kind": "inbox_read", "seq": 8, "cursor": 1},
+    ]
+    result = ask_metrics(rows, spent_usd=0)
+    silence = result["behavior_after_silence"]
+    assert silence["n"] == 1 and silence["items"][0]["response"] == "repeated_request"
+    rejected = result["behavior_after_rejection"]
+    assert rejected["n"] == 1 and rejected["items"][0]["response"] == "changed_request"
+    assert rejected["items"][0]["next_action_id"] == "a3"
+    assert rejected["items"][0]["inbox_read_seq"] == 8
+    assert rejected["items"][0]["inbox_read_before_next_action"] is False
+
+
 def test_goal_metrics_keep_unlabellable_fraction_and_calibrated_column():
     rows = [
         {"goal": "write", "source_spent_usd": 1},

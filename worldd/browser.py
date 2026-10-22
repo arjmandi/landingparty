@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import inspect
+import json
 import os
 import secrets
 import tempfile
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import wraps
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -22,7 +24,7 @@ def _browser_errors():
     return (PlaywrightError, ValueError, OSError, RuntimeError, ImportError)
 
 
-from .approvals import action_hash, timestamp
+from .approvals import action_hash, redact, timestamp
 from .vault import origin
 
 
@@ -30,9 +32,48 @@ def blocked(kind, detail, rule_id):
     return {"kind": "blocked", "type": kind, "detail": detail, "rule_id": rule_id}
 
 
+def browser_operation(method):
+    @wraps(method)
+    async def tracked(self, identifier, *args, **kwargs):
+        run_id = (
+            identifier
+            if method.__name__ == "handle"
+            else self.sessions.get(identifier, {}).get("run_id")
+        )
+        if not run_id or run_id in self._stopping:
+            raise ValueError("The browser run is absent or stopping")
+        task = asyncio.current_task()
+        tasks = self._operations.setdefault(run_id, set())
+        tasks.add(task)
+        try:
+            return await method(self, identifier, *args, **kwargs)
+        finally:
+            tasks.discard(task)
+            if not tasks:
+                self._operations.pop(run_id, None)
+
+    return tracked
+
+
 def credential_secrets(value, sensitive=False):
     if isinstance(value, dict):
         for key, item in value.items():
+            if key == "cookies" and isinstance(item, list):
+                for cookie in item:
+                    if (
+                        isinstance(cookie, dict)
+                        and isinstance(cookie.get("value"), str)
+                        and cookie["value"]
+                    ):
+                        yield cookie["value"]
+                continue
+            if key in {"storage_state", "_world_session_state"} and isinstance(item, dict):
+                yield from credential_secrets({"cookies": item.get("cookies", [])})
+                for saved in item.get("origins", []):
+                    for entry in saved.get("localStorage", []):
+                        if isinstance(entry.get("value"), str) and entry["value"]:
+                            yield entry["value"]
+                continue
             yield from credential_secrets(
                 item,
                 sensitive
@@ -47,6 +88,7 @@ def credential_secrets(value, sensitive=False):
                     "authorization",
                     "secret",
                     "client_secret",
+                    "_world_protocol_tokens",
                 },
             )
     elif isinstance(value, list):
@@ -162,6 +204,14 @@ class PlaywrightBackend:
             launch["executable_path"] = self.executable_path
         browser = await self._playwright.chromium.launch(**launch)
         self._browsers.append(browser)
+        try:
+            return await self._context(browser, credential, proxy, user_agent)
+        except BaseException:
+            await browser.close()
+            self._browsers.remove(browser)
+            raise
+
+    async def _context(self, browser, credential, proxy, user_agent):
         options = {"user_agent": user_agent or "landing-party/0.1"}
         if proxy:
             options["proxy"] = {
@@ -201,7 +251,59 @@ class PlaywrightBackend:
         page = await context.new_page()
         # No tracing, keyboard listeners, or HAR capture in the browser process:
         # the gateway is authoritative and human takeover keystrokes stay private.
-        return {"browser": browser, "context": context, "page": page, "credential": credential}
+        handle = {
+            "browser": browser,
+            "context": context,
+            "page": page,
+            "credential": credential,
+            "active_action": None,
+            "requests": {},
+            "writes": {},
+        }
+
+        def requested(request):
+            if handle["active_action"] and request.method not in {"GET", "HEAD", "OPTIONS"}:
+                handle["requests"][request] = handle["active_action"]
+
+        def responded(response):
+            request = response.request
+            if request.is_navigation_request() and request.frame == page.main_frame:
+                handle["last_navigation"] = {
+                    "status": response.status,
+                    "url": response.url,
+                    "block_type": response.headers.get("x-world-response-block-type"),
+                }
+            action = handle["requests"].pop(request, None)
+            if action:
+                handle["writes"].setdefault(action, []).append(
+                    {
+                        "url": response.url,
+                        "status": response.status,
+                        "method": request.method,
+                    }
+                )
+
+        page.on("request", requested)
+        page.on("response", responded)
+        return handle
+
+    def begin_action(self, handle, action_id):
+        handle["active_action"] = action_id
+        handle["writes"][action_id] = []
+
+    def end_action(self, handle, action_id):
+        handle["active_action"] = None
+        return handle["writes"].pop(action_id, [])
+
+    async def describe_site_tool(self, handle, name, endpoint=None):
+        from .site_tools import SiteTools
+
+        return await SiteTools(handle).describe(name, endpoint)
+
+    async def site_call(self, handle, descriptor, arguments, *, authorize_rpc):
+        from .site_tools import SiteTools
+
+        return await SiteTools(handle).invoke(descriptor, arguments, authorize_rpc=authorize_rpc)
 
     async def goto(self, handle, url):
         response = await handle["page"].goto(url, wait_until="domcontentloaded", timeout=30000)
@@ -209,6 +311,17 @@ class PlaywrightBackend:
 
     async def current_url(self, handle):
         return handle["page"].url
+
+    async def private_state(self, handle):
+        state = await handle["context"].storage_state()
+        handle["credential"]["_world_session_state"] = state
+        handle["credential"]["_world_protocol_tokens"] = [
+            item.get("session_id", "") for item in handle.get("site_mcp_sessions", {}).values()
+        ]
+        return {
+            key: handle["credential"][key]
+            for key in ["_world_session_state", "_world_protocol_tokens"]
+        }
 
     async def snapshot(self, handle, view):
         page, result = handle["page"], {"url": handle["page"].url}
@@ -224,9 +337,9 @@ class PlaywrightBackend:
                 if any(secret in value for secret in values):
                     hidden.append(control)
             result["screenshot"] = await page.screenshot(mask=hidden)
-        result["site_tools"] = await page.locator(
-            "link[rel='mcp-server'],link[rel='mcp']"
-        ).evaluate_all("nodes => nodes.map(n => ({name:n.title||'site',url:n.href}))")
+        from .site_tools import SiteTools
+
+        result["site_tools"] = await SiteTools(handle).discover()
         return result
 
     async def action(self, handle, tool, params, *, human=False):
@@ -270,17 +383,30 @@ class PlaywrightBackend:
     async def needs_human(self, handle):
         page = handle["page"]
         content = (await page.locator("body").inner_text())[:20000].lower()
-        if any(
-            marker in content
-            for marker in (
-                "verify you are human",
-                "captcha",
-                "verification code",
-                "two-factor authentication",
-                "multi-factor authentication",
-            )
+        if (
+            "verify you are human" in content
+            or ("captcha" in content and len(content) < 1200)
+            or await page.locator(
+                "iframe[src*=recaptcha],iframe[src*=hcaptcha],[data-sitekey]"
+            ).count()
         ):
-            return "challenge"
+            return "captcha"
+        if (
+            any(
+                marker in content
+                for marker in (
+                    "verification code",
+                    "two-factor authentication",
+                    "multi-factor authentication",
+                )
+            )
+            or await page.locator("input[autocomplete=one-time-code]").count()
+        ):
+            return "mfa"
+        if await page.locator("input[type=password]:visible").count() and any(
+            marker in content for marker in ("sign in", "log in", "login")
+        ):
+            return "login"
         parsed = urlsplit(page.url)
         if any(
             part in parsed.path.lower()
@@ -318,6 +444,8 @@ class BrowserService:
         self.sessions = {}
         self.account_sessions = {}
         self._task = None
+        self._operations = {}
+        self._stopping = set()
 
     def _service(self, name):
         return getattr(self.world, "services", {}).get(name)
@@ -556,19 +684,31 @@ class BrowserService:
             or origin(login["url"]) != session["account"]["origin"]
         ):
             return False
+        previous = session.get("active")
+        login_action = "login:" + action_id
         session["active"] = {
             "scope": "read",
-            "action_id": action_id,
+            "action_id": login_action,
             "allow_login": True,
             "request": {"url": login["url"]},
             "login_paths": login.get("allowed_paths", [urlsplit(login["url"]).path]),
         }
         try:
+            beginner = getattr(self.backend, "begin_action", None)
+            if beginner:
+                beginner(session["handle"], login_action)
             await self.backend.login(session["handle"], login)
             session["url"] = await self.backend.current_url(session["handle"])
             return True
         finally:
-            session["active"] = None
+            finisher = getattr(self.backend, "end_action", None)
+            if finisher:
+                finisher(session["handle"], login_action)
+            session["active"] = previous
+            if previous and beginner:
+                # Preserve the original action's evidence; login writes are
+                # never evidence that its pending message/post succeeded.
+                session["handle"]["active_action"] = previous["action_id"]
 
     def _public_tree(self, session, text):
         for secret in credential_secrets(session["credential"]):
@@ -584,13 +724,16 @@ class BrowserService:
             return {key: self._public_result(session, item) for key, item in value.items()}
         return value
 
-    async def _snapshot(self, session, action_id, view):
+    async def _snapshot(self, session, action_id, view, *, path="playwright"):
         if view not in {"tree", "screenshot", "both"}:
             raise ValueError("Unknown snapshot view")
+        state_reader = getattr(self.backend, "private_state", None)
+        if state_reader:
+            session["credential"].update(await state_reader(session["handle"]))
         result = await self.backend.snapshot(session["handle"], view)
         result = {**result}
         screenshot = result.pop("screenshot", None)
-        result = self._public_result(session, result)
+        result = self._public_result(session, redact(result))
         if screenshot is not None:
             directory = self.store.run_dir(session["run_id"]) / "world/browser"
             directory.mkdir(parents=True, exist_ok=True)
@@ -603,7 +746,7 @@ class BrowserService:
             session_id=session["session_id"],
             action_id=action_id,
             modality=view,
-            path="playwright",
+            path=path,
         )
         return {"kind": "result", "session_id": session["session_id"], **result}
 
@@ -611,10 +754,23 @@ class BrowserService:
         checker = getattr(self.backend, "needs_human", None)
         reason = await checker(session["handle"]) if checker else None
         if reason == "login" and session["credential"].get("login"):
+            requested = (session.get("active") or {}).get("request", {}).get("url")
             await self._login(session, action_id)
             reason = await checker(session["handle"])
+            if not reason and requested and requested != session["credential"]["login"]["url"]:
+                await self.backend.goto(session["handle"], requested)
+                session["url"] = await self.backend.current_url(session["handle"])
+                reason = await checker(session["handle"])
+                session["action_retry_required"] = True
         if not reason:
             session.pop("challenge", None)
+            navigation = session["handle"].get("last_navigation", {})
+            if navigation.get("status", 0) >= 400:
+                return blocked(
+                    "login_wall" if navigation["status"] == 401 else "platform_block",
+                    "The site refused this browser navigation",
+                    "browser_upstream_block",
+                )
             return None
         if not session.get("challenge") or session["challenge"]["reason"] != reason:
             session["challenge"] = {
@@ -626,6 +782,30 @@ class BrowserService:
                 "clearance": session.get("active") or session.get("bootstrap_clearance"),
             }
         asks = self._service("asks")
+        vault = self._service("vault")
+        platform = vault.platform_for_url(session["url"]) if vault else None
+        if asks and platform and vault.terms(platform)["terms_class"] == "forbids":
+            return asks.raise_ticket(
+                session["run_id"],
+                action_id,
+                "policy_conflict",
+                pending_action={
+                    "url": session["url"],
+                    "reason": "platform_terms_forbid_agents",
+                    "session_id": session["session_id"],
+                    "platform": platform,
+                },
+                platform=platform,
+                scope="read",
+            )
+        if (
+            reason == "captcha"
+            and self.store.get_run(session["run_id"])["config"].get("captcha_policy", "refuse")
+            == "refuse"
+        ):
+            return blocked(
+                "captcha", "The registered CAPTCHA policy refuses this challenge", "captcha_policy"
+            )
         if not asks:
             return blocked(
                 "login_wall" if reason == "login" else "captcha",
@@ -665,6 +845,11 @@ class BrowserService:
         for session in self.sessions.values():
             challenge = session.get("challenge")
             if session["run_id"] != run_id or session["state"] != "ready" or not challenge:
+                continue
+            if (
+                challenge["reason"] == "captcha"
+                and config.get("captcha_policy", "refuse") == "refuse"
+            ):
                 continue
             if call_id and call_id in challenge["call_ids"]:
                 continue
@@ -707,6 +892,7 @@ class BrowserService:
             triggered.append(event)
         return triggered
 
+    @browser_operation
     async def handle(self, run_id, action_id, tool, params):
         if tool == "open_session":
             return await self._open(
@@ -743,10 +929,50 @@ class BrowserService:
                     "A human must complete this challenge in the takeover session",
                     "browser_human_required",
                 )
-            if tool not in {"goto", "click", "type", "press", "scroll", "select", "upload", "back"}:
+            if tool not in {
+                "goto",
+                "click",
+                "type",
+                "press",
+                "scroll",
+                "select",
+                "upload",
+                "back",
+                "site_call",
+            }:
                 raise ValueError("Unknown browser tool")
             scope = params.get("scope", "read")
             url = params.get("url", params.get("target_url", session["url"]))
+            descriptor = None
+            if tool == "site_call":
+                describer = getattr(self.backend, "describe_site_tool", None)
+                if not describer or not params.get("site_tool"):
+                    return blocked(
+                        "policy_deny", "Select a declared site tool", "site_tool_missing"
+                    )
+                descriptor = await describer(
+                    session["handle"], params["site_tool"], params.get("site_endpoint")
+                )
+                url = descriptor["url"]
+                if origin(url) != origin(session["url"]):
+                    return blocked(
+                        "policy_deny",
+                        "Site tools require the page's own origin",
+                        "site_tool_origin",
+                    )
+                if (
+                    descriptor["path"] == "webmcp"
+                    or (descriptor["path"] == "site_mcp" and descriptor["name"] != "__list_tools__")
+                    or (
+                        descriptor["path"] == "webmcp_form"
+                        and descriptor.get("method", "GET") != "GET"
+                    )
+                ) and scope == "read":
+                    return blocked(
+                        "policy_deny",
+                        "Site tool execution requires explicit scoped write authority",
+                        "site_mcp_scope",
+                    )
             if tool == "goto":
                 origin(url)
             request = {
@@ -759,6 +985,8 @@ class BrowserService:
                     if key not in {"session_id", "session"}
                 },
             }
+            if descriptor:
+                request["site_declaration"] = descriptor
             if params.get("recipient"):
                 request["recipient"] = params["recipient"]
             if session["account"]:
@@ -799,6 +1027,20 @@ class BrowserService:
                         grant_id=clearance["grant_id"], granted_request_hash=action_hash(request)
                     )
             try:
+                selected_path = descriptor["path"] if descriptor else "playwright"
+                self.store.append_record(
+                    run_id,
+                    "browser_action",
+                    action_id=action_id,
+                    session_id=session_id,
+                    path=selected_path,
+                    modality=params.get("view", "tree"),
+                    tool=tool,
+                    site_tool=descriptor["tool_id"] if descriptor else None,
+                )
+                beginner = getattr(self.backend, "begin_action", None)
+                if beginner:
+                    beginner(session["handle"], action_id)
                 if tool == "upload":
                     raw = params.get("handle", params.get("path", ""))
                     if raw.startswith("/world/fetched/"):
@@ -812,22 +1054,89 @@ class BrowserService:
                     params = {**params, "path": str(path)}
                 if tool == "goto":
                     await self.backend.goto(session["handle"], url)
+                elif tool == "site_call":
+
+                    async def authorize_rpc(endpoint, body):
+                        session["active"].update(
+                            rpc_endpoint=endpoint,
+                            rpc_body_hash=action_hash(body),
+                            rpc_method=body["method"],
+                            rpc_response_id=body.get("id"),
+                        )
+
+                    site_result = await self.backend.site_call(
+                        session["handle"],
+                        descriptor,
+                        params.get("arguments", {}),
+                        authorize_rpc=authorize_rpc,
+                    )
                 else:
                     await self.backend.action(session["handle"], tool, params)
                 session["url"] = await self.backend.current_url(session["handle"])
                 challenge = await self._challenge(session, action_id)
                 if challenge:
                     return challenge
-                if scope in {"message", "post"}:
-                    self._service("vault").record_contact(
-                        session["alias"], counterparty=request.get("recipient")
+                writes = [
+                    entry
+                    for entry in session["handle"].get("writes", {}).get(action_id, [])
+                    if 200 <= entry["status"] < 300
+                ]
+                site_ok = tool != "site_call" or not site_result.get("isError", False)
+                if (
+                    writes
+                    and scope != "read"
+                    and site_ok
+                    and not session.get("action_retry_required")
+                ):
+                    self.store.append_record(
+                        run_id,
+                        "browser_write_observed",
+                        action_id=action_id,
+                        session_id=session_id,
+                        scope=scope,
+                        path=selected_path,
+                        http_statuses=[entry["status"] for entry in writes],
                     )
-                return await self._snapshot(session, action_id, params.get("view", "tree"))
+                    footprint = self._service("footprint")
+                    if footprint and scope in {"message", "post"}:
+                        account = session["account"]
+                        footprint.record_item(
+                            run_id,
+                            action_id,
+                            kind="message_out" if scope == "message" else "post",
+                            platform=account["platform"],
+                            venue_class="agent_native"
+                            if account["label"] == "agent_native"
+                            else "human",
+                            label=account["label"],
+                            reversible=False,
+                            metadata={
+                                "account_alias": session["alias"],
+                                "path": selected_path,
+                                "evidence": "http_2xx_response",
+                                "effect_unverified": True,
+                            },
+                        )
+                    if scope in {"message", "post"}:
+                        self._service("vault").record_contact(
+                            session["alias"], counterparty=request.get("recipient")
+                        )
+                result = await self._snapshot(
+                    session, action_id, params.get("view", "tree"), path=selected_path
+                )
+                if tool == "site_call":
+                    result["site_result"] = self._public_result(session, redact(site_result))
+                if session.pop("action_retry_required", False):
+                    result["action_retry_required"] = tool != "goto"
+                return result
             except asyncio.CancelledError:
                 raise
             except _browser_errors() as exc:
                 return self._failure(exc)
             finally:
+                finisher = getattr(self.backend, "end_action", None)
+                if finisher:
+                    finisher(session["handle"], action_id)
                 session["active"] = None
                 session["last_active_at"] = timestamp(self.clock())
                 self._meter(session)
@@ -852,6 +1161,16 @@ class BrowserService:
         if not session or session["state"] not in {"ready", "human_held"}:
             return {"allow": False, "rule_id": "browser_session"}
         account, active = session["account"], session.get("active")
+        current_account = account
+        if account:
+            vault = self._service("vault")
+            try:
+                current_account = vault.get_account(session["alias"], run_id=run_id)
+                vault._validate_terms(current_account["platform"], current_account["label"])
+                if current_account["state"] != "ready":
+                    return {"allow": False, "rule_id": "account_revoked"}
+            except (KeyError, ValueError):
+                return {"allow": False, "rule_id": "platform_terms"}
         read = method.upper() in {"GET", "HEAD", "OPTIONS"}
         grants = self._service("grants")
         if grants and "browse" not in self.store.get_run(run_id)["config"].get("packs", []):
@@ -873,16 +1192,37 @@ class BrowserService:
             )
             if clearance.get("kind") != "result":
                 return {"allow": False, "rule_id": clearance.get("rule_id", "grant_scope")}
+        rpc_exact = False
+        if active and active.get("rpc_endpoint") == url and method.upper() == "POST":
+            try:
+                rpc_exact = action_hash(json.loads(body)) == active.get("rpc_body_hash")
+            except (ValueError, TypeError, UnicodeDecodeError):
+                pass
+        if rpc_exact and active["rpc_method"] in {
+            "initialize",
+            "notifications/initialized",
+            "tools/list",
+        }:
+            permitted = (
+                self._service("vault").request_within_scope(
+                    current_account, active["scope"], {"url": url}
+                )
+                if account
+                else origin(url) == origin(session["url"])
+            )
+            return {
+                "allow": permitted,
+                "allow_write": permitted,
+                "allow_credentials": bool(account),
+                "rule_id": "site_mcp_discovery",
+                "protocol_header_names": ["mcp-session-id"],
+                "jsonrpc_response_id": active.get("rpc_response_id"),
+                "scope": active["scope"],
+                "lease_id": active.get("lease_id"),
+            }
         if not account:
             return {"allow": read and session["state"] == "ready", "rule_id": "anonymous_read_only"}
         vault = self._service("vault")
-        try:
-            current_account = vault.get_account(session["alias"], run_id=run_id)
-            vault._validate_terms(current_account["platform"], current_account["label"])
-            if current_account["state"] != "ready":
-                return {"allow": False, "rule_id": "account_revoked"}
-        except (KeyError, ValueError):
-            return {"allow": False, "rule_id": "platform_terms"}
         try:
             same_origin = origin(url) == account["origin"]
         except ValueError:
@@ -919,7 +1259,9 @@ class BrowserService:
                 "credential_body": same_origin,
             }
         scope = active["scope"]
-        permitted = self._service("vault").request_within_scope(account, scope, {"url": url})
+        permitted = self._service("vault").request_within_scope(
+            current_account, scope, {"url": url}
+        )
         return {
             "allow": permitted and (read or scope != "read"),
             "rule_id": "browser_lease_scope",
@@ -927,6 +1269,8 @@ class BrowserService:
             "allow_write": permitted and scope != "read",
             "scope": scope,
             "lease_id": active.get("lease_id"),
+            "protocol_header_names": ["mcp-session-id"] if rpc_exact else [],
+            "jsonrpc_response_id": active.get("rpc_response_id") if rpc_exact else None,
         }
 
     def takeover_start(self, session_id, ticket_id, *, reason="operator_takeover"):
@@ -956,12 +1300,16 @@ class BrowserService:
         )
         return {"session_id": session_id, "state": "human_held"}
 
+    @browser_operation
     async def human_snapshot(self, session_id, *, view="both"):
         session = self.sessions.get(session_id)
         if not session or session["state"] != "human_held":
             raise ValueError("Session is not held by the operator")
         # Researcher-only: no record, inbox, or agent observation file is written.
-        result = dict(await self.backend.snapshot(session["handle"], view))
+        if session["lock"].locked():
+            raise ValueError("This account is handling another human action")
+        async with session["lock"]:
+            result = dict(await self.backend.snapshot(session["handle"], view))
         screenshot = result.pop("screenshot", None)
         if screenshot is not None:
             result["screenshot_data_url"] = (
@@ -969,10 +1317,14 @@ class BrowserService:
             )
         return result
 
+    @browser_operation
     async def human_action(self, session_id, tool, params):
         session = self.sessions.get(session_id)
         if not session or session["state"] != "human_held":
             raise ValueError("Session is not held by the operator")
+        if session["lock"].locked():
+            raise ValueError("This account is handling another human action")
+        await session["lock"].acquire()
         session["active"] = {"scope": "settings", "human": True}
         try:
             if tool == "goto":
@@ -982,11 +1334,15 @@ class BrowserService:
             return {"session_id": session_id, "state": "human_held"}
         finally:
             session["active"] = None
+            session["lock"].release()
 
+    @browser_operation
     async def takeover_done(self, session_id):
         session = self.sessions.get(session_id)
         if not session or session["state"] != "human_held":
             raise ValueError("Session is not held by the operator")
+        if session["lock"].locked():
+            raise ValueError("Finish the current human action before returning the session")
         duration = min(600, max(0, (self.clock() - session["takeover_started"]).total_seconds()))
         session["state"] = "ready"
         session["url"] = await self.backend.current_url(session["handle"])
@@ -1040,6 +1396,14 @@ class BrowserService:
         return {"kind": "result", "state": "closed", "session_id": session["session_id"]}
 
     async def stop_run(self, run_id):
+        self._stopping.add(run_id)
+        tasks = [
+            task for task in self._operations.get(run_id, ()) if task is not asyncio.current_task()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         for session in list(self.sessions.values()):
             if session["run_id"] == run_id:
                 await self._close(session)
@@ -1054,7 +1418,9 @@ class BrowserService:
             if session["state"] == "human_held":
                 self._meter(session)
                 if (self.clock() - session["takeover_started"]).total_seconds() >= 600:
-                    await self.takeover_done(session["session_id"])
+                    await asyncio.gather(
+                        self.takeover_done(session["session_id"]), return_exceptions=True
+                    )
                 continue
             if session["lock"].locked():
                 continue
@@ -1062,7 +1428,15 @@ class BrowserService:
                 self.clock() - datetime.fromisoformat(session["last_active_at"])
             ).total_seconds()
             if idle >= self.idle_seconds or not self._meter(session):
-                await self._close(session)
+                await asyncio.gather(
+                    self.handle(
+                        session["run_id"],
+                        "idle_close",
+                        "close",
+                        {"session_id": session["session_id"]},
+                    ),
+                    return_exceptions=True,
+                )
 
     async def recover(self):
         if self._task is None or self._task.done():
@@ -1072,8 +1446,8 @@ class BrowserService:
         if self._task:
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
-        for session in list(self.sessions.values()):
-            await self._close(session)
+        for run_id in {session["run_id"] for session in self.sessions.values()}:
+            await self.stop_run(run_id)
         closer = getattr(self.backend, "aclose", None)
         if closer:
             await closer()

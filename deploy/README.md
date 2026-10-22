@@ -32,12 +32,21 @@ HTTP(S)_PROXY values. The verified build uses a BuildKit secret for the public C
 
 ```bash
 export DOCKER_CONFIG=/workspace/.cache/docker
+export WORLD_PLATFORM_PROXY_IP="$(python - <<'PY'
+import os, socket
+from urllib.parse import urlsplit
+host = urlsplit(os.environ.get('HTTPS_PROXY') or os.environ.get('HTTP_PROXY') or '').hostname
+if not host:
+    raise SystemExit('No platform proxy configured; use the direct build commands above')
+print(socket.gethostbyname(host))
+PY
+)"
 docker build --build-arg HTTP_PROXY --build-arg HTTPS_PROXY \
-  --add-host proxy:172.31.14.125 \
+  --add-host "proxy:${WORLD_PLATFORM_PROXY_IP}" \
   --secret id=environment_ca,src=/etc/ssl/certs/ca-certificates.crt \
   --target world --tag landing-party-world:0.1 .
 docker build --build-arg HTTP_PROXY --build-arg HTTPS_PROXY \
-  --add-host proxy:172.31.14.125 \
+  --add-host "proxy:${WORLD_PLATFORM_PROXY_IP}" \
   --secret id=environment_ca,src=/etc/ssl/certs/ca-certificates.crt \
   --target agent --tag landing-party-agent:0.1 .
 ```
@@ -55,6 +64,8 @@ After building both images, from the repository root:
 python deploy/verify-fence.py
 python deploy/verify-browser.py
 python deploy/verify-world.py
+PYTHONPATH=. .venv/bin/python deploy/verify-binding.py
+.venv/bin/python deploy/verify-workspace.py
 ```
 
 The firewall check creates/cleans temporary containers and a network. It verifies
@@ -116,7 +127,7 @@ named-volume subpaths select that exact run. Development mode refuses production
 external writes. Research mode begins in preflight, withholds agent capability,
 and starts the episode clock only after activation.
 
-This cloud also needs `WORLD_PLATFORM_PROXY_IP=172.31.14.125` and its existing
+This cloud also needs `WORLD_PLATFORM_PROXY_IP` resolved as above and its existing
 HTTP(S)_PROXY environment when launching Compose. Those upstream proxy settings
 go only to the trusted world service; they are separate from the agent's scoped
 world proxy. Other environments may use direct world egress or their own reviewed
@@ -128,6 +139,59 @@ world-observed metadata and evaluation/t=0 references. The HTTP API does not acc
 executable callbacks. Missing egress/rDNS, provider billing, version or fresh live
 fixed-bank observations remain unmeasured. Fixture scripts cannot replace these
 per-run checks.
+
+For a host-run daemon with trusted Docker access, POST `/v1/preflight/bind` with
+literal `run_id`, `container_id` and `firewall_id` before `/v1/preflight/run`.
+Containers must carry the matching `landing-party.run_id` and `landing-party.role`
+labels from Compose. Binding rechecks the actual namespace, reviewed firewall,
+capabilities, nonroot user and exact run subpath mounts; arbitrary Docker commands
+cannot enter this API. Harness work/belief content is compared to the registered
+initial surfaces, and donor snapshots require their sealed record anchor.
+
+The binding and workspace scripts create only owned disposable containers,
+networks/volumes and clean them afterward. Their reports are
+`binding-software.json` (eight actual binding/firewall checks) and
+`workspace-software.json` (six cross-UID import/permission checks) under
+`data/validation`. The workspace script uses the actual packaged helper and adds
+a seventh check that its hash matches the checkout, without a source mount.
+Both scripts retain dropped capabilities,
+read-only root storage, no-new-privileges and isolated networking.
+
+The Compose world container has no Docker socket or Docker client. Its secure
+host observer uses the protected challenge/submit endpoints and a single-use,
+120-second, Ed25519-signed receipt bound to the exact run, configuration, fixed
+probe plan, agent and firewall containers. The host reconstructs the reviewed plan
+locally; server responses cannot introduce arbitrary execution. The same preflight
+checks consume these observations, including the world's live kill/resume check.
+Activation rechecks the signed private artifact, chained receipt anchor and expiry.
+
+Start the research agent container with no agent capability before activation,
+using its scoped work/world volume subpaths and credential-free world URLs. The
+challenge publishes only the public CA before actual environment checks. On the
+trusted Docker host, with `WORLD_CONTROL_TOKEN` already set securely:
+
+```bash
+PYTHONPATH=. .venv/bin/python -m worldd.host_observer RUN_ID AGENT_CONTAINER FENCE_CONTAINER \
+  --world http://127.0.0.1:7777 --sources private-source-references.json
+```
+
+Remote control requires verified HTTPS; plain HTTP is limited to loopback. The
+source-reference JSON may name `provider_run_id`, `provider_call_id`,
+`search_run_id`, `search_action_id` and optional `egress_url`. These refer to actual
+sealed provider/search measurements; the observer makes no paid calls. It runs
+the configured browser's actual `--version`, records the current signing key,
+parses model captures and recomputes metering from reported usage, reads the
+search provider's archived HTTP Date and selects the matching registered block
+profile. Optional egress observation uses the recorded gateway and actual PTR DNS.
+Missing/blocked observations stay unmeasured. Fixture transport receipts cannot
+authorize research. Reports do not invent provider-reported dollar amounts.
+
+`PYTHONPATH=. .venv/bin/python deploy/verify-observer.py` exercises the actual
+containerized control flow and writes `observer-software.json`; it explicitly
+marks missing scientific sources unmeasured. Its world source is mounted
+read-only and hashed. After rebuilding, add `--packaged` to run the image's own
+source and verify it matches the checkout. Never expose the Docker daemon to
+the world or harness.
 
 After creation/activation set process environment `WORLD_RUN_ID` and
 `WORLD_AGENT_TOKEN` from its result. Construct `WORLD_PROXY_URL` using the run's

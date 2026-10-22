@@ -22,6 +22,7 @@ from .approvals import (
 KINDS = {"approval", "takeover", "grant_credential", "grant_payment", "policy_conflict"}
 CLASSES = {"blocker", "approval", "diagnostic", "choice"}
 OPEN_STATES = {"open", "accepted"}
+ACTIVITY_LEASE_SECONDS = 30
 
 
 def blocked(detail, rule_id="ask_policy", kind="policy_deny"):
@@ -36,10 +37,66 @@ class AskService:
         self.expiry_seconds = expiry_seconds
         self.approvals = ApprovalLedger(world, clock=self.clock)
         self._task = None
+        self.database.db.execute("""CREATE TABLE IF NOT EXISTS contamination (
+            contamination_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, payload TEXT NOT NULL
+        )""")
 
     def _audience(self, run_id):
         config = self.store.get_run(run_id)["config"]
         return "life:" + config["life_id"] if config.get("life_id") else "run:" + run_id
+
+    def _provenance(self, run_id, params=None, provided=None):
+        from .context import ask_provenance
+
+        if provided and provided.get("context_status") in {"verified", "unmeasured", "ambiguous"}:
+            return provided
+        collector = getattr(self.world, "ask_provenance", None)
+        actual = (
+            collector(run_id, params=params)
+            if collector
+            else ask_provenance(self.world, run_id, params)
+        )
+        extra = dict(provided or {})
+        broker_ids = extra.pop("observation_ids", [])
+        broker_score = extra.pop("injection_score_max", None)
+        actual["broker_observed_ids"] = sorted(set(actual["broker_observed_ids"]) | set(broker_ids))
+        scores = [
+            value
+            for value in [actual.get("broker_injection_score_max"), broker_score]
+            if isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+        ]
+        actual["broker_injection_score_max"] = max(scores, default=None)
+        return {**extra, **actual}
+
+    def _annotate(self, run_id, action_id, ref, ticket_id, params, provenance):
+        old = self.get(ticket_id)["provenance"]
+        merged = {**old, **provenance}
+        with self.database.transaction() as db:
+            db.execute(
+                "UPDATE asks SET agent_text=?,alternatives=?,subgoal_fraction=?,info_type=?,provenance=? WHERE ticket_id=? AND state IN ('open','accepted')",
+                (
+                    params["text"],
+                    canonical(params.get("alternatives") or []),
+                    params.get("subgoal_fraction"),
+                    params.get("info_type"),
+                    canonical(merged),
+                    ticket_id,
+                ),
+            )
+        self.store.append_record(
+            run_id,
+            "ask_context",
+            action_id=action_id,
+            action_ref=ref,
+            ticket_id=ticket_id,
+            agent_text=params["text"],
+            alternatives=params.get("alternatives") or [],
+            provenance=merged,
+            subgoal_fraction=params.get("subgoal_fraction"),
+            info_type=params.get("info_type"),
+        )
 
     def _row(self, ticket_id):
         with self.database.lock:
@@ -78,6 +135,12 @@ class AskService:
         return [self._public(row) for row in rows]
 
     def _emit(self, ticket, state, *, reason=None, phase=None):
+        forecast = getattr(self.world, "services", {}).get("forecast")
+        if forecast:
+            forecast.notify_state_write(
+                run_id=ticket["run_id"],
+                world_ref=f"ask:{ticket['ticket_id']}:{state}:{phase or 'outcome'}",
+            )
         event = {
             "type": "ask_resolved",
             "ticket_id": ticket["ticket_id"],
@@ -153,7 +216,7 @@ class AskService:
             raise ValueError("This run cannot raise new operator tickets")
         digest = action_hash(pending_action)
         audience = self._audience(run_id)
-        provenance = provenance or {"observation_ids": [], "injection_score_max": None}
+        provenance = self._provenance(run_id, provided=provenance)
         with self.database.transaction() as db:
             existing = db.execute(
                 "SELECT * FROM asks WHERE run_id=? AND kind=? AND action_hash=? AND state IN ('open','accepted') ORDER BY opened_at LIMIT 1",
@@ -250,6 +313,7 @@ class AskService:
         kind, text = params.get("kind", "message"), params.get("text", "")
         if not isinstance(text, str) or not 0 < len(text) <= 20000:
             raise ValueError("ask text must contain one to 20000 characters")
+        provenance = self._provenance(run_id, params)
         if kind == "message":
             self.store.append_record(
                 run_id,
@@ -258,8 +322,23 @@ class AskService:
                 kind_requested="message",
                 agent_text=text,
                 ticket_id=None,
+                provenance=provenance,
+                alternatives=params.get("alternatives") or [],
+                subgoal_fraction=params.get("subgoal_fraction"),
+                info_type=params.get("info_type"),
             )
             return {"kind": "silence", "action_id": action_id}
+        if kind not in KINDS:
+            raise ValueError("Unsupported ticket kind")
+        alternatives = params.get("alternatives")
+        if alternatives is not None and (
+            not isinstance(alternatives, list)
+            or any(not isinstance(item, str) for item in alternatives)
+        ):
+            raise ValueError("alternatives must be text choices")
+        fraction = params.get("subgoal_fraction")
+        if fraction is not None and not 0 <= fraction <= 1:
+            raise ValueError("subgoal_fraction must be between zero and one")
         ref = params.get("action_ref")
         action = next(
             (
@@ -279,11 +358,104 @@ class AskService:
             for record in self.store.records(run_id)
             if record.get("action_id") == ref and record.get("kind") == "outcome"
         ]
-        scores = [
-            record.get("resource", {}).get("provenance", {}).get("injection_score")
-            for record in outcomes
-            if isinstance(record.get("resource"), dict)
-        ]
+        if kind == "grant_payment":
+            quote = next(
+                (
+                    resource
+                    for record in reversed(outcomes)
+                    for resource in [
+                        record.get("block") or record.get("resource") or record.get("reply")
+                    ]
+                    if isinstance(resource, dict) and resource.get("type") == "paywall_402"
+                ),
+                None,
+            )
+            payments = getattr(self.world, "services", {}).get("payments")
+            url = (quote or {}).get("quote_url") or action["params"].get("url")
+            if (
+                not quote
+                or not quote.get("quote_hash")
+                or quote.get("amount") is None
+                or not url
+                or not payments
+            ):
+                return blocked(
+                    "A payment ask requires an observed, verifiable 402 quote", "payment_quote"
+                )
+            expiry = timestamp(self.clock() + timedelta(hours=1))
+            pending = {"url": url, "quote_hash": quote["quote_hash"]}
+            with self.database.lock:
+                candidates = self.database.db.execute(
+                    "SELECT body FROM asks WHERE audience=? AND kind='grant_payment' AND state IN ('open','approved') ORDER BY rowid DESC",
+                    (self._audience(run_id),),
+                ).fetchall()
+            for candidate in candidates:
+                original = json.loads(candidate["body"])
+                if (
+                    original.get("action") == pending
+                    and original.get("merchant") == quote["merchant"]
+                    and Decimal(original.get("ceiling", "0")) == Decimal(str(quote["amount"]))
+                    and original.get("purpose") == text[:1000]
+                    and datetime.fromisoformat(original["expires_at"]) > self.clock()
+                ):
+                    expiry = original["expires_at"]
+                    break
+            result = await payments.request(
+                run_id,
+                action_id,
+                merchant=quote["merchant"],
+                ceiling=quote["amount"],
+                purpose=text[:1000],
+                expires_at=expiry,
+                action=pending,
+            )
+            if result.get("kind") == "ticket":
+                self._annotate(run_id, action_id, ref, result["ticket_id"], params, provenance)
+            return result
+        self.expire()
+        existing = self.database.db.execute(
+            "SELECT * FROM asks WHERE run_id=? AND action_id=? AND kind=? ORDER BY rowid DESC LIMIT 1",
+            (run_id, ref, kind),
+        ).fetchone()
+        if existing:
+            if existing["state"] in OPEN_STATES:
+                self._annotate(run_id, action_id, ref, existing["ticket_id"], params, provenance)
+                return {
+                    "kind": "ticket",
+                    "ticket_id": existing["ticket_id"],
+                    "action_id": existing["action_id"],
+                    "expected_by": existing["expires_at"],
+                }
+            return {
+                "kind": "result",
+                "ticket_id": existing["ticket_id"],
+                "state": existing["state"],
+                "action_hash": existing["action_hash"],
+            }
+        if kind == "policy_conflict":
+            vault = getattr(self.world, "services", {}).get("vault")
+            url = action["params"].get("url")
+            platform = vault.platform_for_url(url) if vault else None
+            if platform and vault.terms(platform)["terms_class"] == "forbids":
+                return self.raise_ticket(
+                    run_id,
+                    action_id,
+                    kind,
+                    text,
+                    pending_action={
+                        "url": url,
+                        "platform": platform,
+                        "reason": "platform_terms_forbid_agents",
+                    },
+                    provenance=provenance,
+                    alternatives=alternatives,
+                    platform=platform,
+                    scope="read",
+                )
+        if kind in {"approval", "takeover", "policy_conflict"}:
+            return blocked(
+                "This action has no corresponding world-authored pending gate", "ask_pending_action"
+            )
         return self.raise_ticket(
             run_id,
             action_id,
@@ -291,12 +463,7 @@ class AskService:
             text,
             pending_action=body,
             alternatives=params.get("alternatives"),
-            provenance={
-                "observation_ids": [ref],
-                "injection_score_max": max(
-                    (score for score in scores if score is not None), default=None
-                ),
-            },
+            provenance=provenance,
             subgoal_fraction=params.get("subgoal_fraction"),
             info_type=params.get("info_type"),
         )
@@ -332,7 +499,10 @@ class AskService:
             seconds = min(
                 600,
                 seconds
-                + max(0, (now - datetime.fromisoformat(row["active_since"])).total_seconds()),
+                + min(
+                    ACTIVITY_LEASE_SECONDS,
+                    max(0, (now - datetime.fromisoformat(row["active_since"])).total_seconds()),
+                ),
             )
         reservation = row["human_reservation"]
         source = self.store.get_run(row["run_id"])
@@ -391,8 +561,14 @@ class AskService:
             seconds = max(
                 seconds,
                 float(row["human_seconds"])
-                + max(
-                    0, (self.clock() - datetime.fromisoformat(row["active_since"])).total_seconds()
+                + min(
+                    ACTIVITY_LEASE_SECONDS,
+                    max(
+                        0,
+                        (
+                            self.clock() - datetime.fromisoformat(row["active_since"])
+                        ).total_seconds(),
+                    ),
                 ),
             )
         if seconds < 0:
@@ -409,7 +585,7 @@ class AskService:
         ):
             raise ValueError("A finished run cannot receive new operator answers")
         pricing = config.get("human_time_priced", "parallel")
-        rate = self._human_rate(config)
+        rate = self._human_rate(config) if pricing == "in_budget" else None
         usd = self._human_usd(seconds, rate) if rate is not None else None
         if usd is not None and (not usd.is_finite() or usd < 0):
             raise ValueError("Invalid human minute price")
@@ -681,6 +857,108 @@ class AskService:
             ).rowcount:
                 raise KeyError(rule_id)
         return {"rule_id": rule_id, "revoked": True}
+
+    def console_state(self, run_id, *, since=0):
+        """Bounded researcher view; record bodies remain literal untrusted data."""
+        if isinstance(since, bool) or not isinstance(since, int) or since < 0:
+            raise ValueError("Invalid console activity cursor")
+        run = self.store.get_run(run_id)
+        records = self.store.records(run_id)
+        selected = records[since:][-200:]
+        projection = (
+            "event_id",
+            "kind",
+            "recorded_at",
+            "timestamp",
+            "ts",
+            "action_id",
+            "tool",
+            "state",
+            "cost_usd",
+            "session_id",
+            "path",
+            "modality",
+            "ticket_id",
+            "platform",
+            "reason",
+            "rule_id",
+        )
+        activity = [{key: item[key] for key in projection if key in item} for item in selected]
+        footprint = getattr(self.world, "services", {}).get("footprint")
+        incidents = []
+        if footprint:
+            incidents = [
+                item
+                for item in footprint.query(run_id, include_incidents=True)
+                if item.get("kind") == "incident"
+            ]
+        with self.database.lock:
+            contamination = [
+                json.loads(row[0])
+                for row in self.database.db.execute(
+                    "SELECT payload FROM contamination WHERE run_id=? ORDER BY rowid", (run_id,)
+                )
+            ]
+        return {
+            "run_id": run_id,
+            "state": run["state"],
+            "cursor": len(records),
+            "activity": activity,
+            "standing_rejections": self.standing_rejections(run_id),
+            "incidents": redact(incidents),
+            "contamination": contamination,
+            "human": self.human_spend(run_id),
+        }
+
+    @synchronized
+    def record_contamination(self, run_id, *, kind, detail, owner, human_seconds=0):
+        if kind not in {"ad_hoc_help", "hint", "frontier_paste", "other"}:
+            raise ValueError("Invalid contamination kind")
+        if (
+            not isinstance(detail, str)
+            or not 0 < len(detail) <= 20000
+            or not isinstance(owner, str)
+            or not 0 < len(owner) <= 200
+        ):
+            raise ValueError("Contamination requires bounded detail and a human owner")
+        if not math.isfinite(float(human_seconds)) or not 0 <= float(human_seconds) <= 600:
+            raise ValueError("Contamination work must name actual seconds between zero and 600")
+        run = self.store.get_run(run_id)
+        if run["state"] not in {"running", "frozen"}:
+            raise ValueError("Record contamination against an active run")
+        item = {
+            "contamination_id": "ct_" + secrets.token_hex(12),
+            "run_id": run_id,
+            "kind": kind,
+            "detail": detail,
+            "owner": owner,
+            "human_seconds": float(human_seconds),
+            "recorded_at": timestamp(self.clock()),
+        }
+        # This is an operator-only correction, never a channel to the agent.
+        # Explicit actual work is still charged under the registered time policy.
+        row = {
+            "ticket_id": item["contamination_id"],
+            "run_id": run_id,
+            "human_seconds": 0,
+            "active_since": None,
+            "human_reservation": None,
+        }
+        charge = self._charge_human(row, human_seconds)
+        if charge.get("kind") == "blocked":
+            return charge
+        self.database.db.execute(
+            "INSERT INTO contamination VALUES(?,?,?)",
+            (item["contamination_id"], run_id, canonical(item)),
+        )
+        self.store.append_record(
+            run_id,
+            "contamination",
+            **{key: value for key, value in item.items() if key not in {"run_id", "kind"}},
+            contamination_kind=kind,
+        )
+        self.store.update_run(run_id, tainted=True)
+        return item
 
     async def recover(self):
         self.expire()

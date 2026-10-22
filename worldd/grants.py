@@ -760,20 +760,32 @@ class GrantService:
     def revoke_incident(self, run_id, *, platform=None, incident_ref, account_alias=None):
         if not incident_ref:
             raise ValueError("Incident revocation requires an evidence reference")
+        source = self.store.get_run(run_id)
+        life_id = source["config"].get("life_id")
+        audience = {run_id}
+        if life_id:
+            audience.update(
+                run["run_id"]
+                for run in self.store.list_runs()
+                if run["config"].get("life_id") == life_id
+            )
         with self.store._lock:
             ids = [
                 row[0]
                 for row in self.store.db.execute(
-                    "SELECT grant_id FROM capability_clearances WHERE run_id=?", (run_id,)
+                    "SELECT grant_id,run_id FROM capability_clearances"
                 )
+                if row[1] in audience
             ]
         revoked = []
         for grant_id in ids:
             grant = self.get(grant_id)
-            if platform is None or grant["platform"] in {None, platform}:
+            if grant["state"] in {"live", "rehearsal"} and (
+                platform is None or grant["platform"] in {None, platform}
+            ):
                 self.revoke(grant_id, reason="incident:" + incident_ref, actor="world")
                 revoked.append(grant_id)
-        return {"revoked": revoked, "incident_ref": incident_ref}
+        return {"revoked": revoked, "incident_ref": incident_ref, "life_id": life_id}
 
     def expire(self):
         with self.store._transaction():

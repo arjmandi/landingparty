@@ -1,11 +1,14 @@
+import asyncio
 import io
+import shutil
+import subprocess
 import wave
 from types import SimpleNamespace
 
 import pymupdf
 import pytest
 
-from worldd.perception import PerceptionProvider, PerceptionService
+from worldd.perception import PerceptionProvider, PerceptionService, audio_seconds
 from worldd.storage import Store
 
 
@@ -41,6 +44,41 @@ def audio(world):
     path = world.store.run_dir(world.run_id) / "world" / "fetched" / "audio.wav"
     path.write_bytes(output.getvalue())
     return "/world/fetched/audio.wav"
+
+
+@pytest.mark.skipif(
+    not shutil.which("ffmpeg") or not shutil.which("ffprobe"),
+    reason="Requires production ffmpeg/ffprobe dependency",
+)
+async def test_nonseekable_mp3_uses_decoded_duration_for_three_unspent_quotes(world):
+    wav = audio(world)
+    raw = (world.store.run_dir(world.run_id) / wav.lstrip("/")).read_bytes()
+    encoded_result = await asyncio.to_thread(
+        subprocess.run,
+        ["ffmpeg", "-v", "error", "-f", "wav", "-i", "pipe:0", "-f", "mp3", "pipe:1"],
+        input=raw,
+        capture_output=True,
+        check=True,
+        timeout=10,
+    )
+    encoded = encoded_result.stdout
+    measured = audio_seconds(encoded)
+    assert 1 <= measured < 1.2
+    (world.store.run_dir(world.run_id) / "world/fetched/audio.mp3").write_bytes(encoded)
+    service = PerceptionService(world)
+    try:
+        quoted = await service.handle(
+            world.run_id, "a_mp3_quote", "transcribe", {"handle": "/world/fetched/audio.mp3"}
+        )
+        assert {row["provider"] for row in quoted["quotes"]} == {"openai", "deepgram", "assemblyai"}
+        assert all(abs(float(row["units"]) * 60 - measured) < 1e-9 for row in quoted["quotes"])
+        assert world.store.total_spent(world.run_id) == world.store.reserved(world.run_id) == 0
+        with pytest.raises(ValueError, match="truncated"):
+            audio_seconds(raw[:-2])
+        with pytest.raises(ValueError, match="Unable to determine"):
+            audio_seconds(b"#EXTM3U\nhttp://127.0.0.1/never-open-this-source\n")
+    finally:
+        await service.aclose()
 
 
 async def test_pdf_quote_is_unspent_then_explicitly_accepted_and_cached(world):

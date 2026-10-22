@@ -16,6 +16,8 @@ from decimal import Decimal
 from itertools import combinations
 from statistics import mean, median
 
+from worldd.beliefs import formation_records
+
 from .judges import JudgeSpec, ResearchCallError, ToollessJudge
 from .metrics import calibration, revision_metrics
 from .report import unmeasured
@@ -108,11 +110,11 @@ def _spearman(left, right):
     return {"status": "measured", "value": numerator / denominator, "n": len(left)}
 
 
-def cross_seed_stability(seed_stores: list[dict]) -> dict:
+def cross_seed_stability(seed_stores: list[dict], *, reflection_policy="none") -> dict:
     """Jaccard on lexical claims and tie-correct Spearman on shared-claim ranks."""
     if len(seed_stores) < 2:
         return unmeasured("at least two measured seed stores are required", n=len(seed_stores))
-    stores = []
+    stores, eligibility = [], []
     seen = set()
     for source in seed_stores:
         seed = source["seed"]
@@ -120,9 +122,12 @@ def cross_seed_stability(seed_stores: list[dict]) -> dict:
             raise ValueError("seed stores require distinct integer or text seeds")
         seen.add(seed)
         claims = defaultdict(list)
-        for row in source["beliefs"]:
-            if row.get("status", "held") not in {"held", "conditional", "review"}:
-                continue
+        if source.get("reflection_policy", reflection_policy) != reflection_policy:
+            raise ValueError("cross-seed stores must share the same reflection treatment")
+        projection = formation_records(source["beliefs"], reflection_policy=reflection_policy)
+        rows = projection.pop("items")
+        eligibility.append({"seed": seed, **projection})
+        for row in rows:
             claim = canonical_claim(row["claim"])
             if not claim:
                 continue
@@ -159,6 +164,7 @@ def cross_seed_stability(seed_stores: list[dict]) -> dict:
         "headline_eligible": len(stores) >= 5,
         "canonicalizer_id": CANONICALIZER_ID,
         "duplicate_claim_rank": "median",
+        "formation_eligibility": eligibility,
         "mean_jaccard": mean(jaccards) if jaccards else None,
         "mean_rank_spearman": mean(correlations) if correlations else None,
         "pairs": pairs,
@@ -300,8 +306,24 @@ class FormationRunner:
             or self.world.store.verify_record(source_run_id).get("valid") is not True
         ):
             raise ValueError("formation measurements require a sealed verified untainted source")
+        source_ids = {row["id"] for row in beliefs}
+        if any(row.get("belief_id") not in source_ids for row in revision_observations):
+            raise ValueError("revision observations must identify a supplied belief")
+        eligibility = formation_records(
+            beliefs, reflection_policy=source["config"].get("reflection_policy", "none")
+        )
+        beliefs = eligibility.pop("items")
+        eligible_ids = {row["id"] for row in beliefs}
+        eligibility["excluded_revision_observations"] = sum(
+            row["belief_id"] not in eligible_ids for row in revision_observations
+        )
+        revision_observations = [
+            row for row in revision_observations if row["belief_id"] in eligible_ids
+        ]
         sample = prose_sample(beliefs, seed=seed)
-        stability = cross_seed_stability(seed_stores)
+        stability = cross_seed_stability(
+            seed_stores, reflection_policy=source["config"].get("reflection_policy", "none")
+        )
         selected = {row["id"]: row for row in sample["items"]}
         all_ids = {row["id"]: row for row in beliefs}
         triples = {key for key, row in all_ids.items() if row.get("triple")}
@@ -410,6 +432,7 @@ class FormationRunner:
             "judge_id": self.spec.model,
             "judge_family": self.spec.family,
             "truth_adjudicated": False,
+            "formation_eligibility": eligibility,
             "prose": {
                 "sample": public_sample,
                 "status": "measured"

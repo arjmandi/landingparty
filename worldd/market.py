@@ -71,6 +71,19 @@ class MarketService(VenueDB):
         )
         return owner
 
+    def _notify_state(self, run_id, world_ref):
+        forecast = getattr(self.world, "services", {}).get("forecast")
+        if forecast and hasattr(forecast, "notify_state_write"):
+            forecast.notify_state_write(run_id=run_id, world_ref=world_ref)
+
+    def _notify_owners(self, owners, world_ref):
+        seen = set()
+        for run in self.store.list_runs():
+            owner = run["config"].get("life_id") or run["run_id"]
+            if owner in owners and owner not in seen:
+                seen.add(owner)
+                self._notify_state(run["run_id"], world_ref)
+
     def balance(self, run_id):
         owner = self._owner(run_id)
         row = self.db.execute("SELECT * FROM paper_accounts WHERE owner=?", (owner,)).fetchone()
@@ -237,7 +250,9 @@ class MarketService(VenueDB):
         )
         if can_credit:
             driver = lives.status(config["life_id"]).get("driver")
-            can_credit = not driver or driver["reading"] > driver["floor"]
+            can_credit = not driver or not driver.get(
+                "at_floor", driver["reading"] <= driver["floor"]
+            )
         if can_credit:
             credited = lives.credit(
                 config["life_id"],
@@ -284,6 +299,7 @@ class MarketService(VenueDB):
             "UPDATE independent_income SET state='complete',result=? WHERE platform=? AND external_id=?",
             (canonical(result), platform, external_id),
         )
+        self._notify_state(run_id, f"income:{platform}:{external_id}")
         return result
 
     def register_market(
@@ -324,6 +340,15 @@ class MarketService(VenueDB):
         market.update(price=str(value), observed_at=now(), observation_ref=observation_ref)
         self.db.execute(
             "UPDATE paper_markets SET payload=? WHERE market_id=?", (canonical(market), market_id)
+        )
+        self._notify_owners(
+            {
+                row["owner"]
+                for row in self.db.execute(
+                    "SELECT DISTINCT owner FROM paper_positions WHERE market_id=?", (market_id,)
+                )
+            },
+            f"market:mark:{market_id}:{observation_ref}",
         )
         return market
 
@@ -434,6 +459,7 @@ class MarketService(VenueDB):
                     self.db.execute("ROLLBACK")
                 raise
         self.store.append_record(run_id, "paper_trade", fill=fill)
+        self._notify_state(run_id, fill["fill_id"])
         return {"kind": "result", "fill": fill}
 
     def resolve(self, market_id, *, outcome, observation_ref):
@@ -483,6 +509,9 @@ class MarketService(VenueDB):
                 if self.db.in_transaction:
                     self.db.execute("ROLLBACK")
                 raise
+        self._notify_owners(
+            {row["owner"] for row in payouts}, f"market:resolution:{market_id}:{observation_ref}"
+        )
         return {"market_id": market_id, "outcome": outcome, "payouts": payouts}
 
     async def redeem(self, run_id, credits):
@@ -536,6 +565,7 @@ class MarketService(VenueDB):
         self.db.execute(
             "UPDATE paper_redemptions SET state='complete' WHERE redemption_id=?", (redemption_id,)
         )
+        self._notify_state(run_id, f"market:redemption:{redemption_id}")
         return {
             "kind": "result",
             "redemption_id": redemption_id,
@@ -620,6 +650,7 @@ class MarketService(VenueDB):
         self.db.execute(
             "INSERT INTO bounty_awards VALUES (?,?,?)", (bounty_id, owner, evidence_ref)
         )
+        self._notify_state(run_id, f"bounty:{bounty_id}:{owner}")
         return {
             "kind": "result",
             "bounty_id": bounty_id,

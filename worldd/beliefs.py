@@ -1,7 +1,7 @@
-"""Offline foundation for the stage-1 append-only belief service.
+"""Append-only semantic records with private diagnostics and deterministic views.
 
-This module is deliberately not registered as a live tool pack. The stage-0 pilot
-gate and the rest of the stage-1 kernel must be implemented before activation.
+The stage registry controls research activation; local engineering availability
+does not establish the scientific stage gates.
 """
 
 from __future__ import annotations
@@ -50,6 +50,7 @@ _SYSTEM_FIELDS = {
     "reconfirmed_from",
     "initial_condition",
     "imported_kernel",
+    "origin_author",
 }
 _SUBMITTED_FIELDS = {
     "kind",
@@ -71,6 +72,28 @@ _SUBMITTED_FIELDS = {
 _OPEN_STATUSES = {"held", "proposed", "conditional", "review"}
 _HORIZONS = {"static": 365, "slow": 30, "fast": 1, "false_premise": 0}
 _GENESIS = "sha256:" + "0" * 64
+
+
+def formation_records(records, *, reflection_policy="none"):
+    """Analysis projection only; ordinary belief queries never use this filter."""
+    selected = [
+        record
+        for record in records
+        if record.get("status", "held") in {"held", "conditional", "review"}
+        and (
+            reflection_policy != "companion"
+            or (record.get("author", "agent") == "agent" and bool(record.get("reconfirmed_from")))
+        )
+    ]
+    return {
+        "items": copy.deepcopy(selected),
+        "included_n": len(selected),
+        "excluded_n": len(records) - len(selected),
+        "excluded_ids": [record.get("id") for record in records if record not in selected],
+        "rule": "active_agent_explicitly_reconfirmed_only"
+        if reflection_policy == "companion"
+        else "active_records",
+    }
 
 
 def _time(value: str | datetime) -> datetime:
@@ -105,6 +128,10 @@ def _hash(value: Any) -> str:
 def _public(record: dict) -> dict:
     result = copy.deepcopy(record)
     result.pop("flags", None)
+    if isinstance(result.get("initial_condition"), dict) and result["initial_condition"].get(
+        "world_experimental_initialization"
+    ):
+        result.pop("initial_condition")
     return result
 
 
@@ -432,6 +459,7 @@ class BeliefStore:
             candidate = copy.deepcopy(payload)
             candidate["id"] = "b_" + uuid.uuid4().hex
             candidate = self._validate(candidate, state, now)
+            candidate["origin_author"] = candidate["author"]
             candidate.update(version_id="bv_" + uuid.uuid4().hex, op="assert", recorded_at=now)
             return candidate
 
@@ -457,6 +485,17 @@ class BeliefStore:
             candidate.update(copy.deepcopy(delta))
             candidate["id"] = belief_id
             candidate = self._validate(candidate, state, now)
+            candidate["origin_author"] = old.get(
+                "origin_author", "reflector" if old.get("reconfirmed_from") else old["author"]
+            )
+            if old.get("reconfirmed_from"):
+                candidate["reconfirmed_from"] = old["reconfirmed_from"]
+            if (
+                delta.get("status") == "held"
+                and candidate["author"] == "agent"
+                and candidate["origin_author"] == "reflector"
+            ):
+                candidate["reconfirmed_from"] = old["version_id"]
             if candidate["evidence"] == old["evidence"]:
                 candidate["last_support_at"] = old["last_support_at"]
             candidate.update(
@@ -509,6 +548,7 @@ class BeliefStore:
                 recorded_at=now,
                 last_support_at=now,
             )
+            candidate.setdefault("origin_author", state[belief_id]["author"])
             return candidate
 
         return self._transact(operation)

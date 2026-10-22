@@ -80,6 +80,20 @@ those system times. `observe_event` adapts world outcomes and ticket resolutions
 Attachments use explicit action/ticket routes or subject/predicate matches with
 an overlapping valid interval. A contradicted static fact is classified as a
 revision; a changing fact as an update that closes its old valid interval.
+Changing records additionally expose `kernel.observed_intervals`: actual
+world-observed values (and matching triples), exclusive validity intervals,
+observation references, classes, and provenance. Their `mechanical: true` and
+`agent_endorsed: false` labels distinguish them from authored beliefs. Claim,
+rank, and status remain the agent's; the kernel creates no replacement held
+belief. Repeated values extend observation evidence, and the next changed
+value closes the previous observed interval. A contradiction without an
+actual value creates no invented replacement. Matching triples continue to
+attach over these observed intervals after the original claim closes.
+The fold sorts world-observed time and observation ID, so late evidence
+reconstructs the same intervals; equal-time changes retain zero-duration
+entries and their distinct source references. A null end means no later
+changed value has been observed, not a guarantee about the future world.
+`valid_at` continues to filter the authored belief's original interval.
 `support_lost` propagates over `derived_from`, at most three hops and fifty
 affected records. These annotations never change rank or retract a claim.
 Unknown semantic direction remains unknown: attaching an action outcome does
@@ -100,9 +114,11 @@ unchangeable hierarchy or an unannounced default seeded during a query.
 
 ## Pattern transfer and complete session continuity
 
-`export_bundle` selects held beliefs at rank three or higher, active strategies,
+`export_bundle` selects held beliefs at rank three or higher, strategy items including failures,
 self-summary and promoted skills. It omits transcripts and world episodes.
-Evidence identifiers and compact provenance remain so a recipient can ask why.
+Evidence identifiers, measured injection scores and compact provenance remain so
+a recipient can ask why. An imported evidence-only reference returns that compact
+provenance with `content_available: false`; it never fabricates the donor's body.
 Every semantic delta and the manifest are checked; a world-held HMAC signs the
 bundle. Same-environment imports use that world key. Cross-environment imports
 require an explicitly configured trusted signing key; key values never appear
@@ -117,7 +133,9 @@ bundle. Round-trip tests compare full folds and exact histories.
 `promote_skill` requires a world-owned passing `skill_test` event for exact
 source and test hashes, with at least one executed test. It does not execute
 agent code in the world process. A harness or isolated runner must produce the
-real test evidence. Imported skills retain donor test provenance; import does
+real test evidence. The optional [isolated skill worker](skill-tests.md) performs
+these actual checks in a restricted Docker container when explicitly configured;
+the default deployment does not expose a Docker socket. Imported skills retain donor test provenance; import does
 not claim they were retested on the recipient machine.
 
 ## Persistent expectations and forecasts
@@ -125,6 +143,10 @@ not claim they were retested on the recipient machine.
 `ForecastService(world)` handles `expect` and `predict`. `expect` accepts
 `{state, cmp, value, p?, horizon?, resolver, about_action?, assumptions?}`.
 States use `world.*`, `ticket.*`, `ask.*`, `footprint.*`, `account.*` or `driver.*`.
+The production readers use authoritative spend/run state, scoped ticket outcomes,
+footprint readings, private account-state lookup and the actual life's driver.
+They do not expose account secrets or arbitrary service attributes. Human-resolved
+states are never automatically polled.
 The horizon is days or an ISO deadline, default fourteen and at most sixty days.
 Comparators are fixed code operations, never executable expressions.
 Human-resolved outcomes carry `grounded: false`.
@@ -141,7 +163,20 @@ and ticket events into addressable state. `recover()` starts the durable
 scheduler, `tick()` performs due checks and `aclose()` stops its worker. Pending
 jobs survive process reconstruction and run seal. They get a final attempt at
 horizon plus one day's grace, then an explicit expiry reason. Resolver errors
-remain distinct from misses and expiry.
+remain distinct from misses and expiry. A final fetch that finishes just after
+the deadline retains its actual observation time and scheduled grace time. Only
+a bounded delay, at most one registered poll interval or one hour, is accepted;
+late final outcomes stay outside headline calibration. A months-late scheduler
+expires the question without pretending to retrieve a historical outcome.
+`policy_identity(settings)` pins this resolver policy and the polling interval.
+
+World writes are replayed in trusted observed-time order, so earlier delayed
+evidence may append a corrected resolution without changing the original event.
+Conditional resolution waits for all ticket approvals; denied assumptions void
+the expectation. `notify_state_write(run_id=..., life_id=..., world_ref=...)`
+captures committed local values synchronously into a durable private queue,
+then schedules their observation. Multiple writes before the observer task runs
+remain distinct, including across resolver process reconstruction.
 
 ## Registered, audited reflection
 
@@ -152,6 +187,13 @@ separate calls tagged `model.reflect`; each has a conservative twenty-thousand
 byte input budget. The reflection share defaults to fifteen percent of the
 life/session cap. The companion runs only while idle, uses `model.reflector`,
 proposes at most ten records per cycle and cannot rerank or retract agent beliefs.
+Its context biases whole entities attached to currently open or accepted tickets.
+In the companion arm, formation measurements require an explicit agent
+confirmation on every included record. Ordinary queries still return the entire
+store, including ordinary unconfirmed agent assertions. Confirmation survives
+subsequent edits. `formation_records` and `formation_fold` report their inclusion
+rule and excluded counts. `export_formation_bundle` signs this projection directly,
+across every rank, for formation probes without invalidating a bundle signature.
 
 A trusted `metered_callback` receives keyword arguments `run_id`, `messages`,
 `tag`, `max_output_tokens`, `max_usd` and `purpose`. It must reserve the provider
@@ -178,11 +220,13 @@ Forecast questions can bind a real `median_binding` JSON resolver or trusted
 `median_reader`; the median is captured on each call with provenance. A static
 registered median is explicitly labelled pinned rather than a live observation.
 
-`beliefctl` is the thin JSON shell client for these same tools. Set
+`beliefctl` is the thin JSON/YAML shell client for these same tools. Set
 `WORLD_RUN_ID`, `WORLD_BASE_URL` and the scoped `WORLD_RUN_TOKEN`; it sends no
 researcher control credential. For example, `beliefctl about harbour`,
 `beliefctl history b_...` or `beliefctl revise b_... '{"rank": 2}'`. It requires
 the scoped token and preserves a nonzero exit status for a typed block.
+`beliefctl about harbour --format yaml` uses safe YAML serialization of the
+same response; changing the format never changes the underlying query.
 `validate_bundle` can check a donor before creating a destination run, avoiding
 an orphan destination if a signature, delta, timestamp or skill hash is invalid.
 
@@ -204,6 +248,37 @@ requests the same proposal. The agent must explicitly submit any accepted slots.
 Ambiguous or unsupported grammar gets no suggestion; no model call, truth
 decision, rank change, or semantic rewrite occurs. The registered
 `slot_suggester_policy_id="none"` arm disables proposals.
+
+## Measurements from exact recorded budget checkpoints
+
+`analysis.belief_checkpoints.belief_checkpoints(world, run_id)` derives folds at
+the first recorded ledger debit reaching ten, twenty-five, fifty and one hundred
+percent of the configured cap. Unreached checkpoints are unmeasured. Semantic
+version audit IDs and imported sequence boundaries, rather than tied timestamps
+or the final store, select the actual prefix. Later beliefs and post-seal evidence
+cannot leak into earlier checkpoints. Legacy imports without an exact boundary
+remain unmeasured.
+
+The helper reports preservation violations, grounded expectation rank bins with
+at least thirty resolutions each, and revision latency in actions and dollars.
+An explicit delivered `beliefs` query is the available read-observation surface;
+private workspace reads cannot be inferred. Revision counts distinguish new
+non-self evidence references from revisions without such a new reference; this
+code proxy makes no causal evidence-driven claim. Retractions remain revisions
+of their prior record. Companion revisions require confirmation before the
+observation or edit. Both overall and triple-only counts are available.
+
+`analysis.formation.FormationRunner` separately samples up to two hundred prose
+records deterministically, uses budgeted cross-family judge calls on verified
+measurement children, reports task-specific kappa, and keeps uncalibrated labels
+exploratory. Its canonical-claim Jaccard and tied-rank Spearman calculations apply
+the same companion inclusion rule to each seed. Latency is withheld below fifty
+percent triple coverage. No judge is asked to decide whether a belief is true.
+
+Graph walks, belief full-text search, RDF export and a consistency oracle are
+explicitly deferred by the design. Real model registrations, calibration labels,
+cohorts, private canary ownership and external observations must still be supplied
+for actual experiments; local tests do not substitute for those measurements.
 
 Tests exercise these algorithms with local transports and metered model
 fixtures. They do not execute the multi-day E0/R1 studies or establish character

@@ -31,6 +31,27 @@ def rpc(method, params=None, request_id=1):
     return {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}}
 
 
+def test_claude_fresh_context_attrition_uses_stream_events(tmp_path):
+    path = tmp_path / "transcript.jsonl"
+    path.write_text(
+        json.dumps({"type": "system", "subtype": "init"})
+        + "\n"
+        + json.dumps({"type": "system", "subtype": "compact_boundary"})
+        + "\n"
+        + json.dumps({"type": "assistant", "message": {"id": "actual-message", "content": []}})
+        + "\n"
+    )
+    assert claude_run.transcript_attrition(path) == {
+        "compactions": 1,
+        "resumed_context_messages": 0,
+        "resumed_context_bytes": 0,
+        "transcript_malformed_lines": 0,
+    }
+    with path.open("a") as stream:
+        stream.write("a truncated JSON event\n")
+    assert claude_run.transcript_attrition(path)["compactions"] is None
+
+
 @pytest.mark.asyncio
 async def test_mcp_negotiation_and_notifications():
     async with httpx.AsyncClient() as client:
@@ -316,6 +337,9 @@ def test_claude_auth_is_injected_at_runtime_without_researcher_credentials(tmp_p
             "WORLD_RUN_TOKEN": "run-test-capability",
             "WORLD_CONTROL_TOKEN": "control-test-secret",
             "WORLD_ANTHROPIC_API_KEY": "provider-test-secret",
+            "WORLD_PAYMENT_API_KEY": "payment-test-secret",
+            "WORLD_INBOUND_WEBHOOK_SECRET": "mail-test-secret",
+            "AWS_SECRET_ACCESS_KEY": "ambient-cloud-secret",
             "PATH": "/bin",
         },
     )
@@ -325,6 +349,9 @@ def test_claude_auth_is_injected_at_runtime_without_researcher_credentials(tmp_p
     )
     assert "WORLD_CONTROL_TOKEN" not in environment
     assert "WORLD_ANTHROPIC_API_KEY" not in environment
+    assert "WORLD_PAYMENT_API_KEY" not in environment
+    assert "WORLD_INBOUND_WEBHOOK_SECRET" not in environment
+    assert "AWS_SECRET_ACCESS_KEY" not in environment
     assert "run-test-capability" not in (tmp_path / "world.settings.json").read_text()
 
 
@@ -413,7 +440,13 @@ async def test_reference_loop_uses_lane_and_runs_native_parallel_tools():
             world_client=wc,
             lane_client=lc,
         )
-    assert result == {"run_id": "r_one", "steps": 2, "reason": "agent_finished", "output": "Done."}
+    assert {key: result[key] for key in ("run_id", "steps", "reason", "output")} == {
+        "run_id": "r_one",
+        "steps": 2,
+        "reason": "agent_finished",
+        "output": "Done.",
+    }
+    assert result["messages"][-1]["content"] == "Done."
     assert active == 2
     assert len(model_calls) == 2
     assert calls[-1][0] == "/v1/beam-up"
@@ -445,6 +478,89 @@ async def test_reference_loop_seals_when_provider_fails():
         with pytest.raises(httpx.HTTPStatusError):
             await reference.run_reference({}, "fixture", world_client=wc, lane_client=lc)
     assert sealed == [{"run_id": "r_one", "reason": "harness_stopped"}]
+
+
+async def test_reference_existing_life_context_sleeps_without_new_run_or_second_model_call():
+    calls, models = [], []
+    captured = [
+        {"role": "system", "content": "Old session briefing"},
+        {"role": "user", "content": "Actual prior goal"},
+        {"role": "assistant", "content": "Actual prior answer"},
+    ]
+    refs = [{"run_id": "r_source", "path": "harness-context.json", "hash": "sha256:" + "1" * 64}]
+
+    def world_handler(request):
+        calls.append(request.url.path)
+        assert request.headers["authorization"] == "Bearer scoped-test-capability"
+        if request.url.path == "/v1/status":
+            return httpx.Response(200, json={"state": "running"})
+        assert request.url.path == "/v1/act"
+        assert json.loads(request.content)["tool"] == "sleep"
+        return httpx.Response(200, json={"kind": "silence", "action_id": "a_sleep"})
+
+    def lane_handler(request):
+        body = json.loads(request.content)
+        models.append(body)
+        assert body["messages"] == [
+            {"role": "system", "content": "Current exact briefing"},
+            *captured[1:],
+        ]
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_sleep",
+                                    "type": "function",
+                                    "function": {"name": "sleep", "arguments": "{}"},
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
+        )
+
+    async with (
+        httpx.AsyncClient(
+            base_url="http://world", transport=httpx.MockTransport(world_handler)
+        ) as wc,
+        httpx.AsyncClient(
+            base_url="http://lane/", transport=httpx.MockTransport(lane_handler)
+        ) as lc,
+    ):
+        result = await reference.run_reference(
+            {"goal": "Actual prior goal"},
+            "fixture",
+            run_info={
+                "run_id": "r_existing",
+                "run_token": "scoped-test-capability",
+                "preamble": "Current exact briefing",
+                "manifest": {"tools": [{"name": "sleep", "inputSchema": {"type": "object"}}]},
+            },
+            initial_messages=captured,
+            context_refs=refs,
+            world_client=wc,
+            lane_client=lc,
+        )
+    assert calls == ["/v1/status", "/v1/act"] and len(models) == 1
+    assert result["reason"] == "sleep" and result["context_refs"] == refs
+    assert result["messages"][-1]["tool_call_id"] == "call_sleep"
+    assert captured[0]["content"] == "Old session briefing"
+
+
+async def test_reference_resume_requires_actual_capture_references():
+    with pytest.raises(ValueError, match="source capture references"):
+        await reference.run_reference(
+            {},
+            "fixture",
+            initial_messages=[{"role": "assistant", "content": "Cannot invent continuity"}],
+        )
 
 
 @pytest.mark.asyncio

@@ -168,3 +168,32 @@ def test_invalid_prereg_array_and_implicit_execution_fail_before_network(tmp_pat
         assert main(["shakedown", "execute"], client=client) == 1
     result = capsys.readouterr()
     assert "JSON object" in result.err and "positive --budget" in result.err
+
+
+def test_report_format_prints_raw_document_or_exclusively_saves_bytes(tmp_path, capsys):
+    def handler(request):
+        assert request.url.path == "/v1/report" and request.url.params["run_id"] == "r_report"
+        form = request.url.params.get("format", "json")
+        return httpx.Response(
+            200,
+            content=b"<p>Actual assembled report</p>"
+            if form == "html"
+            else b"column,value\nG,unmeasured\n",
+        )
+
+    target = tmp_path / "report.csv"
+    with httpx.Client(
+        base_url="http://127.0.0.1:7777", transport=httpx.MockTransport(handler)
+    ) as client:
+        assert main(["report", "r_report", "--format", "html"], client=client) == 0
+        assert capsys.readouterr().out == "<p>Actual assembled report</p>\n"
+        assert (
+            main(["report", "r_report", "--format", "csv", "--output", str(target)], client=client)
+            == 0
+        )
+        assert target.read_bytes() == b"column,value\nG,unmeasured\n"
+        assert (
+            main(["report", "r_report", "--format", "csv", "--output", str(target)], client=client)
+            == 1
+        )
+        assert "already exists" in capsys.readouterr().err

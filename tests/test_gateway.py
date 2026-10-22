@@ -61,8 +61,8 @@ async def test_fetch_archive_extract_and_replay(tmp_path):
     root = tmp_path / "runs" / "r_source"
     with (root / "archive.warc.gz").open("rb") as stream:
         records = list(ArchiveIterator(stream))
-        assert len(records) == 3  # robots, redirect, resource
-        assert all(record.rec_type == "response" for record in records)
+        assert len(records) == 6  # paired requests/responses: robots, redirect, resource
+        assert [record.rec_type for record in records] == ["request", "response"] * 3
     assert len(json.loads((root / "archive.har").read_text())["log"]["entries"]) == 3
     text = extract(tmp_path, "r_source", reply["handle"], "text")
     assert "Fact" in text["data"] and "unwanted()" not in text["data"]

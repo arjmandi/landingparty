@@ -20,6 +20,25 @@ reachability while preventing new ordinary contact.
 machine marker. A human persona claim or agent-authored disclosure marker is
 rejected. The signing key stays in the private data directory with mode 0600.
 
+The optional public listener (`worldd --public-port 7779`) serves only the
+disclosed homepage and incident form. `/identities/{identity_id}` and its
+`/incident` child work directly; the identity's registered HTTPS host/path also
+resolves exactly when a researcher-owned reverse proxy publishes it. The page
+includes a signed actual identity/run/life disclosure and stays available with
+an ended notice after life end. Operating that HTTPS hostname remains an
+operator responsibility.
+
+Unauthenticated reports accept only bounded `report` and optional `contact`
+text, with peer-address and identity rate limits. They create private,
+unverified receipts and cannot select a platform, account or revocation action.
+The trusted console lists pending reports for the selected run's identity. A
+responsible human must accept and select the affected platform before an
+incident withdraws authority, or dismiss the report. Triage is idempotent; an
+interrupted external revocation is held for reconciliation. Raw report/contact
+text expires after 90 days; immutable incident records contain the report
+reference and body hash, not that private text. The public listener has no
+researcher-control or agent-tool routes.
+
 ## Mail and social adapters
 
 `CommunicationsService.handle` supports `send`, `post`, `reply`, `follow`, and
@@ -94,6 +113,20 @@ adapters remain unmeasured. `read_life(life_id, checkpoint=30|90)` supplies
 idempotent afterlife readings to the life scheduler. A durable private
 footprint hash audit receives late observations without changing a sealed run.
 
+`register_probe_adapter` installs a durable `RegisteredHTTPProbe` for a fixed
+source origin/path, distinct probe identity, and an explicitly supplied proxy
+route. There is no primary or ambient transport fallback. Native APIs use a
+separate `WORLD_*PROBE_*` read credential; human public-page probes never
+authenticate. All requests are GETs through gateway policy and secure DNS;
+provider bypasses and agent leases are unavailable. Results come from one
+configured RFC6901 JSON pointer or CSS selector, with finite numeric validation
+and declared own-view subtraction. Missing selectors/status failures remain
+unmeasured. Raw responses and WARC live in sealed private probe episodes,
+including after the source session sealed. Only the numeric reading and its
+capture reference enter the footprint ledger. The configured route is audited;
+actual distinct public egress still needs operator measurement, and its absence
+is explicitly unmeasured.
+
 Rollback requires a configured adapter and positive platform confirmation.
 Each supported reversible write has a world-owned rollback reference. A
 rollback after the original run ended needs an active operator run for the same
@@ -101,6 +134,24 @@ identity via `control_run_id`; it never reopens the original hash chain.
 `incident` records a human owner and revokes the affected account when a
 revocation adapter is available. Its result reports whether revocation was
 confirmed rather than assuming it happened.
+
+Incidents withdraw matching same-life platform grants, revoke every matching
+identity's platform account and issued lease, and anchor the actual incident
+reference in the life journal. A supplied account alias does not permit a
+second alias on the same platform to evade that withdrawal.
+
+`derived(run_id=...)` or `derived(life_id=...)` requires sealed source sessions
+and returns actual counterparty edges, reciprocal message counts, unsolicited
+independent inbound counts, observed week persistence, uptake readings, daily
+events, and action/domain allocation with source references. It does not infer
+non-instrumental intent from a domain visit: that column remains unmeasured
+until a calibrated content/goal labeller supplies evidence.
+
+Declared follower/inbound life drivers update from the latest actual finite
+numeric reading per platform/external object. Repeated probe snapshots replace
+earlier values rather than accumulating. Missing or nonnumeric measurements
+do not become zero. Driver updates cite their footprint reading; probe counts
+can drive state but remain excluded from grounded research columns.
 
 ## Paper book and sponsor income
 
@@ -149,20 +200,33 @@ and `parse_document(handle, pages?, provider?, quote_id?)` first return quotes.
 Repeat the same source/options with the selected `quote_id` to accept its
 exact price. A quote binds the bytes' hash, operation, provider, options,
 measured duration or page count, unit price, and expiry. Audio duration comes
-from the actual media, not an agent-supplied number. Pages are one-based.
+from the actual media, not an agent-supplied number. WAV data must contain its
+declared frames; other audio is measured from decoded sample counts through
+pipe-only `ffprobe`. This works for nonseekable MP3 streams whose duration
+header is absent, and cannot open nested source URLs. Pages are one-based.
 Document extraction and media inspection run outside the async event loop;
 PyMuPDF operations are serialized because its native parser is not thread-safe.
 
-The local PDF parser uses PyMuPDF at an explicitly declared zero price. Vendor
-audio adapters implement OpenAI whisper-1, Deepgram nova-3, and AssemblyAI's
-upload/transcription APIs. Only configured vendors appear in the quote list:
+The local PDF parser uses PyMuPDF at an explicitly declared zero price. Priced
+OCR uses Mistral's pinned `mistral-ocr-2505` model at `/v1/ocr`, with the exact
+quoted PDF bytes and selected pages. `WORLD_MISTRAL_API_KEY` enables submission;
+`WORLD_MISTRAL_OCR_USD_PER_PAGE` declares the price (default $0.002/page).
+Returned model, page indices and `usage_info.pages_processed` must match the
+accepted quote. Unexpected usage leaves the reservation held and the run
+tainted for reconciliation rather than trusting a vendor-supplied price.
+
+Vendor audio adapters implement OpenAI whisper-1, Deepgram nova-3, and AssemblyAI's
+upload/transcription APIs. All three declared quotes appear, with availability
+reported separately; selecting an unavailable provider refuses before any hold.
 `WORLD_TRANSCRIBE_OPENAI_KEY`, `WORLD_DEEPGRAM_API_KEY`, and
 `WORLD_ASSEMBLYAI_API_KEY` name their secure bindings. Declared per-minute
 rates can be pinned with `WORLD_OPENAI_USD_PER_MINUTE`,
 `WORLD_DEEPGRAM_USD_PER_MINUTE`, and `WORLD_ASSEMBLYAI_USD_PER_MINUTE`.
 The initial rates come from the design's range and require current vendor
-verification before research use. `provider_rates` exposes metadata for the
-version tuple; no credential value is included.
+verification before research use. `pricing_identity()` supplies the actual
+provider/model/rate map to the central price-table identity; each run freezes
+that map. Price/model drift is refused before any reservation. Credential
+availability is excluded from price identity. No credential value is included.
 
 The provider boundary verifies a held quote reservation and the registered
 HTTPS API endpoint, then uses a private gateway child archive. Successful

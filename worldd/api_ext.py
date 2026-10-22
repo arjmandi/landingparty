@@ -15,13 +15,15 @@ def create_service_router(world):
             raise ValueError(f"Service {name} is not installed")
         return world.services[name]
 
-    async def call(name, method, *args, **kwargs):
-        target = service(name)
+    async def call(service_name, method_name, /, *args, **kwargs):
+        target = service(service_name)
         try:
-            inspect.signature(getattr(target, method)).bind(*args, **kwargs)
+            inspect.signature(getattr(target, method_name)).bind(*args, **kwargs)
         except (TypeError, AttributeError) as error:
-            raise ValueError(f"Invalid {name}/{method} control request: {error}") from None
-        return await invoke(target, method, *args, **kwargs)
+            raise ValueError(
+                f"Invalid {service_name}/{method_name} control request: {error}"
+            ) from None
+        return await invoke(target, method_name, *args, **kwargs)
 
     @router.post("/v1/lives", status_code=201)
     async def create_life(body: dict):
@@ -60,6 +62,26 @@ def create_service_router(world):
     async def t0(life_id: str, body: dict):
         return await call("lives", "record_t0", life_id, body)
 
+    @router.post("/v1/lives/{life_id}/runner", status_code=201)
+    async def plan_life_runner(life_id: str, body: dict):
+        return await call("studies", "plan_life", life_id, body.get("cell", body))
+
+    @router.get("/v1/life-runners")
+    async def life_runners(life_id: str | None = None):
+        return {"runners": await call("studies", "list_life_runners", life_id)}
+
+    @router.get("/v1/life-runners/{runner_id}")
+    async def life_runner(runner_id: str):
+        return await call("studies", "get_life_runner", runner_id)
+
+    @router.post("/v1/life-runners/{runner_id}/execute")
+    async def execute_life_runner(runner_id: str, body: dict):
+        return await call("studies", "execute_life", runner_id, **body)
+
+    @router.post("/v1/life-runners/{runner_id}/pause")
+    async def pause_life_runner(runner_id: str, body: dict):
+        return await call("studies", "pause_life", runner_id, **body)
+
     @router.post("/v1/run/{run_id}/activate")
     async def activate(run_id: str):
         return world.activate_run(run_id)
@@ -68,6 +90,22 @@ def create_service_router(world):
     async def preflight(body: dict):
         # Namespace executors are supplied only by trusted deployment code, never JSON shell commands.
         return await call("preflight", "run", **body)
+
+    @router.post("/v1/preflight/bind")
+    async def bind_preflight(body: dict):
+        return await call("preflight", "bind_container", **body)
+
+    @router.post("/v1/preflight/observer/challenge")
+    async def preflight_host_challenge(body: dict):
+        return await call("preflight", "host_challenge", **body)
+
+    @router.post("/v1/preflight/observer/submit")
+    async def preflight_host_submit(body: dict):
+        return await call("preflight", "host_submit", **body)
+
+    @router.post("/v1/preflight/observe")
+    async def preflight_observe_sources(body: dict):
+        return await call("preflight", "observe_sources", **body)
 
     @router.post("/v1/series", status_code=201)
     async def series(body: dict):
@@ -94,6 +132,10 @@ def create_service_router(world):
     @router.post("/v1/versions", status_code=201)
     async def version(body: dict):
         return await call("registry", "register_version", body["kind"], body["value"])
+
+    @router.get("/v1/versions/{version_id}")
+    async def get_version(version_id: str):
+        return await call("registry", "get_version", version_id)
 
     @router.post("/v1/gates", status_code=201)
     async def gate(body: dict):
@@ -148,6 +190,22 @@ def create_service_router(world):
     async def answer(ticket_id: str, body: dict):
         return await call("asks", "answer", ticket_id, **body)
 
+    @router.get("/v1/asks/standing")
+    async def standing_rejections(run_id: str):
+        return await call("asks", "standing_rejections", run_id)
+
+    @router.post("/v1/asks/standing/{rule_id}/revoke")
+    async def revoke_standing(rule_id: str, body: dict):
+        return await call("asks", "revoke_standing", rule_id, **body)
+
+    @router.get("/v1/console/state")
+    async def console_state(run_id: str, since: int = 0):
+        return await call("asks", "console_state", run_id, since=since)
+
+    @router.post("/v1/contamination")
+    async def contamination(body: dict):
+        return await call("asks", "record_contamination", **body)
+
     @router.post("/v1/asks/{ticket_id}/touch")
     async def touch(ticket_id: str, body: dict):
         return await call("asks", "touch", ticket_id, active=body.get("active", True))
@@ -178,6 +236,10 @@ def create_service_router(world):
     @router.post("/v1/vault/accounts/{alias}/revoke")
     async def revoke(alias: str, body: dict):
         return await call("vault", "revoke", alias, reason=body.get("reason", "operator_revoked"))
+
+    @router.post("/v1/vault/accounts/{alias}/scope")
+    async def account_scope(alias: str, body: dict):
+        return await call("vault", "update_scope", alias, **body)
 
     @router.post("/v1/terms")
     async def terms(body: dict):
@@ -291,6 +353,10 @@ def create_service_router(world):
     async def mandate(body: dict):
         return await call("payments", "create", **body)
 
+    @router.post("/v1/mandates/request", status_code=201)
+    async def mandate_request(body: dict):
+        return await call("payments", "request", **body)
+
     @router.get("/v1/mandates")
     async def mandates(run_id: str):
         return {"mandates": await call("payments", "list_for_run", run_id)}
@@ -339,6 +405,14 @@ def create_service_router(world):
     async def incident(body: dict):
         return await call("footprint", "incident", **body)
 
+    @router.get("/v1/public-incident-reports")
+    async def public_incident_reports(state: str = "pending", run_id: str | None = None):
+        return {"reports": await call("incident_reports", "reports", state=state, run_id=run_id)}
+
+    @router.post("/v1/public-incident-reports/{report_id}/triage")
+    async def triage_public_incident(report_id: str, body: dict):
+        return await call("incident_reports", "triage", report_id, **body)
+
     @router.post("/v1/footprint/readings", status_code=201)
     async def reading(body: dict):
         return await call("footprint", "add_reading", **body)
@@ -347,9 +421,17 @@ def create_service_router(world):
     async def footprint_probe(body: dict):
         return await call("footprint", "schedule_probe", **body)
 
+    @router.post("/v1/footprint/probe-adapters", status_code=201)
+    async def footprint_probe_adapter(body: dict):
+        return await call("footprint", "register_probe_adapter", **body)
+
     @router.post("/v1/footprint/probes/tick")
     async def footprint_probe_tick(body: dict):
         return await call("footprint", "probe_due", **body)
+
+    @router.delete("/v1/footprint/probes/{target_id}")
+    async def footprint_probe_cancel(target_id: str):
+        return await call("footprint", "cancel_probe", target_id)
 
     @router.post("/v1/rollback")
     async def rollback(body: dict):
@@ -358,6 +440,28 @@ def create_service_router(world):
     @router.post("/v1/debrief")
     async def debrief(body: dict):
         return await call("pipeline", "run", body["run_id"], options=body.get("options", {}))
+
+    @router.post("/v1/judge-canaries", status_code=201)
+    async def configure_judge_canary(body: dict):
+        return await call("judge_canaries", "register", body["source_run_id"], body["config"])
+
+    @router.get("/v1/judge-canaries")
+    async def judge_canaries(source_run_id: str | None = None):
+        return {"schedules": await call("judge_canaries", "list", source_run_id)}
+
+    @router.get("/v1/judge-canaries/{schedule_id}")
+    async def judge_canary(schedule_id: str):
+        return await call("judge_canaries", "get", schedule_id)
+
+    @router.post("/v1/judge-canaries/{schedule_id}/enabled")
+    async def enable_judge_canary(schedule_id: str, body: dict):
+        if type(body.get("enabled")) is not bool:
+            raise ValueError("enabled must be a boolean")
+        return await call("judge_canaries", "set_enabled", schedule_id, body["enabled"])
+
+    @router.post("/v1/judge-canaries/tick")
+    async def tick_judge_canaries():
+        return await call("judge_canaries", "run_due")
 
     @router.get("/v1/beliefs/export")
     async def belief_export(run_id: str):
@@ -393,9 +497,23 @@ def create_service_router(world):
     async def study(study_id: str):
         return await call("studies", "get", study_id)
 
+    @router.get("/v1/studies/{study_id}/report")
+    async def study_report(study_id: str):
+        return world.study_report(study_id)
+
     @router.post("/v1/studies/{study_id}/execute")
     async def study_execute(study_id: str, body: dict):
         return await call("studies", "execute", study_id, **body)
+
+    @router.post("/v1/studies/{study_id}/pause")
+    async def pause_study(study_id: str, body: dict):
+        return await call("studies", "pause_study", study_id, **body)
+
+    @router.post("/v1/studies/{study_id}/readiness")
+    async def study_readiness(study_id: str, body: dict):
+        from analysis.programme import PilotReadiness
+
+        return PilotReadiness(world).evaluate(study_id, **body)
 
     @router.post("/v1/t0/measure")
     async def measure_t0(body: dict):

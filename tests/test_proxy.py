@@ -209,6 +209,50 @@ async def test_browser_proxy_checks_scoped_authorization_and_private_cookie_chan
         world.store.close()
 
 
+async def test_browser_proxy_preserves_challenges_and_repeated_cookies_with_trusted_marker(
+    tmp_path,
+):
+    def upstream(request):
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        return httpx.Response(
+            403,
+            text='<html>captcha<input type="password"></html>',
+            headers=[
+                ("content-type", "text/html"),
+                ("set-cookie", "first=private-one; Secure"),
+                ("set-cookie", "second=private-two; Secure"),
+                ("x-world-response-block-type", "spoofed-upstream-marker"),
+                ("connection", "x-remove-me"),
+                ("x-remove-me", "hop-only"),
+            ],
+        )
+
+    world, proxy, _ = await proxy_fixture(tmp_path, upstream)
+
+    class Browser:
+        async def authorize_network_request(self, *args, **kwargs):
+            return {"allow": True}
+
+    world.services["browser"] = Browser()
+    binding = proxy.bind_browser(world.run_id, "s_1")
+    try:
+        async with client_for(binding) as client:
+            response = await client.get("https://example.com/challenge")
+        assert response.status_code == 403 and "captcha" in response.text
+        assert response.headers["x-world-response-block-type"] == "captcha"
+        assert response.headers.get_list("set-cookie") == [
+            "first=private-one; Secure",
+            "second=private-two; Secure",
+        ]
+        assert "x-remove-me" not in response.headers
+        assert not list((tmp_path / "runs" / world.run_id / "world/fetched").glob("*"))
+        assert "private-one" not in (tmp_path / "runs" / world.run_id / "archive.har").read_text()
+    finally:
+        await proxy.aclose()
+        world.store.close()
+
+
 def test_ca_persistence_and_private_key_permissions(tmp_path):
     first = CertificateAuthority(tmp_path / "ca")
     second = CertificateAuthority(tmp_path / "ca")

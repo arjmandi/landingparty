@@ -7,7 +7,7 @@ services:
     build:
       context: ..
       target: world
-    command: ["--host", "0.0.0.0", "--port", "7777", "--lane-port", "8081"]
+    command: ["--host", "0.0.0.0", "--port", "7777", "--lane-port", "8081", "--public-port", "7779"]
     environment:
       WORLD_DATA_DIR: /data
       WORLD_WORK_GROUP_WRITABLE: "1"
@@ -28,6 +28,7 @@ services:
         ipv4_address: 172.30.77.2
     ports:
       - "127.0.0.1:7777:7777"
+      - "127.0.0.1:7779:7779"
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
@@ -38,6 +39,9 @@ services:
       timeout: 3s
       retries: 12
   fence:
+    labels:
+      landing-party.run_id: ${WORLD_RUN_ID:-unconfigured}
+      landing-party.role: fence
     image: landing-party-agent:0.1
     build:
       context: ..
@@ -61,6 +65,9 @@ services:
       timeout: 2s
       retries: 10
   agent:
+    labels:
+      landing-party.run_id: ${WORLD_RUN_ID:-unconfigured}
+      landing-party.role: agent
     image: landing-party-agent:0.1
     network_mode: service:fence
     command: [sleep, infinity]

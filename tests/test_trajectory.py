@@ -3,6 +3,7 @@ import math
 import pytest
 
 from analysis.trajectory import (
+    blocked_response_metrics,
     cost_performance_curve,
     decision_divergence,
     open_endedness,
@@ -11,6 +12,62 @@ from analysis.trajectory import (
     trajectory_metrics,
     verifiability_accrual,
 )
+
+
+def test_block_responses_preserve_actual_coordinates_and_unknown_classification():
+    params = {"url": "https://example.org/a"}
+    rows = [
+        {"kind": "ledger_debit", "seq": 1, "amount_nano": 250000000},
+        {"kind": "action", "seq": 2, "action_id": "a1", "tool": "fetch", "params": params},
+        {
+            "kind": "outcome",
+            "seq": 3,
+            "action_id": "a1",
+            "reply": {"kind": "blocked", "type": "robots"},
+        },
+        {
+            "kind": "event_pushed",
+            "seq": 4,
+            "event": {
+                "type": "job_done",
+                "action_id": "a1",
+                "reply": {"kind": "blocked", "type": "robots"},
+            },
+        },
+        {"kind": "action", "seq": 5, "action_id": "a2", "tool": "fetch", "params": params},
+        {
+            "kind": "outcome",
+            "seq": 6,
+            "action_id": "a2",
+            "reply": {"kind": "blocked", "type": "robots"},
+        },
+        {"kind": "action", "seq": 7, "action_id": "a3", "tool": "wait", "params": {"seconds": 0}},
+        {
+            "kind": "action",
+            "seq": 8,
+            "action_id": "a4",
+            "tool": "fetch_many",
+            "params": {"urls": ["https://other.test/a"]},
+        },
+        {
+            "kind": "event_pushed",
+            "seq": 9,
+            "event": {
+                "type": "job_done",
+                "action_id": "a4",
+                "index": 0,
+                "reply": {"kind": "blocked", "type": "policy", "domain_class": "denied"},
+            },
+        },
+    ]
+    result = blocked_response_metrics(rows)
+    assert len(result["items"]) == 3
+    assert result["responses"] == {"repetition": 1, "changed_request": 1, "unmeasured": 1}
+    assert result["by_domain_class"] == {"unmeasured": 2, "denied": 1}
+    assert result["items"][0]["usd"] == 0.25
+    assert result["items"][0]["world_actions"] == 1
+    assert result["items"][0]["domain"] == "example.org"
+    assert result["items"][-1]["domain"] == "other.test"
 
 
 def test_trajectory_uses_actual_ledger_and_counts_revisits_without_new_discovery():
@@ -60,6 +117,24 @@ def test_cost_curve_keeps_missing_checkpoints_missing_and_reports_both_axes():
     assert curve["world_actions"]["slope_log_cost"] == pytest.approx(0.6 / math.log(2))
     with pytest.raises(ValueError, match="reference"):
         cost_performance_curve([{**point, "observation_ref": None}])
+
+
+def test_vertical_cost_changes_use_only_the_actual_latest_observation_when_declared():
+    points = [
+        {"usd": 1, "world_actions": 1, "score": 0, "observation_ref": "first"},
+        {"usd": 2, "world_actions": 1, "score": 1, "observation_ref": "later"},
+        {"usd": 4, "world_actions": 2, "score": 2, "observation_ref": "last"},
+    ]
+    with pytest.raises(ValueError, match="Duplicate"):
+        cost_performance_curve(points)
+    curve = cost_performance_curve(points, duplicate_axis_policy="last_observed")
+    assert curve["usd"]["auc_log_cost"] == pytest.approx(2 * math.log(2))
+    assert curve["world_actions"]["auc_log_cost"] == pytest.approx(1.5 * math.log(2))
+    assert curve["world_actions"]["observations"][0]["observation_ref"] == "later"
+    assert curve["world_actions"]["duplicate_observations"] == 1
+    assert len(curve["checkpoints"]) == 3
+    with pytest.raises(ValueError, match="chronological"):
+        cost_performance_curve(list(reversed(points)), duplicate_axis_policy="last_observed")
 
 
 def test_decision_copy_requires_all_draws_and_matched_observations():

@@ -377,60 +377,104 @@ class ExperimentRunner:
         for cell in cells:
             seeds = cell.get("seeds", prereg.get("seeds", range(prereg.get("seed_count", 5))))
             schedules.append(list(seeds))
+        if any(
+            not schedule
+            or any(not isinstance(seed, int) or isinstance(seed, bool) for seed in schedule)
+            or len(schedule) != len(set(schedule))
+            for schedule in schedules
+        ):
+            raise ValueError("each cell requires actual unique integer seed executions")
         rows = []
         reference_tuples = {}
         stopped = None
-        for round_index in range(max(map(len, schedules))):
-            for cell, schedule in zip(cells, schedules, strict=True):
-                if round_index >= len(schedule):
-                    continue
-                config = dict(cell["config"], seed=schedule[round_index])
-                registered_series = cell.get("series_id", series_id)
-                if registered_series:
-                    config["series_id"] = registered_series
-                created = self.world.create_run(RunConfig.model_validate(config))
-                if inspect.isawaitable(created):
-                    created = await created
-                run_id = created["run_id"]
-                row = {
-                    "run_id": run_id,
-                    "cell": cell.get("cell_id"),
-                    "seed": schedule[round_index],
-                    "status": "started",
-                }
-                rows.append(row)
-                current_tuple = created.get("tuple", {})
-                identity = registered_series or cell.get("cell_id")
-                reference_tuple = reference_tuples.setdefault(identity, current_tuple)
-                mismatch = [
-                    key
-                    for key in reference_tuple
-                    if key != "archive_id" and reference_tuple[key] != current_tuple.get(key)
-                ]
-                if mismatch:
-                    stopped = "tuple mismatch: " + ", ".join(mismatch)
+        execution = [
+            (cell, schedule[round_index])
+            for round_index in range(max(map(len, schedules)))
+            for cell, schedule in zip(cells, schedules, strict=True)
+            if round_index < len(schedule)
+        ]
+        execution_schedule = getattr(self.world, "execution_schedule", None)
+        if execution_schedule:
+            try:
+                execution = execution_schedule(cells, schedules)
+                if inspect.isawaitable(execution):
+                    execution = await execution
+            except Exception as error:  # noqa: BLE001 -- no future execution is invented when a dependency graph is invalid
+                stopped = "execution schedule failed: " + type(error).__name__
+                execution = []
+        for cell, seed in execution:
+            resolve_cell = getattr(self.world, "resolve_cell", None)
+            if resolve_cell:
+                try:
+                    resolved = resolve_cell(cell, seed)
+                    if inspect.isawaitable(resolved):
+                        resolved = await resolved
+                    if not isinstance(resolved, dict) or resolved.get("cell_id") != cell.get(
+                        "cell_id"
+                    ):
+                        raise ValueError(
+                            "dependency resolution cannot reassign the registered cell"
+                        )
+                    cell = resolved
+                except Exception as error:  # noqa: BLE001 -- preserve started casualties when a later dependency cannot resolve
+                    stopped = "cell dependency resolution failed: " + type(error).__name__
+                    break
+            config = dict(cell["config"], seed=seed)
+            registered_series = cell.get("series_id", series_id)
+            if registered_series:
+                config["series_id"] = registered_series
+            created = self.world.create_run(RunConfig.model_validate(config))
+            if inspect.isawaitable(created):
+                created = await created
+            run_id = created["run_id"]
+            row = {
+                "run_id": run_id,
+                "cell": cell.get("cell_id"),
+                "seed": seed,
+                "status": "started",
+            }
+            rows.append(row)
+            record_started = getattr(self.world, "record_started", None)
+            if record_started:
+                try:
+                    recorded = record_started(created, cell)
+                    if inspect.isawaitable(recorded):
+                        await recorded
+                except Exception as error:  # noqa: BLE001 -- registration failures retain the started casualty
+                    stopped = "execution registration failed: " + type(error).__name__
                     row.update(status="stopped", reason=stopped)
                     await self.world.end_run(run_id, reason="world_fault", truncated=True)
                     break
-                try:
-                    outcome = self.run_harness(created, cell)
-                    if inspect.isawaitable(outcome):
-                        outcome = await outcome
-                    row.update(status="completed", result=outcome)
-                    await self.world.end_run(run_id, reason="harness_stopped")
-                    if self.pipeline:
-                        row["analysis"] = await self.pipeline.run(
-                            run_id, options=cell.get("analysis_options", {})
-                        )
-                except asyncio.CancelledError:
-                    row.update(status="cancelled", reason="experiment cancelled")
-                    await self.world.end_run(run_id, reason="operator_stop", truncated=True)
-                    raise
-                except Exception as error:  # noqa: BLE001 -- preserve attrition for arbitrary harness failures
-                    row.update(status="failed", reason=type(error).__name__)
-                    await self.world.end_run(run_id, reason="world_fault", truncated=True)
-            if stopped:
+            current_tuple = created.get("tuple", {})
+            identity = created.get("series_id") or registered_series or cell.get("cell_id")
+            reference_tuple = reference_tuples.setdefault(identity, current_tuple)
+            mismatch = [
+                key
+                for key in reference_tuple
+                if key != "archive_id" and reference_tuple[key] != current_tuple.get(key)
+            ]
+            if mismatch:
+                stopped = "tuple mismatch: " + ", ".join(mismatch)
+                row.update(status="stopped", reason=stopped)
+                await self.world.end_run(run_id, reason="world_fault", truncated=True)
                 break
+            try:
+                outcome = self.run_harness(created, cell)
+                if inspect.isawaitable(outcome):
+                    outcome = await outcome
+                row.update(status="completed", result=outcome)
+                await self.world.end_run(run_id, reason="harness_stopped")
+                if self.pipeline:
+                    row["analysis"] = await self.pipeline.run(
+                        run_id, options=cell.get("analysis_options", {})
+                    )
+            except asyncio.CancelledError:
+                row.update(status="cancelled", reason="experiment cancelled")
+                await self.world.end_run(run_id, reason="operator_stop", truncated=True)
+                raise
+            except Exception as error:  # noqa: BLE001 -- preserve attrition for arbitrary harness failures
+                row.update(status="failed", reason=type(error).__name__)
+                await self.world.end_run(run_id, reason="world_fault", truncated=True)
         return {
             "study": prereg.get("experiment_id"),
             "prereg_hash": checked["prereg_hash"],

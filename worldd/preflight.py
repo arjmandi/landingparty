@@ -10,6 +10,14 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .preflight_probes import (
+    EVALUATION_PATHS,
+    environment_command,
+    evaluation_command,
+    isolation_commands,
+    surface_command,
+)
+
 
 class PreflightService:
     def __init__(self, world, *, sentinel_enabled=False):
@@ -17,6 +25,199 @@ class PreflightService:
         self.world = world
         self.store = world.store
         self.monitor = None
+        self.harnesses = {}
+        self._host_bridge = None
+        self._source_observer = None
+
+    def host_challenge(
+        self, run_id, observer_public_key, container_id, firewall_id, *, evaluation_paths=()
+    ):
+        if self._host_bridge is None:
+            from .host_observer import HostObserverBridge
+
+            self._host_bridge = HostObserverBridge(self)
+        return self._host_bridge.challenge(
+            run_id,
+            observer_public_key,
+            container_id,
+            firewall_id,
+            evaluation_paths=evaluation_paths,
+        )
+
+    async def host_submit(
+        self,
+        run_id,
+        challenge_id,
+        receipt,
+        signature,
+        *,
+        metadata=None,
+        sources=None,
+        t0_ref=None,
+        run_kill=True,
+    ):
+        if self._host_bridge is None:
+            raise ValueError("Issue a host observer challenge first")
+        return await self._host_bridge.submit(
+            run_id,
+            challenge_id,
+            receipt,
+            signature,
+            metadata=metadata,
+            sources=sources,
+            t0_ref=t0_ref,
+            run_kill=run_kill,
+        )
+
+    async def observe_sources(
+        self,
+        run_id,
+        *,
+        provider_run_id=None,
+        provider_call_id=None,
+        search_run_id=None,
+        search_action_id=None,
+        egress_url=None,
+    ):
+        if self._source_observer is None:
+            from .preflight_sources import SourceObserver
+
+            self._source_observer = SourceObserver(self)
+        return await self._source_observer.observe(
+            run_id,
+            provider_run_id=provider_run_id,
+            provider_call_id=provider_call_id,
+            search_run_id=search_run_id,
+            search_action_id=search_action_id,
+            egress_url=egress_url,
+        )
+
+    def register_harness(self, run_id, *, execute, firewall_inspect=None, evaluation_paths=()):
+        """Trusted Python integration; callbacks are never deserialized from JSON."""
+        self.store.get_run(run_id)
+        if not callable(execute) or (
+            firewall_inspect is not None and not callable(firewall_inspect)
+        ):
+            raise TypeError("Harness observers must be trusted callables")
+        self.harnesses[run_id] = {
+            "execute": execute,
+            "firewall_inspect": firewall_inspect,
+            "evaluation_paths": list(dict.fromkeys([*EVALUATION_PATHS, *evaluation_paths])),
+        }
+        return {"run_id": run_id, "registered": True}
+
+    async def bind_container(self, run_id, container_id, firewall_id, *, evaluation_paths=()):
+        """Control-only Docker binding makes /preflight/run usable with JSON refs."""
+        from .isolation import DockerHarness
+
+        harness = await DockerHarness.bind(
+            run_id, container_id, firewall_id, data_dir=self.store.data_dir
+        )
+        self.register_harness(
+            run_id,
+            execute=harness.execute,
+            firewall_inspect=harness.firewall_inspect,
+            evaluation_paths=evaluation_paths,
+        )
+        self.harnesses[run_id]["validate"] = harness.validate
+        result = {
+            "run_id": run_id,
+            "container_id": harness.agent_id,
+            "firewall_id": harness.fence_id,
+        }
+        self.store.append_record(
+            run_id,
+            "control_plane_audit",
+            test="harness_binding",
+            **{k: v for k, v in result.items() if k != "run_id"},
+        )
+        return result
+
+    @staticmethod
+    def _tree_manifest(root):
+        """Hash a visible tree, preserving only safe internal links as metadata."""
+        from .workspaces import snapshot_manifest, verify_import
+
+        root = Path(root)
+        if root.resolve() != root or root.is_symlink():
+            raise ValueError("Agent surfaces must not be symlinks")
+        if not root.exists():
+            return None
+        if not root.is_dir():
+            raise ValueError("Agent surface must be a directory")
+        manifest = snapshot_manifest(root)
+        verify_import(root, manifest)
+        entries = manifest["entries"]
+        return {
+            "files": {
+                name: {"sha256": entry["sha256"], "executable": entry["executable"]}
+                for name, entry in entries.items()
+                if entry["type"] == "file"
+            },
+            "directories": [
+                name for name, entry in entries.items() if entry["type"] == "directory"
+            ],
+            "links": {
+                name: entry["target"]
+                for name, entry in entries.items()
+                if entry["type"] == "symlink"
+            },
+        }
+
+    async def workspace(self, run_id, execute):
+        """Compare iota, the trusted run tree, and actual harness-visible bytes."""
+        from .util import digest
+
+        run = self.store.get_run(run_id)
+        plan = run["config"].get("iota", {}).get("workspace", "fresh")
+        if plan == "fresh":
+            expected = {"files": {}, "directories": ["out"], "links": {}}
+        else:
+            from .workspaces import verify_import
+
+            match = re.fullmatch(r"import\((r_[A-Za-z0-9_-]+)\)", plan)
+            if not match:
+                raise ValueError("Workspace iota must name a sealed donor")
+            source_id = match[1]
+            source = self.store.get_run(source_id)
+            records = self.store.records(source_id)
+            if (
+                source["state"] not in {"sealed", "killed", "ended"}
+                or not self.store.verify_record(source_id)["valid"]
+                or not records
+                or records[-1].get("kind") != "seal"
+            ):
+                raise ValueError("Workspace donor must retain its verified seal")
+            snapshot = self.store.run_dir(source_id) / "work-snapshot"
+            anchors = [record for record in records if record.get("kind") == "workspace_snapshot"]
+            if len(anchors) != 1:
+                raise ValueError("Workspace donor needs its exact sealed snapshot anchor")
+            verify_import(snapshot, anchors[0])
+            expected = self._tree_manifest(snapshot)
+            if expected is None:
+                raise ValueError("Workspace donor snapshot is missing")
+        actual = self._tree_manifest(self.store.run_dir(run_id) / "work")
+        beliefs = self._tree_manifest(self.store.run_dir(run_id) / "world/beliefs")
+        # This program is run by the registered unprivileged harness executor.
+        # Only names, sizes-independent hashes and directory shape cross back.
+        command = surface_command()
+        observation = await self._call(execute, command)
+        if observation.get("returncode"):
+            raise ValueError("Harness workspace inspection failed")
+        visible = json.loads(observation.get("stdout", ""))
+        checks = {
+            "workspace_matches_iota": actual == expected,
+            "harness_workspace_matches": visible.get("work") == actual,
+            "harness_beliefs_match": visible.get("beliefs") == beliefs,
+        }
+        result = {
+            "passed": all(checks.values()),
+            "checks": checks,
+            "workspace_hash": digest(actual),
+            "beliefs_hash": digest(beliefs),
+        }
+        self.store.append_record(run_id, "preflight", test="initial_surfaces", **result)
+        return result
 
     def environment(self, run_id: str, values: dict) -> dict:
         """Validate supplied harness configuration without recording its values."""
@@ -83,29 +284,7 @@ class PreflightService:
         copied into the record. A failure alone is insufficient: firewall policy
         and increasing drop counters must independently corroborate enforcement.
         """
-        commands = {
-            "curl": [
-                "curl",
-                "--noproxy",
-                "*",
-                "--max-time",
-                "3",
-                "--connect-timeout",
-                "2",
-                "-I",
-                "https://1.1.1.1/",
-            ],
-            "python": [
-                "python3",
-                "-c",
-                "import urllib.request; urllib.request.build_opener(urllib.request.ProxyHandler({})).open('https://1.1.1.1/',timeout=2).read(1)",
-            ],
-            "dns": [
-                "python3",
-                "-c",
-                "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.settimeout(2); s.sendto(bytes.fromhex('123401000001000000000000076578616d706c6503636f6d0000010001'),('1.1.1.1',53)); s.recvfrom(512)",
-            ],
-        }
+        commands = isolation_commands()
         before = await self._call(firewall_inspect) if firewall_inspect else None
         checks = {}
         for label, command in commands.items():
@@ -117,6 +296,8 @@ class PreflightService:
             before and after and after.get("drop_packets", 0) > before.get("drop_packets", 0)
         )
         checks["harness_unprivileged"] = bool(after and after.get("harness_net_admin") is False)
+        if after is not None and "rules_reviewed" in after:
+            checks["reviewed_firewall_rules"] = after["rules_reviewed"] is True
         result = {
             "checks": checks,
             "passed": all(checks.values()),
@@ -206,6 +387,16 @@ class PreflightService:
 
         packs = set(config.get("packs", []))
         services = getattr(self.world, "services", {})
+        proxy = services.get("proxy")
+        if proxy is not None and hasattr(proxy, "prepare_run"):
+            proxy.prepare_run(run_id)
+        binding = self.harnesses.get(run_id)
+        if binding:
+            if binding.get("validate"):
+                await binding["validate"]()
+            execute = execute or binding["execute"]
+            firewall_inspect = firewall_inspect or binding.get("firewall_inspect")
+            evaluation_paths = evaluation_paths or binding.get("evaluation_paths")
         has_writes = bool(packs & {"mail", "social", "market", "vault", "browse"})
         mark(
             "rule_of_two",
@@ -249,21 +440,9 @@ class PreflightService:
         else:
             mark("identity_and_binding", True)
         if execute is not None:
-            script = (
-                "import hashlib,json,os,ssl; from pathlib import Path; "
-                "keys=['WORLD_RUN_ID','ANTHROPIC_BASE_URL','OPENAI_BASE_URL',"
-                "'HTTP_PROXY','HTTPS_PROXY','SSL_CERT_FILE']; "
-                "values={key:os.environ[key] for key in keys if key in os.environ}; "
-                "path=Path(values.get('SSL_CERT_FILE','/nonexistent')); "
-                "values['WORLD_CA_SHA256']=hashlib.sha256(ssl.PEM_cert_to_DER_cert("
-                "path.read_text())).hexdigest() if path.is_file() else None; "
-                "private=['WORLD_CONTROL_TOKEN','WORLD_OPENAI_API_KEY',"
-                "'WORLD_ANTHROPIC_API_KEY','WORLD_BRAVE_API_KEY']; "
-                "values['WORLD_PRIVATE_ENV_PRESENT']=any(os.environ.get(key) for key in private); "
-                "print(json.dumps(values))"
-            )
+            command = environment_command()
             try:
-                observation = await self._call(execute, ["python3", "-c", script])
+                observation = await self._call(execute, command)
                 if observation.get("returncode") != 0:
                     raise ValueError("Harness environment inspection failed")
                 harness_environment = json.loads(observation.get("stdout", ""))
@@ -321,13 +500,30 @@ class PreflightService:
                 continue
             try:
                 loaded[label], artifacts[label] = self._artifact(metadata[label])
+                if config.get("research_mode") == "research" and label != "block_profile":
+                    from .preflight_sources import SourceObserver
+
+                    observer = self._source_observer or SourceObserver(self)
+                    if loaded[label].get(
+                        "observer_source"
+                    ) != "world-preflight-sources@1" or not observer.registered(
+                        run_id, label, loaded[label]
+                    ):
+                        loaded.pop(label)
+                        mark(
+                            label,
+                            False,
+                            "Research requires an actual registered world source observation",
+                        )
             except (OSError, ValueError, TypeError):
                 mark(label, False, "World-observed artifact is invalid or inaccessible")
         if "egress" in loaded:
             value = loaded["egress"]
             mark(
                 "egress",
-                bool(value.get("ip") and value.get("reverse_dns"))
+                None
+                if value.get("status") == "unmeasured"
+                else bool(value.get("ip") and value.get("reverse_dns"))
                 and fresh(value.get("observed_at"), timedelta(days=1)),
                 "Egress and reverse DNS must be observed within 24 hours",
             )
@@ -335,12 +531,16 @@ class PreflightService:
             value = loaded["provider_canary"]
             try:
                 priced = Decimal(str(value["metered_usd"]))
-                reported = Decimal(str(value["provider_reported_usd"]))
+                reported = Decimal(
+                    str(value.get("provider_usage_price_usd", value.get("provider_reported_usd")))
+                )
                 valid = (
                     value.get("model_snapshot_id") == config.get("model_snapshot_id")
                     and priced == reported
                     and priced > 0
-                    and fresh(value.get("observed_at"), timedelta(days=1))
+                    and fresh(
+                        value.get("source_observed_at", value.get("observed_at")), timedelta(days=1)
+                    )
                     and value.get("price_table_id") == getattr(self.world, "price_table_id", None)
                 )
                 valid = valid and bool(
@@ -348,6 +548,20 @@ class PreflightService:
                     and value.get("usage")
                     and value.get("price_table_id")
                 )
+                if value.get("observer_source") == "world-preflight-sources@1":
+                    valid = (
+                        valid
+                        and self._source_observer is not None
+                        and self._source_observer.registered(run_id, "provider_canary", value)
+                        and value.get("first_request_no_hosted_tools") is True
+                    )
+                    if config.get("research_mode") == "research":
+                        valid = (
+                            valid
+                            and value.get("fixture_transport") is False
+                            and value.get("upstream_origin")
+                            in {"https://api.openai.com", "https://api.anthropic.com"}
+                        )
                 source_run = value.get("provider_run_id")
                 source_call = value.get("call_id")
                 try:
@@ -362,6 +576,7 @@ class PreflightService:
                         valid
                         and len(matching) == 1
                         and matching[0].get("usage") == value.get("usage")
+                        and matching[0].get("model") == config.get("model_snapshot_id")
                         and Decimal(str(matching[0].get("usd"))) == priced
                         and matching[0].get("price_table_id") == value.get("price_table_id")
                     )
@@ -374,7 +589,11 @@ class PreflightService:
                     "Actual provider usage and pinned-price metering must agree",
                 )
             except (KeyError, ValueError, TypeError, InvalidOperation):
-                mark("provider_canary", False, "Provider usage evidence is incomplete")
+                mark(
+                    "provider_canary",
+                    None if value.get("status") == "unmeasured" else False,
+                    "Provider usage evidence is incomplete",
+                )
         if "block_profile" in loaded:
             value = loaded["block_profile"]
             try:
@@ -443,10 +662,41 @@ class PreflightService:
                 and value.get("price_table_id") == getattr(self.world, "price_table_id", None)
                 and value.get("extractor_id") == config.get("tuple", {}).get("extractor_id")
             )
+            signer = getattr(self.world.gateway, "signer", None)
+            signed = config.get("browser_identity", "unsigned") == "signed"
+            browser_required = "browse" in packs
+            valid = valid and {"browser_build", "signing_key_id"}.issubset(value)
+            valid = valid and value.get("signing_key_id") == (
+                signer.key_id if signed and signer else None
+            )
+            valid = valid and (not signed or signer is not None)
+            if browser_required or value.get("observer_source") == "world-preflight-sources@1":
+                from .preflight_sources import SourceObserver
+
+                observer = self._source_observer or SourceObserver(self)
+                actual_browser = await observer.browser_build(run_id)
+                valid = valid and observer.registered(run_id, "versions", value)
+                valid = valid and value.get("browser_build") == actual_browser["build"]
+                valid = valid and (not browser_required or actual_browser["status"] == "measured")
+                harness_observation = value.get("harness_observation")
+                valid = valid and bool(
+                    harness_observation
+                    and harness_observation.get("declared_id") == config.get("harness_id")
+                    and harness_observation.get("observed_version")
+                )
+                valid = (
+                    valid
+                    and fresh(value.get("observed_at"), timedelta(days=1))
+                    and fresh(value.get("search_response_date"), timedelta(days=1))
+                )
+                if config.get("research_mode") == "research":
+                    valid = valid and not (value.get("search_observation") or {}).get(
+                        "fixture_transport"
+                    )
             mark(
                 "versions",
-                bool(valid),
-                "Observed harness, extractor, model, search date and pinned prices",
+                None if value.get("status") == "partial" else bool(valid),
+                "Observed harness, extractor, model, search date, browser build, signing key and pinned prices",
             )
         signed = config.get("browser_identity", "unsigned") == "signed"
         signer = getattr(self.world.gateway, "signer", None)
@@ -456,12 +706,8 @@ class PreflightService:
             "Signed identity requires an actual world-held Ed25519 key",
         )
         if execute is not None and evaluation_paths:
-            script = (
-                "import os,sys; sys.exit(1 if any(os.access(p,os.R_OK) for p in "
-                + repr(list(evaluation_paths))
-                + ") else 0)"
-            )
-            result = await self._call(execute, ["python3", "-c", script])
+            command = evaluation_command(evaluation_paths)
+            result = await self._call(execute, command)
             mark("evaluation_isolation", result.get("returncode") == 0)
         else:
             mark(
@@ -469,19 +715,99 @@ class PreflightService:
                 None,
                 "Evaluation/probe paths have not been tested as the harness user",
             )
+        if execute is None:
+            mark(
+                "initial_surfaces",
+                None,
+                "The actual harness workspace/beliefs have not been inspected",
+            )
+        else:
+            try:
+                surfaces = await self.workspace(run_id, execute)
+                mark("initial_surfaces", surfaces["passed"])
+                artifacts["workspace"] = surfaces["workspace_hash"]
+                artifacts["beliefs"] = surfaces["beliefs_hash"]
+            except (OSError, ValueError, TypeError, KeyError):
+                mark(
+                    "initial_surfaces",
+                    False,
+                    "Workspace or beliefs differ from their registered initial surfaces",
+                )
         if config.get("life_id"):
             try:
-                value, artifacts["t0"] = self._artifact(t0_ref)
+                from .storage import content_hash
+
+                service = services["lives"]
+                life = service.get(config["life_id"])
+                path = self.store.data_dir / "lives" / life["life_id"] / "t0.json"
+                if path.resolve() != path or not path.is_file():
+                    raise ValueError("The registered life artifact is unavailable")
+                value = json.loads(path.read_text())
+                fingerprint = content_hash(value)
+                if t0_ref is not None:
+                    reference = t0_ref.get("path") if isinstance(t0_ref, dict) else t0_ref
+                    if reference != fingerprint:
+                        reference_path = Path(reference)
+                        if not reference_path.is_absolute():
+                            reference_path = self.store.data_dir / reference_path
+                        if reference_path != path:
+                            raise ValueError(
+                                "The t=0 reference must name the registered life artifact"
+                            )
+                    if isinstance(t0_ref, dict) and t0_ref.get("hash", fingerprint) not in {
+                        fingerprint,
+                        digest(path.read_bytes()),
+                    }:
+                        raise ValueError("The t=0 reference hash differs")
+                valid = (
+                    value.get("study") == "t0"
+                    and value.get("completed") is True
+                    and value.get("life_id") == life["life_id"]
+                    and fingerprint == life.get("t0_fingerprint_ref")
+                    and value.get("model_snapshot_id") == config.get("model_snapshot_id")
+                    and (
+                        config.get("research_mode") != "research" or value.get("scientific") is True
+                    )
+                )
+                children = value.get("measurement_run_ids", [])
+                valid = valid and bool(children) and len(children) == len(set(children))
+                for child_id in children:
+                    child = self.store.get_run(child_id)
+                    valid = (
+                        valid
+                        and child["state"] == "sealed"
+                        and not child.get("tainted")
+                        and child["config"].get("metering_lane") == "probe"
+                        and child["config"].get("model_snapshot_id")
+                        == value.get("model_snapshot_id")
+                        and self.store.verify_record(child_id)["valid"]
+                        and self.store.reconcile(child_id)["valid"]
+                    )
+                artifacts["t0"] = fingerprint
                 mark(
                     "t0_battery",
-                    bool(
-                        value.get("completed")
-                        and value.get("forked_context")
-                        and value.get("fingerprint_ref")
-                    ),
+                    bool(valid),
+                    "The registered immutable life battery and sealed measurement children",
                 )
-            except (OSError, ValueError, TypeError):
-                mark("t0_battery", None, "A completed forked t=0 battery is required before a life")
+                driver = life.get("driver")
+                start = driver.get("reading_at_start") if driver else None
+                valid_start = not driver or (
+                    isinstance(start, (int, float))
+                    and float("-inf") < start < float("inf")
+                    and (config.get("driver") or {}).get("reading_at_start", start) == start
+                )
+                mark(
+                    "driver_reading_at_start",
+                    bool(valid_start),
+                    "The life's registered initial driver reading",
+                )
+            except (OSError, ValueError, TypeError, KeyError):
+                mark("t0_battery", False, "A valid registered t=0 life artifact is required")
+                mark(
+                    "driver_reading_at_start",
+                    None,
+                    "The registered life driver could not be inspected",
+                )
         else:
             mark("t0_battery", True)
         failures = [name for name, value in checks.items() if value["status"] == "failed"]
@@ -496,6 +822,8 @@ class PreflightService:
             "artifact_hashes": artifacts,
             "passed": not failures and not unmeasured,
         }
+        if binding and binding.get("host_observer"):
+            report["host_observer"] = binding["host_observer"]
         report["report_hash"] = digest(report)
         directory = self.store.run_dir(run_id) / "preflight"
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)

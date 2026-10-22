@@ -45,6 +45,11 @@ def parser() -> argparse.ArgumentParser:
     ]:
         command = sub.add_parser(verb, help=help_text)
         command.add_argument("run_id")
+        if verb == "report":
+            command.add_argument(
+                "--format", choices=["json", "markdown", "html", "csv"], default="json"
+            )
+            command.add_argument("--output", type=Path)
         if verb == "emergency-beam-out":
             command.add_argument("--dry-run", action="store_true")
     act = sub.add_parser("act", help="Submit one world tool call")
@@ -301,15 +306,22 @@ def main(argv: list[str] | None = None, *, client: httpx.Client | None = None) -
                 query["run_id"] = args.run_id
             if args.verb == "inbox":
                 query.update(since=args.since, limit=args.limit, wait_seconds=args.wait_seconds)
+            if args.verb == "report":
+                if args.format != "json":
+                    query["format"] = args.format
+                if args.output and args.output.exists():
+                    raise ValueError(f"output already exists: {args.output}")
             if args.verb == "export" and args.output.exists():
                 raise ValueError(f"output already exists: {args.output}")
             response = request("get", path, params=query)
         response.raise_for_status()
-        if args.verb == "export":
+        if args.verb == "export" or args.verb == "report" and args.output:
             # Exclusive create preserves existing local work, including a concurrent writer.
             with args.output.open("xb") as stream:
                 stream.write(response.content)
             print(str(args.output))
+        elif args.verb == "report" and args.format != "json":
+            print(response.text, end="" if response.text.endswith("\n") else "\n")
         else:
             data = response.json()
             _print(data)
