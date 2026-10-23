@@ -388,7 +388,12 @@ async def main():
             == ["claude-fixture-priced"]
             and await page.locator("#run-model").input_value() == "claude-fixture-priced"
         )
+        await page.locator("#run-model").fill("claude-unpriced-fixture")
+        unpriced_life_blocked = await page.locator("#launch-button").is_disabled()
         await page.locator("#shape-run").check()
+        checks["switching_to_a_run_restores_launch"] = (
+            unpriced_life_blocked and not await page.locator("#launch-button").is_disabled()
+        )
         checks["subscription_blank_model_allowed"] = await page.locator(
             "#run-model"
         ).input_value() == "" and not await page.locator("#run-model").get_attribute("required")

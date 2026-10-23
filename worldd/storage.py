@@ -384,6 +384,28 @@ class Store:
         finally:
             self._ledger_observation = previous
 
+    def charge_incurred(self, run_id: str, category: str, usd: Decimal | str | float) -> Decimal:
+        """Charge spend that already happened, up to the cap, until the run is sealed.
+
+        Unlike debit, this cannot refuse the action (it is over), so it also charges
+        while the run is frozen or draining to its seal. Returns what was charged;
+        the caller records any remainder the cap could not take.
+        """
+        amount_nano = _nanodollars(usd)
+        category = _category(category)
+        with self._lock:
+            with self._transaction():
+                row = self._row(run_id)
+                if row["state"] not in {"running", "frozen", "stopping"}:
+                    return Decimal(0)
+                left = row["cap_nano"] - row["spent_nano"] - self._held_nano(run_id)
+                charge = max(0, min(amount_nano, left))
+                if not charge:
+                    return Decimal(0)
+                record = self._charge(run_id, category, charge)
+            self._observe_ledger(run_id, record)
+            return Decimal(charge) / NANODOLLARS
+
     def debit(self, run_id: str, category: str, usd: Decimal | str | float) -> bool:
         amount_nano = _nanodollars(usd)
         category = _category(category)

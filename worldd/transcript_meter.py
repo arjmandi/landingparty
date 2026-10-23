@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from decimal import ROUND_FLOOR, Decimal
+from decimal import Decimal
 
 from .lane import UsageError, normalize_usage, usage_cost
 
@@ -20,7 +20,6 @@ CATEGORY = "model.estimated"
 # The lane refuses a call it cannot cover; after the fact, the meter stops the
 # session once what is left would not cover another message like its largest.
 MINIMUM_LOOKAHEAD = Decimal("0.01")
-NANO = Decimal("0.000000001")
 # Claude Code's per-model totals, in its own field names, as Anthropic usage.
 MODEL_USAGE_FIELDS = {
     "inputTokens": "input_tokens",
@@ -50,7 +49,10 @@ class TranscriptMeter:
             "messages": {},
             "estimated": Decimal(0),
             "largest": Decimal(0),
-            "closed": False,
+            # The lookahead has asked the session to stop; usage it drains still counts.
+            "stopping": False,
+            # Usage could not be priced; nothing further can be counted honestly.
+            "failed": False,
         }
         for record in self.store.records(run_id):
             if record["kind"] == "model_estimate":
@@ -58,10 +60,10 @@ class TranscriptMeter:
                     "usage": record["usage"],
                     "usd": _money(record["usd_total"]),
                 }
-            elif record["kind"] in {"estimate_unavailable", "model_refused"} and (
-                record.get("metering") == "transcript"
-            ):
-                state["closed"] = True
+            elif record["kind"] == "model_refused" and record.get("metering") == "transcript":
+                state["stopping"] = True
+            elif record["kind"] == "estimate_unavailable":
+                state["failed"] = True
         state["estimated"] = sum((item["usd"] for item in state["messages"].values()), Decimal(0))
         state["largest"] = max(
             (item["usd"] for item in state["messages"].values()), default=Decimal(0)
@@ -79,10 +81,11 @@ class TranscriptMeter:
         run = self.store.get_run(run_id)
         if run["config"].get("model_metering") != "transcript":
             return
-        if run["state"] not in {"running", "frozen"}:
+        # Usage already incurred counts through a freeze and the drain before the seal.
+        if run["state"] not in {"running", "frozen", "stopping"}:
             return
         state = self._state(run_id)
-        if state["closed"]:
+        if state["failed"]:
             return
         try:
             event = json.loads(line)
@@ -100,7 +103,7 @@ class TranscriptMeter:
 
     def overflow(self, run_id: str) -> None:
         """A line too long to read whole cannot be priced; the session stops."""
-        if self.metered(run_id) and not self._state(run_id)["closed"]:
+        if self.metered(run_id) and not self._state(run_id)["failed"]:
             self._fail(run_id, self._state(run_id), "transcript line too long to price")
 
     def _price(self, config, model):
@@ -181,11 +184,8 @@ class TranscriptMeter:
         return Decimal(row["cap_nano"] - row["spent_nano"] - held) / Decimal(1_000_000_000)
 
     def _charge(self, run_id, amount: Decimal) -> Decimal:
-        """Debit up to what is left; record any estimate the cap could not take."""
-        left = max(Decimal(0), self._left(run_id))
-        charge = min(amount, left).quantize(NANO, rounding=ROUND_FLOOR)
-        if charge > 0 and not self.store.debit(run_id, CATEGORY, charge):
-            charge = Decimal(0)
+        """Charge up to what is left; record any estimate the cap could not take."""
+        charge = self.store.charge_incurred(run_id, CATEGORY, amount)
         if amount > charge:
             self.store.append_record(
                 run_id, "estimate_overshoot", usd=str(amount - charge), metering="transcript"
@@ -193,11 +193,13 @@ class TranscriptMeter:
         return charge
 
     def _lookahead(self, run_id, state):
+        if state["stopping"]:
+            return
         left = self._left(run_id)
         threshold = max(state["largest"], MINIMUM_LOOKAHEAD)
         if left > threshold:
             return
-        state["closed"] = True
+        state["stopping"] = True
         self.store.append_record(
             run_id,
             "model_refused",
@@ -210,7 +212,7 @@ class TranscriptMeter:
 
     def _fail(self, run_id, state, reason):
         """Unknown model spend is never zero: record it, taint the run, and stop."""
-        state["closed"] = True
+        state["failed"] = True
         self.store.append_record(
             run_id, "estimate_unavailable", reason=reason, metering="transcript"
         )

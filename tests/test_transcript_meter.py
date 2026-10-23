@@ -220,3 +220,51 @@ async def test_capture_reads_whole_stdout_lines_for_the_meter(world, tmp_path):
     reader.feed_eof()
     await harnesses._capture("hs_fixture", reader, "stdout")
     assert estimated(world, run_id) == cost() * 2
+
+
+async def test_usage_observed_while_frozen_is_charged_not_dropped(world):
+    run_id = await session(world, life(world))
+    world.store.update_run(run_id, state="frozen")
+    world.services["transcript_meter"].observe(run_id, assistant("msg_1"))
+    assert estimated(world, run_id) == cost()
+    world.store.update_run(run_id, state="running")
+    world.services["transcript_meter"].observe(run_id, assistant("msg_1"))
+    assert estimated(world, run_id) == cost()
+
+
+async def test_usage_drained_after_a_lookahead_stop_still_counts(world):
+    run_id = await session(world, life(world, usd="0.02"))
+    meter = world.services["transcript_meter"]
+    for index in range(3):
+        meter.observe(run_id, assistant(f"msg_{index}"))
+    assert "model_refused" in kinds(world, run_id)
+    # The session drains after the stop: its buffered usage and final totals arrive.
+    world.store.update_run(run_id, state="stopping")
+    meter.observe(run_id, assistant("msg_3"))
+    meter.observe(
+        run_id,
+        json.dumps(
+            {
+                "type": "result",
+                "modelUsage": {"claude-fixture": {"inputTokens": 5000, "outputTokens": 500}},
+            }
+        ),
+    )
+    assert estimated(world, run_id) == Decimal("0.02")
+    overshoot = sum(
+        Decimal(r["usd"]) for r in world.store.records(run_id) if r["kind"] == "estimate_overshoot"
+    )
+    assert estimated(world, run_id) + overshoot == cost(5000, 500)
+    assert kinds(world, run_id).count("model_refused") == 1
+    await settle(world)
+
+
+async def test_incurred_charges_stop_only_at_the_seal(world):
+    run_id = await session(world, life(world, usd=1))
+    store = world.store
+    assert store.charge_incurred(run_id, "model.estimated", "0.4") == Decimal("0.4")
+    store.update_run(run_id, state="stopping")
+    assert store.charge_incurred(run_id, "model.estimated", "0.9") == Decimal("0.6")
+    store.update_run(run_id, state="sealed")
+    assert store.charge_incurred(run_id, "model.estimated", "0.1") == 0
+    assert estimated(world, run_id) == 1
