@@ -38,6 +38,13 @@ _SENSITIVE = re.compile(
 _SECRET = re.compile(r"\b(?:sk-[A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{12,}(?:\.[A-Za-z0-9_-]+){1,2})\b")
 _EMAIL = re.compile(r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _MAX_OUTPUT = 16_384
+_CLAUDE_AUTHORIZE_ENDPOINTS = {
+    # Claude Code 2.1.308 uses the claude.com endpoint for subscription login.
+    ("claude.com", "/cai/oauth/authorize"),
+    ("claude.ai", "/oauth/authorize"),
+    ("platform.claude.com", "/oauth/authorize"),
+    ("console.anthropic.com", "/oauth/authorize"),
+}
 
 
 def _process_start(pid):
@@ -76,10 +83,7 @@ def _safe_url(harness_id, candidate):
             if any(not _DEVICE.fullmatch(value) for value in query.get("user_code", [])):
                 return None
         else:
-            if (
-                parsed.hostname not in {"claude.ai", "platform.claude.com", "console.anthropic.com"}
-                or parsed.path != "/oauth/authorize"
-            ):
+            if (parsed.hostname, parsed.path) not in _CLAUDE_AUTHORIZE_ENDPOINTS:
                 return None
             allowed = {
                 "client_id",
@@ -91,6 +95,9 @@ def _safe_url(harness_id, candidate):
                 "state",
                 "code",
                 "organization",
+                "orgUUID",
+                "login_hint",
+                "login_method",
             }
             if set(query) - allowed or any(
                 value not in {"true", "1"} for value in query.get("code", [])
@@ -120,6 +127,12 @@ def _safe_url(harness_id, candidate):
         return candidate if len(candidate) <= 8192 else None
     except (ValueError, TypeError):
         return None
+
+
+def _manual_callback(url):
+    """The provider-hosted code callback also works outside the server's browser."""
+    redirect = parse_qs(urlsplit(url).query).get("redirect_uri", [])
+    return bool(redirect and urlsplit(redirect[0]).scheme == "https")
 
 
 def _redact(line, secrets=()):
@@ -321,17 +334,22 @@ class HarnessAuthService:
             provider=PROVIDERS[row["harness_id"]],
             available=self._binary(row["harness_id"]) is not None,
         )
+        auth_url = _safe_url(row["harness_id"], row.get("auth_url", ""))
         if row["state"] == "connecting":
-            result.update(
-                {
-                    key: row[key]
-                    for key in ("auth_url", "device_code", "input_required")
-                    if row.get(key)
-                }
-            )
-        result["requires_code"] = result["awaiting_code"] = row[
-            "state"
-        ] == "connecting" and row.get("input_required", False)
+            if auth_url:
+                result["auth_url"] = auth_url
+                if row.get("device_code"):
+                    result["device_code"] = row["device_code"]
+                if row.get("input_required"):
+                    result["input_required"] = True
+            elif row.get("input_required"):
+                result.update(
+                    reason="authorization_link_unavailable",
+                    message="Waiting for a verified provider sign-in link.",
+                )
+        result["requires_code"] = result["awaiting_code"] = bool(
+            row["state"] == "connecting" and row.get("input_required", False) and auth_url
+        )
         return result
 
     async def _guard(self, key):
@@ -526,7 +544,17 @@ class HarnessAuthService:
         for candidate in _URL.findall(plain):
             approved = _safe_url(key[0], candidate)
             if approved:
-                row["auth_url"] = approved
+                # The CLI prints its manual link, then may ask BROWSER to open
+                # another link with a callback to the container's loopback.
+                # Keep the manual link available for a laptop or VPS browser.
+                current = row.get("auth_url")
+                if not (
+                    key[0] == "claude-code"
+                    and current
+                    and _manual_callback(current)
+                    and not _manual_callback(approved)
+                ):
+                    row["auth_url"] = approved
         if key[0] == "codex" and row.get("auth_url"):
             match = _DEVICE.search(plain)
             if match:
@@ -681,6 +709,7 @@ class HarnessAuthService:
                 key[0] != "claude-code"
                 or row["state"] != "connecting"
                 or not row.get("input_required")
+                or not _safe_url(key[0], row.get("auth_url", ""))
                 or key not in self._inputs
             ):
                 raise ValueError(

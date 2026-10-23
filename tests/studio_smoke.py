@@ -15,6 +15,8 @@ from worldd.browser import PlaywrightBackend
 
 async def main():
     assets = Path(os.getenv("WORLD_STUDIO_ASSETS", "/opt/landingparty/worldd"))
+    output = Path(os.getenv("WORLD_STUDIO_OUTPUT", "/tmp/studio-output"))
+    output.mkdir(parents=True, exist_ok=True)
     token, secret, code = "operator-fixture-token", "sk-private-fixture-key", "private-login-code"
     malicious = '<img src=x onerror="window.studioXss=true">'
     calls, errors, checks = [], [], {}
@@ -53,7 +55,8 @@ async def main():
         }
     ]
     runs = []
-    connection = {"state": "disconnected"}
+    connection = {"state": "disconnected", "requires_code": True}
+    connect_attempts, check_attempts = 0, 0
     started = []
 
     def catalog():
@@ -127,6 +130,7 @@ async def main():
 
         async def route_api(route):
             nonlocal authenticated, installed, connected, connection, fail_save
+            nonlocal connect_attempts, check_attempts
             request = route.request
             url = urlsplit(request.url)
             assert url.hostname == "studio.fixture.test", "Unexpected network destination"
@@ -182,20 +186,34 @@ async def main():
                 result = {"state": "installed"}
             elif path.endswith("/connect"):
                 assert installed
-                connection = {
-                    "state": "awaiting_code",
-                    "requires_code": True,
-                    "auth_url": "https://accounts.anthropic.com/fixture",
-                    "message": "Complete provider sign-in.",
-                }
+                connect_attempts += 1
+                connection = {"state": "connecting", "requires_code": True}
+                result = connection
+            elif path.endswith("/cancel-connect"):
+                connection = {"state": "disconnected", "requires_code": True}
                 result = connection
             elif path.endswith("/connection/code"):
                 assert body == {"code": code}
+                assert connection.get("auth_url"), "A code was submitted before a provider link"
                 connected = True
                 connection = {"state": "connected"}
                 settings["setup_complete"] = True
                 result = connection
             elif path.endswith("/connection"):
+                check_attempts += 1
+                if check_attempts == 1:
+                    connection = {
+                        "state": "failed",
+                        "reason": "login_timeout",
+                        "requires_code": True,
+                    }
+                else:
+                    connection = {
+                        "state": "connecting",
+                        "requires_code": True,
+                        "auth_url": "https://claude.com/cai/oauth/authorize?client_id=fixture&code=true",
+                        "message": "Complete provider sign-in.",
+                    }
                 result = connection
             elif path == "/api/runs":
                 if request.method == "POST":
@@ -296,7 +314,53 @@ async def main():
         await page.get_by_role("button", name="Install client", exact=True).click()
         await page.get_by_text("Installed · fixture-1", exact=True).wait_for()
         checks["explicit_native_install"] = installed
+        checks["stale_code_flag_does_not_start_signin"] = (
+            await page.get_by_label("Provider confirmation code").count() == 0
+            and connect_attempts == 0
+        )
         await page.get_by_role("button", name="Connect subscription", exact=True).click()
+        await page.get_by_text("Waiting for the provider sign-in link…", exact=True).wait_for()
+        checks["missing_link_waits_without_code_prompt"] = (
+            await page.get_by_label("Provider confirmation code").count() == 0
+            and await page.get_by_role("link", name="Open provider sign-in").count() == 0
+            and (
+                await page.locator(".auth-details")
+                .locator("..")
+                .locator(".status-pill.connecting")
+                .inner_text()
+            ).casefold()
+            == "connecting"
+        )
+        await page.screenshot(path=str(output / "studio-signin-waiting.png"), full_page=True)
+        await page.get_by_role("button", name="Check connection", exact=True).click()
+        await page.get_by_role("button", name="Try sign-in again", exact=True).wait_for()
+        checks["failed_signin_has_reason_and_explicit_retry"] = (
+            "Sign-in timed out" in await page.locator("#page-content").inner_text()
+            and await page.get_by_label("Provider confirmation code").count() == 0
+            and connect_attempts == 1
+        )
+        await page.get_by_role("button", name="Try sign-in again", exact=True).click()
+        await page.get_by_role("button", name="Cancel sign-in", exact=True).click()
+        await page.get_by_role("button", name="Connect subscription", exact=True).wait_for()
+        checks["cancel_returns_to_disconnected_without_code"] = (
+            await page.get_by_label("Provider confirmation code").count() == 0
+            and connect_attempts == 2
+        )
+        await page.get_by_role("button", name="Connect subscription", exact=True).click()
+        await page.get_by_role("button", name="Restart sign-in", exact=True).click()
+        await page.get_by_text("Waiting for the provider sign-in link…", exact=True).wait_for()
+        checks["restart_is_explicit_cancel_then_connect"] = connect_attempts == 4
+        await page.get_by_role("button", name="Check connection", exact=True).click()
+        login = page.get_by_role("link", name="Open provider sign-in")
+        await login.wait_for()
+        checks["provider_link_precedes_confirmation_code"] = (
+            await login.get_attribute("href")
+        ).startswith("https://claude.com/cai/oauth/authorize?") and await page.locator(
+            ".auth-details"
+        ).evaluate(
+            "box=>Array.from(box.querySelectorAll('a,input')).map(item=>item.tagName).join(',')==='A,INPUT'"
+        )
+        await page.screenshot(path=str(output / "studio-signin-code.png"), full_page=True)
         await page.get_by_label("Provider confirmation code").fill(code)
         await page.wait_for_timeout(5200)
         checks["auth_poll_preserves_code_being_entered"] = (
@@ -393,8 +457,6 @@ async def main():
         checks["passive_product_asks_only"] = not any(
             method == "GET" and path == "/v1/asks" for method, path, _ in calls
         )
-        output = Path(os.getenv("WORLD_STUDIO_OUTPUT", "/tmp/studio-output"))
-        output.mkdir(parents=True, exist_ok=True)
         await page.screenshot(path=str(output / "studio-desktop.png"), full_page=True)
         await page.set_viewport_size({"width": 390, "height": 844})
         await page.wait_for_timeout(100)

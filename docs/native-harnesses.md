@@ -31,6 +31,13 @@ derived from actual native status commands. Subscription model cost remains
 unmeasured, and these cooperative development sessions are not research cells.
 No authentication or model call starts merely from library discovery.
 
+After choosing **Connect subscription**, open the **Open provider sign-in**
+link in the app. A server or Docker container cannot open your local browser
+for you. Claude's confirmation-code input belongs to that provider flow;
+paste a code only after completing the linked official authorization page.
+The supported Claude client uses `https://claude.com/cai/oauth/authorize`;
+the service validates that exact endpoint before exposing the link.
+
 ## Process and evidence lifecycle
 
 Launch records the actual version, model, billing mode, prompt hash, and factual

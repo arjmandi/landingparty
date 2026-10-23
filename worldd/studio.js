@@ -86,13 +86,90 @@ function renderRunDetail(data) {
   const activity=node('section',null,'detail-section');append(activity,append(node('div',null,'panel-heading'),node('h3','The record'),node('span','ACTUAL WORLD ACTIVITY','section-label')));const events=Array.isArray(data.timeline)?data.timeline:[];if(!events.length)activity.append(empty('The record starts here','World actions and observations will appear as the agent works.'));else{const timeline=node('ol',null,'timeline');for(const event of events){const row=node('li',null,'timeline-item'+(String(event.type||event.kind).includes('ask')?' ask':''));append(row,node('time',when(event.at||event.ts),'timeline-time'),node('h3',event.title||event.summary||String(event.type||event.kind||'Recorded event').replaceAll('_',' ')));const detail=event.detail||event.description;if(typeof detail==='string'&&detail)row.append(node('p',detail));timeline.append(row);}activity.append(timeline);}box.append(activity);return box;
 }
 
-function renderHarnesses() {
-  const grid=node('div',null,'harness-grid');for(const value of state.harnesses){const card=node('article',null,'harness-card');append(card,node('div',value.name?.slice(0,1)||'↗','harness-mark'),node('h2',value.name||value.id),node('p',value.description||'A native way for your agent to work.'));
-    const installed=value.installed;const installState=value.install_status?.state;const prerequisites=value.requirements?.node===false||value.requirements?.npm===false;const install=node('div',null,'mode-row');append(install,append(node('div',null,'mode-row-top'),node('strong','01 · Native client'),pill(installed===true?'connected':installState==='installing'?'connecting':'disconnected')));if(installed===false){append(install,node('p',prerequisites?'Node.js and npm are needed on this instance before installation.':value.install_status?.message||'Install the supported native client into this instance.'),button(installState==='installing'?'Installing…':'Install client',async()=>{await api('/api/harnesses/'+encodeURIComponent(value.id)+'/install',{body:{},timeout:120000});notify('Client installation state updated.');await refreshWorkspace();},'button compact'));install.lastChild.disabled=prerequisites||installState==='installing';}else if(installed===true)install.append(node('p',value.version?'Installed · '+value.version:'Native client is installed.'));else install.append(node('p',value.install_status?.message||'Client readiness is checked by the world.'));card.append(install);
-    for(const mode of modeList(value)){const row=node('section',null,'mode-row');append(row,append(node('div',null,'mode-row-top'),node('strong',mode.id==='subscription'?'02 · Provider subscription':'02 · API key'),pill(mode.ready?'connected':'disconnected')),node('p',mode.billing?.label||(mode.id==='subscription'?'Uses your provider plan. Model usage is not dollar-metered by the world.':'Provider API usage is metered against the run’s dollar budget.')));if(mode.reason)row.append(node('p',mode.reason));if(mode.id==='subscription'){const auth=state.connections.get(value.id)||mode.connection||value.connection;const authState=auth?.state;if(authState==='connected'){row.append(button('Disconnect subscription',async()=>{await api('/api/harnesses/'+encodeURIComponent(value.id)+'/disconnect',{body:{}});state.connections.delete(value.id);await refreshWorkspace();},'button subtle compact'));}else if(authState==='connecting'||authState==='awaiting_code'||auth?.requires_code){row.append(authPanel(value.id,auth));}else{row.append(button('Connect subscription',async()=>{const auth=await api('/api/harnesses/'+encodeURIComponent(value.id)+'/connect',{body:{}});state.connections.set(value.id,auth.connection||auth);renderHarnesses();},'button compact'));row.lastChild.disabled=installed!==true;if(auth?.message)row.append(node('p',auth.message));}}else row.append(button(mode.ready?'Manage API key':'Configure API key',()=>navigate('settings'),'button subtle compact'));if(mode.ready)row.append(button('Start with this connection ↗',()=>openRun(value.id,mode.id),'button primary compact'));card.append(row);}grid.append(card);}
-  content(heading('harnesses'),grid.children.length?grid:empty('No harnesses are available','The world has not reported a native harness library yet.',button('Refresh readiness',refreshWorkspace)) ,node('p','Installation and sign-in happen only when you request them. Native clients run cooperatively on this host. Use a dedicated host or OS user for secrets you do not want their tools to access.','quiet-note'));
+function authPresentation(auth={}) {
+  const pending=auth.state==='connecting'||auth.state==='awaiting_code';
+  let loginUrl=null;
+  try {
+    const url=new URL(auth.auth_url);
+    if(url.protocol==='https:'&&!url.username&&!url.password&&!url.hash&&(!url.port||url.port==='443'))loginUrl=url.href;
+  } catch {/* A missing or malformed link is still a pending sign-in, not a code prompt. */}
+  const current=pending?'connecting':auth.state==='connected'?'connected':auth.state==='failed'?'failed':'disconnected';
+  return {state:current,pending,loginUrl:pending?loginUrl:null,manualCode:!!(pending&&loginUrl&&(auth.requires_code||auth.state==='awaiting_code'))};
 }
-function authPanel(id,auth) { const box=node('div',null,'auth-details');append(box,node('p',auth.message||'Complete sign-in with your provider, then return here.'));const login=externalLink('Open provider sign-in ↗',auth.auth_url);if(login)box.append(login);if(typeof auth.device_code==='string')box.append(node('span',auth.device_code,'device-code'));if(auth.requires_code||auth.state==='awaiting_code'){const label=node('label','Provider confirmation code'),input=node('input');input.type='password';input.autocomplete='off';input.setAttribute('aria-label','Provider confirmation code');label.append(input);box.append(label,button('Submit confirmation code',async()=>{const code=input.value;input.value='';if(!code.trim())throw new Error('Enter the confirmation code from your provider.');try{const result=await api('/api/harnesses/'+encodeURIComponent(id)+'/connection/code',{body:{code}});state.connections.set(id,result.connection||result);}catch(error){if(error.auth)throw error;throw new Error('The confirmation code could not be accepted. Check the provider flow and try again.');}await refreshWorkspace();},'button primary compact'));}append(box,button('Check connection',async()=>{const result=await api('/api/harnesses/'+encodeURIComponent(id)+'/connection');state.connections.set(id,result.connection||result);await refreshWorkspace();},'button compact'),button('Cancel sign-in',async()=>{await api('/api/harnesses/'+encodeURIComponent(id)+'/cancel-connect',{body:{}});state.connections.delete(id);await refreshWorkspace();},'button subtle compact'));return box; }
+function authFailure(auth) {
+  const reasons={login_timeout:'Sign-in timed out. Start again to get a fresh provider link.',login_interrupted:'The sign-in process was interrupted. Start again to get a fresh provider link.',native_cli_missing:'The native client is unavailable. Install it before signing in.',native_status_unavailable:'The native client could not confirm account access. Try signing in again.',subscription_login_required:'A provider subscription account is required for this connection.'};
+  return reasons[auth?.reason]||auth?.message||(auth?.state==='failed'?'Sign-in did not complete. Try again to get a fresh provider link.':null);
+}
+async function startSubscription(id,restart=false) {
+  state.connections.set(id,{state:'connecting',request_pending:true});renderHarnesses();
+  try {
+    if(restart)await api('/api/harnesses/'+encodeURIComponent(id)+'/cancel-connect',{body:{}});
+    const result=await api('/api/harnesses/'+encodeURIComponent(id)+'/connect',{body:{}});
+    state.connections.set(id,result.connection||result);renderHarnesses();
+  } catch(error) {
+    if(error.auth)throw error;
+    state.connections.set(id,{state:'failed',message:error.message});renderHarnesses();throw error;
+  }
+}
+function renderHarnesses() {
+  const grid=node('div',null,'harness-grid');
+  for(const value of state.harnesses){
+    const card=node('article',null,'harness-card');
+    append(card,node('div',value.name?.slice(0,1)||'↗','harness-mark'),node('h2',value.name||value.id),node('p',value.description||'A native way for your agent to work.'));
+    const installed=value.installed,installState=value.install_status?.state,prerequisites=value.requirements?.node===false||value.requirements?.npm===false;
+    const install=node('div',null,'mode-row');
+    append(install,append(node('div',null,'mode-row-top'),node('strong','01 · Native client'),pill(installed===true?'connected':installState==='installing'?'connecting':'disconnected')));
+    if(installed===false){
+      append(install,node('p',prerequisites?'Node.js and npm are needed on this instance before installation.':value.install_status?.message||'Install the supported native client into this instance.'),button(installState==='installing'?'Installing…':'Install client',async()=>{await api('/api/harnesses/'+encodeURIComponent(value.id)+'/install',{body:{},timeout:120000});notify('Client installation state updated.');await refreshWorkspace();},'button compact'));
+      install.lastChild.disabled=prerequisites||installState==='installing';
+    } else if(installed===true)install.append(node('p',value.version?'Installed · '+value.version:'Native client is installed.'));
+    else install.append(node('p',value.install_status?.message||'Client readiness is checked by the world.'));
+    card.append(install);
+    for(const mode of modeList(value)){
+      const subscription=mode.id==='subscription';
+      const auth=(mode.ready?value.connection:null)||state.connections.get(value.id)||mode.connection||value.connection||{};
+      const view=authPresentation(auth),row=node('section',null,'mode-row');
+      append(row,append(node('div',null,'mode-row-top'),node('strong',subscription?'02 · Provider subscription':'02 · API key'),pill(subscription?view.state:mode.ready?'connected':'disconnected')),node('p',mode.billing?.label||(subscription?'Uses your provider plan. Model usage is not dollar-metered by the world.':'Provider API usage is metered against the run’s dollar budget.')));
+      if(mode.reason&&(!subscription||!view.pending))row.append(node('p',mode.reason));
+      if(subscription){
+        if(view.state==='connected')row.append(button('Disconnect subscription',async()=>{await api('/api/harnesses/'+encodeURIComponent(value.id)+'/disconnect',{body:{}});state.connections.delete(value.id);await refreshWorkspace();},'button subtle compact'));
+        else if(view.pending)row.append(authPanel(value.id,auth,view));
+        else {
+          const failure=authFailure(auth);if(failure)row.append(node('p',failure));
+          row.append(button(view.state==='failed'?'Try sign-in again':'Connect subscription',()=>startSubscription(value.id),'button compact'));
+          row.lastChild.disabled=installed!==true;
+        }
+      } else row.append(button(mode.ready?'Manage API key':'Configure API key',()=>navigate('settings'),'button subtle compact'));
+      if(mode.ready)row.append(button('Start with this connection ↗',()=>openRun(value.id,mode.id),'button primary compact'));
+      card.append(row);
+    }
+    grid.append(card);
+  }
+  content(heading('harnesses'),grid.children.length?grid:empty('No harnesses are available','The world has not reported a native harness library yet.',button('Refresh readiness',refreshWorkspace)),node('p','Installation and sign-in happen only when you request them. Native clients run cooperatively on this host. Use a dedicated host or OS user for secrets you do not want their tools to access.','quiet-note'));
+}
+function authPanel(id,auth,view=authPresentation(auth)) {
+  const box=node('div',null,'auth-details');box.setAttribute('aria-busy',String(!!auth.request_pending));
+  if(view.loginUrl){
+    append(box,node('h3','1 · Open your provider’s sign-in page'),node('p',auth.message||'Sign in with your subscription account using the provider link below.'),externalLink('Open provider sign-in ↗',view.loginUrl));
+    if(typeof auth.device_code==='string')append(box,node('p','Enter this device code on the provider’s page.'),node('span',auth.device_code,'device-code'));
+    if(view.manualCode){
+      const label=node('label','Provider confirmation code'),input=node('input');input.type='password';input.autocomplete='off';input.setAttribute('aria-label','Provider confirmation code');label.append(input);
+      append(box,node('h3','2 · Return with the confirmation code'),node('p','After completing sign-in on the provider’s page, paste its confirmation code here.'),label,button('Submit confirmation code',async()=>{
+        const code=input.value;input.value='';if(!code.trim())throw new Error('Enter the confirmation code from your provider.');
+        try {const result=await api('/api/harnesses/'+encodeURIComponent(id)+'/connection/code',{body:{code}});state.connections.set(id,result.connection||result);}
+        catch(error){if(error.auth)throw error;throw new Error('The confirmation code could not be accepted. Check the provider flow and try again.');}
+        await refreshWorkspace();
+      },'button primary compact'));
+    }
+  } else {
+    const waiting=node('p',auth.request_pending?'Starting native sign-in…':'Waiting for the provider sign-in link…');waiting.setAttribute('role','status');
+    append(box,waiting,node('p','The native client has not supplied a verified sign-in link yet. Check again, or restart sign-in to request a fresh link. No confirmation code is needed here yet.'));
+  }
+  const controls=node('div',null,'record-actions');
+  append(controls,button('Check connection',async()=>{const result=await api('/api/harnesses/'+encodeURIComponent(id)+'/connection');state.connections.set(id,result.connection||result);await refreshWorkspace();},'button compact'),button('Restart sign-in',()=>startSubscription(id,true),'button compact'),button('Cancel sign-in',async()=>{await api('/api/harnesses/'+encodeURIComponent(id)+'/cancel-connect',{body:{}});state.connections.delete(id);await refreshWorkspace();},'button subtle compact'));
+  for(const control of controls.children)control.disabled=!!auth.request_pending;
+  box.append(controls);return box;
+}
 
 function recordHeader(kind,status) { return append(node('div',null,'record-top'),node('span',String(kind||'record').replaceAll('_',' '),'record-type'),status?pill(status):null); }
 function keyValues(values) { const list=node('dl',null,'key-values');for(const [label,value] of values){if(value===null||value===undefined||value==='')continue;if(typeof value!=='string'&&typeof value!=='number'&&typeof value!=='boolean')continue;append(list,node('dt',label),node('dd',value));}return list; }

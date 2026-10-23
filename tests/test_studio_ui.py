@@ -1,5 +1,6 @@
 """Product shell safety and packaging contracts; browser flows live in studio_smoke.py."""
 
+import json
 import re
 import shutil
 import subprocess
@@ -62,3 +63,63 @@ def test_studio_javascript_parses():
         capture_output=True,
         text=True,
     )
+
+
+def test_subscription_state_requires_active_flow_and_valid_link_before_code():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js state regression checker is unavailable")
+    source = (ROOT / "worldd/studio.js").read_text()
+    helper = source[
+        source.index("function authPresentation(") : source.index("function authFailure(")
+    ]
+    official = "https://claude.com/cai/oauth/authorize?client_id=fixture&code=true"
+    cases = [
+        {"state": "disconnected", "requires_code": True, "auth_url": official},
+        {"state": "connecting", "requires_code": True},
+        {"state": "connecting", "requires_code": True, "auth_url": official},
+        {"state": "awaiting_code", "auth_url": official},
+        {"state": "failed", "requires_code": True, "auth_url": official},
+        {"state": "connecting", "requires_code": True, "auth_url": "javascript:alert(1)"},
+        {
+            "state": "connecting",
+            "requires_code": True,
+            "auth_url": "https://user:secret@claude.com/cai/oauth/authorize",
+        },
+        {"state": "connected", "requires_code": True, "auth_url": official},
+    ]
+    script = (
+        helper + "\nconsole.log(JSON.stringify(" + json.dumps(cases) + ".map(authPresentation)))"
+    )
+    result = subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+    rows = json.loads(result.stdout)
+    assert [row["state"] for row in rows] == [
+        "disconnected",
+        "connecting",
+        "connecting",
+        "connecting",
+        "failed",
+        "connecting",
+        "connecting",
+        "connected",
+    ]
+    assert [row["manualCode"] for row in rows] == [
+        False,
+        False,
+        True,
+        True,
+        False,
+        False,
+        False,
+        False,
+    ]
+    assert [row["loginUrl"] for row in rows] == [
+        None,
+        None,
+        official,
+        official,
+        None,
+        None,
+        None,
+        None,
+    ]

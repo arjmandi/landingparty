@@ -7,6 +7,7 @@ import signal
 import sys
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
@@ -56,7 +57,14 @@ if scenario.get('child'):
  child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'])
  (root/'child.pid').write_text(str(child.pid))
 if kind=='claude-code':
- print('https://claude.ai/oauth/authorize?client_id=fixture&code=true&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=fixture-state',flush=True)
+ if scenario.get('delay_url'):
+  print('Paste code here: ',end='',flush=True)
+  while not (root/'show_link').exists():time.sleep(.01)
+ url='https://claude.com/cai/oauth/authorize?client_id=fixture&code=true&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Aprofile+user%3Ainference&code_challenge=fixture-challenge&code_challenge_method=S256&state=fixture-state'
+ print("Opening browser to sign in…",flush=True)
+ print("If the browser didn't open, visit: "+'\x1b]8;;'+url+'\x07'+url+'\x1b]8;;\x07',flush=True)
+ if scenario.get('browser_callback'):
+  print(url.replace('https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback','http%3A%2F%2Flocalhost%3A51234%2Fcallback'),flush=True)
  print('Paste code here: ',end='',flush=True)
  value=sys.stdin.readline().strip()
  print('Received '+value,flush=True)
@@ -107,6 +115,8 @@ async def state(service, harness, expected, instance="default"):
 
 
 async def test_claude_manual_code_uses_private_pty_and_only_actual_subscription_status(auth):
+    profile = auth.profile_path("claude-code")
+    (profile / "scenario.json").write_text(json.dumps({"browser_callback": True}))
     assert (await auth.status("claude-code"))["state"] == "auth_required"
     started = await auth.start("claude-code")
     assert started["state"] == "connecting"
@@ -116,7 +126,10 @@ async def test_claude_manual_code_uses_private_pty_and_only_actual_subscription_
         return current if current.get("requires_code") and current.get("auth_url") else None
 
     current = await until(prompt)
-    assert current["auth_url"].startswith("https://claude.ai/oauth/authorize?")
+    assert current["auth_url"].startswith("https://claude.com/cai/oauth/authorize?")
+    assert parse_qs(urlsplit(current["auth_url"]).query)["redirect_uri"] == [
+        "https://platform.claude.com/oauth/code/callback"
+    ]
     assert current["awaiting_code"]
     for invalid in ("code\nexecute", "code\r", "code\x1b", "", "x" * 2049):
         with pytest.raises(ValueError):
@@ -184,6 +197,40 @@ async def test_zero_login_exit_without_actual_authenticated_status_is_failed(aut
     assert result["auth_method"] == "unknown"
 
 
+async def test_code_action_waits_for_verified_link_without_failing_on_earlier_untrusted_output(
+    auth,
+):
+    profile = auth.profile_path("claude-code")
+    (profile / "scenario.json").write_text(json.dumps({"delay_url": True}))
+    await auth.start("claude-code")
+
+    async def blocked_prompt():
+        current = await auth.status("claude-code")
+        return current if current.get("reason") == "authorization_link_unavailable" else None
+
+    current = await until(blocked_prompt)
+    assert current["state"] == "connecting"
+    assert not current["requires_code"] and not current["awaiting_code"]
+    assert "auth_url" not in current and "input_required" not in current
+    assert current["message"] == "Waiting for a verified provider sign-in link."
+    assert "auth.openai.com.evil" not in json.dumps(current)
+    with pytest.raises(ValueError):
+        await auth.submit_code("claude-code", "expected-oauth-code")
+    (profile / "show_link").touch()
+
+    async def ready_prompt():
+        current = await auth.status("claude-code")
+        return current if current["requires_code"] else None
+
+    current = await until(ready_prompt)
+    assert current["auth_url"].startswith("https://claude.com/cai/oauth/authorize?")
+    assert current.get("reason") != "authorization_link_unavailable"
+    await auth.submit_code("claude-code", "expected-oauth-code")
+    assert (await until(lambda: state(auth, "claude-code", "connected")))[
+        "auth_method"
+    ] == "subscription"
+
+
 async def test_cancel_and_disconnect_stop_process_group_and_clear_only_owned_profile(auth):
     profile = auth.profile_path("codex", "one")
     other = auth.profile_path("codex", "two")
@@ -215,10 +262,24 @@ async def test_cancel_and_disconnect_stop_process_group_and_clear_only_owned_pro
         "https://auth.openai.com/redirect?next=https://evil.test",
         "https://auth.openai.com/codex/device?access_token=secret",
         "https://claude.ai/oauth/authorize?redirect_uri=https%3A%2F%2Fevil.test%2Fcallback",
+        "https://claude.com.evil/cai/oauth/authorize",
+        "https://claude.com/oauth/authorize",
+        "https://claude.com/cai/oauth/authorize?redirect_uri=https%3A%2F%2Fevil.test%2Fcallback",
+        "https://claude.com/cai/oauth/authorize?access_token=secret",
     ],
 )
 def test_authentication_urls_cannot_point_at_untrusted_hosts_or_redirects(url):
     assert _safe_url("codex" if "openai" in url else "claude-code", url) is None
+
+
+def test_current_official_claude_endpoint_and_optional_native_query_fields_are_supported():
+    url = (
+        "https://claude.com/cai/oauth/authorize?code=true&client_id=fixture&response_type=code"
+        "&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"
+        "&scope=user%3Aprofile+user%3Ainference&code_challenge=fixture&code_challenge_method=S256"
+        "&state=fixture-state&orgUUID=fixture-org&login_hint=fixture&login_method=fixture"
+    )
+    assert _safe_url("claude-code", url) == url
 
 
 async def test_private_profiles_reject_traversal_and_symlinks(auth, tmp_path):

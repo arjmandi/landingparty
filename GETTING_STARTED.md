@@ -104,6 +104,9 @@ Code 2.1.308 and Codex CLI 0.163.0.
 
 In the harness card, choose **Connect subscription**. This invokes the official
 native client's sign-in flow; it does not turn an API key into a subscription.
+Wait for **Open provider sign-in**, then click that link to open the provider
+in your browser. The native client runs inside the server or container, so it
+does not open a terminal or browser window on your computer automatically.
 
 - **Codex:** open the official provider device sign-in URL, enter the displayed
   device code when requested, and authorize your ChatGPT account.

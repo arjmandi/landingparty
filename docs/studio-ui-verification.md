@@ -46,12 +46,12 @@ socket, world state, native profile, or provider key is mounted into the pilot.
 
 ## Final packaged-image result
 
-On 2026-10-23, actual sandboxed Chromium passed all **24 checks**, with **46 local
+On 2026-10-23, actual sandboxed Chromium passed all **30 checks**, with **62 local
 fixture requests, zero provider calls, and zero script errors**, using world
 image:
 
 ```
-sha256:33a4bbf242b21f9dc9accde0fdb5489d766dedd584617bb3ab3c6ac1dd076ce9
+sha256:589fec167ccc8cf1b07276fe511a58b356be704ca888e04233a51667b4b2bf26
 ```
 
 The run mounted the final pilot script read-only and a screenshot output
@@ -60,6 +60,9 @@ network disabled, all capabilities dropped, no-new-privileges, and the vendored
 browser seccomp profile. The three packaged asset hashes matched the reviewed
 source files. Desktop (1440 × 1000) and mobile (390 × 844) screenshots were
 inspected; the mobile check confirmed no document-level horizontal overflow.
+The sign-in checks also cover the reported missing-link state, a Connecting
+badge, failed-flow retry, and the current official Claude link appearing before
+manual code entry. The pilot uses a private 512 MiB `/tmp` tmpfs for Chromium.
 The machine-readable software receipt is `data/validation/studio-software.json`.
 This local fixture verification does not claim live subscription authentication
 or a real provider run.

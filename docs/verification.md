@@ -81,6 +81,31 @@ and can read that user's private files. It does not create the separate fenced
 research deployment. Subscription model dollars remain unmeasured; their dollar
 cap covers World tools only. None of these checks passes a scientific gate.
 
+## Claude subscription sign-in correction, 2026-10-23
+
+The installed Claude Code 2.1.308 client emits
+`https://claude.com/cai/oauth/authorize`. The original URL validator accepted
+older endpoints, so it hid the real link while exposing the client's code
+prompt. The earlier browser fixture did not represent this actual endpoint.
+The validator now accepts the exact current endpoint and retains its redirect
+checks; the UI shows Connecting while waiting and asks for a code only after
+a verified sign-in link is available. The provider-hosted manual callback is
+preferred to a callback inside the container.
+
+Validation: 1,189 tests passed with Docker skill checks enabled (221.31 seconds,
+two upstream deprecation warnings); all 30 packaged Chromium checks passed
+with 62 local fixture requests and zero provider calls or script errors.
+The actual native client's sign-in startup also passed in the rebuilt image,
+then canceled without completing account authorization. That explicit check
+is available as `tests/native_auth_smoke.py`; it records URL shapes only and
+removes its temporary profile. Metadata receipts remain private in
+`data/validation/{native-auth-startup,studio}-software.json`.
+
+These checks used world image
+`sha256:589fec167ccc8cf1b07276fe511a58b356be704ca888e04233a51667b4b2bf26`
+without application source overrides. Full subscription authorization and
+provider billing still require the operator's own account.
+
 ## Boundaries requiring actual operating evidence
 
 The public-internet check fails closed: HTTPS DNS resolves a public destination,
