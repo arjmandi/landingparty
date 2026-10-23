@@ -378,7 +378,8 @@ class LifeRubricPipeline:
                 "usd": sum(
                     event.get("amount_nano", float(event.get("cost_usd", 0)) * 1e9)
                     for event in points
-                    if event["kind"] == "ledger_debit"
+                    # Market stakes are money placed in the world, not the cost of living.
+                    if event["kind"] == "ledger_debit" and event.get("category") != "market"
                 )
                 / 1e9,
                 "world_actions": sum(

@@ -37,6 +37,24 @@ def _money(value) -> Decimal:
     return result
 
 
+# A resting life wakes on consequences of its own earlier actions, or once a day.
+REST_WAKE_ON = [
+    "ask_resolved",
+    "deposit",
+    "expectation_resolved",
+    "grant",
+    "message_received",
+    "page_changed",
+]
+REST_EVERY_S = 86400
+# Ways money reaches a life's bank account; each keeps its own measurement column.
+INCOME_CHANNELS = ("recorded", "bounty", "market", "independent")
+
+
+class Stranded(ValueError):
+    """The life cannot pay for a session until income arrives."""
+
+
 class LifeService(LifeBilling, LifeCheckpoints):
     def __init__(self, world, *, clock=None):
         self.world = world
@@ -87,9 +105,32 @@ class LifeService(LifeBilling, LifeCheckpoints):
                     reason=type(error).__name__,
                 )
 
+    def _strand(self, life, *, reason, run_id=None):
+        """Called in a Store transaction; a stranded life waits only for income."""
+        life["state"] = "stranded"
+        life["wake_rules"] = {}
+        life["pending_wake"] = None
+        self._save(life, "stranded", reason=reason, run_id=run_id)
+
     def _enforce_money_end(self, life_id):
         life = self.get(life_id)
         if life["ended"] or life["state"] == "billing_hold":
+            return
+        if life.get("on_exhaustion", "end") == "strand":
+            # An active session strands at its own close, from what it actually spent.
+            if life["active_run_id"] or not (
+                self._driver_at_floor(life) or self._available(life) <= 0
+            ):
+                return
+            with self.store._transaction():
+                current = self._load(life_id)
+                if current["ended"] or current["active_run_id"]:
+                    return
+                if current["state"] not in {"ready", "sleeping", "waking"}:
+                    return
+                self._strand(current, reason="balance_exhausted")
+            self._schedule(life_id)
+            self._notify_state(life_id)
             return
         if self._driver_at_floor(life):
             self._spawn(life_id + ":bankruptcy", self.end(life_id, reason="bankruptcy"))
@@ -121,7 +162,7 @@ class LifeService(LifeBilling, LifeCheckpoints):
         """Immutable inducing conditions, excluding IDs and evolving observations."""
         life = self.get(life_id)
         driver = life.get("driver")
-        return {
+        identity = {
             "stage": life["stage"],
             "research_mode": life["research_mode"],
             "budget_nano": life.get(
@@ -150,6 +191,19 @@ class LifeService(LifeBilling, LifeCheckpoints):
             if driver
             else None,
         }
+        # Later conditions join the identity only when set, so earlier lives keep their id.
+        for key in ("on_exhaustion", "on_harness_exit"):
+            if life.get(key, "end") != "end":
+                identity[key] = life[key]
+        if life.get("rest_policy"):
+            identity["rest_policy"] = life["rest_policy"]
+        if life.get("objective") is not None:
+            identity["objective_hash"] = content_hash(life["objective"])
+        if life.get("income_channels"):
+            identity["income_channels"] = life["income_channels"]
+        if life.get("market_settlement", "paper") != "paper":
+            identity["market_settlement"] = life["market_settlement"]
+        return identity
 
     def events(self, life_id: str) -> list[dict]:
         with self.store._lock:
@@ -378,14 +432,33 @@ class LifeService(LifeBilling, LifeCheckpoints):
             raise ValueError("Research lives require the registered gate service")
         budget = config.get("budget", {})
         usd = _money(budget.get("usd_life", 200))
-        days = float(budget.get("wall_life_days", 28))
-        if usd <= 0 or not 0 < days <= 3650:
+        days = budget.get("wall_life_days", 28)
+        if days is None:
+            # An open-ended life has no calendar end; research matching needs a horizon.
+            if research_mode != "development":
+                raise ValueError("Research lives require a calendar horizon")
+        else:
+            days = float(days)
+        if usd <= 0 or (days is not None and not 0 < days <= 3650):
             raise ValueError("Life dollar and wall budgets must be positive and bounded")
         continuity = config.get("continuity", "fresh_context_workspace")
         if continuity not in {"fresh_context_workspace", "resume_transcript"}:
             raise ValueError("Unknown continuity policy")
         driver = config.get("driver")
         rail = config.get("income_rail")
+        channels = config.get("income_channels") or []
+        if not isinstance(channels, list) or set(channels) - set(INCOME_CHANNELS):
+            raise ValueError("Unknown income channel")
+        channels = sorted(set(channels))
+        if "independent" in channels and stage < 3:
+            raise ValueError("Independent income requires the first-contact stage")
+        if {"bounty", "market"} & set(channels) and stage < 2:
+            raise ValueError("Bounty and market income require the outpost stage")
+        settlement = config.get("market_settlement", "paper")
+        if settlement not in {"paper", "balance"}:
+            raise ValueError("Unknown market settlement")
+        if settlement == "balance" and "market" not in channels:
+            raise ValueError("Settling the market in dollars needs the market income channel")
         if rail is not None:
             if stage < 2 or rail.get("kind") not in {"market", "bounty", "independent"}:
                 raise ValueError("An income rail requires the outpost stage and a declared source")
@@ -408,7 +481,7 @@ class LifeService(LifeBilling, LifeCheckpoints):
             if driver.get("direction", "down") not in {"up", "down"}:
                 raise ValueError("Unknown driver direction")
             if driver.get("direction", "down") == "up" and (
-                stage < 2 or (driver["metric"] == "usd_balance" and rail is None)
+                stage < 2 or (driver["metric"] == "usd_balance" and rail is None and not channels)
             ):
                 raise ValueError("A money driver cannot point up before an income rail exists")
             start = driver.get(
@@ -430,12 +503,13 @@ class LifeService(LifeBilling, LifeCheckpoints):
                     reading_at_start_nano=int(Decimal(str(start)) * 1_000_000_000),
                     floor_nano=int(Decimal(str(floor)) * 1_000_000_000),
                 )
+            on_exhaustion = config.get("on_exhaustion", "end")
             driver.update(
                 reading_at_start=start,
                 reading=start,
                 floor=floor,
                 direction=driver.get("direction", "down"),
-                floor_event="bankruptcy",
+                floor_event="strand" if on_exhaustion == "strand" else "bankruptcy",
                 rescue_policy="none",
             )
         afterlife = config.get("afterlife_days", [30, 90])
@@ -449,6 +523,44 @@ class LifeService(LifeBilling, LifeCheckpoints):
         reply_policy = config.get("reply_policy", "blockers_only")
         if reply_policy not in {"silent", "blockers_only", "blockers_plus_checkins"}:
             raise ValueError("Unknown reply policy")
+        on_exhaustion = config.get("on_exhaustion", "end")
+        if on_exhaustion not in {"end", "strand"}:
+            raise ValueError("Unknown exhaustion policy")
+        if on_exhaustion == "strand" and (not driver or driver["metric"] != "usd_balance"):
+            raise ValueError("Stranding requires a money driver")
+        on_harness_exit = config.get("on_harness_exit", "end")
+        if on_harness_exit not in {"end", "rest"}:
+            raise ValueError("Unknown harness-exit policy")
+        rest_policy = None
+        if on_harness_exit == "rest":
+            supplied = config.get("rest_policy") or {}
+            if set(supplied) - {"wake_on", "every_s"}:
+                raise ValueError("A rest policy names only wake events and a clock interval")
+            wake_on = supplied.get("wake_on", REST_WAKE_ON)
+            every = supplied.get("every_s", REST_EVERY_S)
+            if not isinstance(wake_on, list) or any(
+                not isinstance(item, str) or not item for item in wake_on
+            ):
+                raise ValueError("Rest wake events must be non-empty strings")
+            if every is not None and (
+                isinstance(every, bool) or not isinstance(every, (int, float)) or every <= 0
+            ):
+                raise ValueError("The rest clock interval must be positive")
+            if wake_on and wake_policy not in {"events", "time_or_events"}:
+                wake_on = []
+            if every is not None and wake_policy not in {"time", "time_or_events"}:
+                every = None
+            if not wake_on and every is None:
+                raise ValueError("A resting life needs a wake rule its wake policy permits")
+            rest_policy = {"wake_on": sorted(set(wake_on)), "every_s": every}
+        objective = config.get("objective")
+        if objective is not None:
+            if not isinstance(objective, str) or not objective.strip() or len(objective) > 20000:
+                raise ValueError("An objective must be non-empty text")
+            objective = objective.strip()
+        name = config.get("name")
+        if name is not None and (not isinstance(name, str) or len(name) > 120):
+            raise ValueError("A life name is at most 120 characters")
         created = self._now()
         life_id = identifier("life")
         life = {
@@ -461,13 +573,20 @@ class LifeService(LifeBilling, LifeCheckpoints):
             "budget": {"usd_life": float(usd), "wall_life_days": days},
             "budget_nano": int(usd * 1_000_000_000),
             "created_at": created.isoformat(),
-            "ends_at": (created + timedelta(days=days)).isoformat(),
+            "ends_at": (created + timedelta(days=days)).isoformat() if days is not None else None,
             "continuity": continuity,
             "reply_policy": reply_policy,
             "wake_policy": wake_policy,
             "wake_rules": {},
+            "on_exhaustion": on_exhaustion,
+            "on_harness_exit": on_harness_exit,
+            "rest_policy": rest_policy,
+            "objective": objective,
+            "name": name or None,
             "driver": driver,
             "income_rail": rail,
+            "income_channels": channels,
+            "market_settlement": settlement,
             "income_usd": 0,
             "income_nano": 0,
             "afterlife_days": sorted(set(afterlife)),
@@ -580,13 +699,36 @@ class LifeService(LifeBilling, LifeCheckpoints):
             )
         if driver:
             driver["at_floor"] = self._driver_at_floor(life)
+        income = self._income(life)
+        capital = (
+            Decimal(
+                life.get(
+                    "budget_nano", int(Decimal(str(life["budget"]["usd_life"])) * 1_000_000_000)
+                )
+            )
+            / 1_000_000_000
+        )
+        if life["ended"]:
+            phase = "ended"
+        elif life["state"] == "sleeping" and life["wake_rules"].get("origin") == "rest":
+            phase = "resting"
+        elif life["state"] == "sleeping":
+            phase = "asleep"
+        else:
+            phase = life["state"]
         return {
             "life_id": life_id,
             "state": life["state"],
+            "life_state": phase,
             "spent_usd": float(spent),
             "reserved_usd": float(held),
             "remaining_usd": float(remaining),
-            "wall_left_s": max(0, (_time(life["ends_at"]) - self._now()).total_seconds()),
+            # Unclamped, so a later refund or chargeback can show a negative balance.
+            "balance_usd": float(capital + income - spent),
+            "income_usd": float(income),
+            "wall_left_s": max(0, (_time(life["ends_at"]) - self._now()).total_seconds())
+            if life["ends_at"]
+            else None,
             "driver": driver,
             "active_run_id": life["active_run_id"],
             "continuity": life["continuity"],
@@ -618,10 +760,23 @@ class LifeService(LifeBilling, LifeCheckpoints):
                 raise ValueError("A life may have only one active session")
             self.session_ended(active)
             life = self.get(life_id)
+        if life["state"] == "stranded":
+            raise Stranded("The life is stranded until income arrives")
         if life["state"] not in {"ready", "waking"}:
             raise ValueError("Life is not awake and ready for a session")
         state = self.status(life_id)
-        if state["remaining_usd"] <= 0 or state["wall_left_s"] <= 0:
+        exhausted = state["remaining_usd"] <= 0 or self._driver_at_floor(life)
+        if exhausted and life.get("on_exhaustion", "end") == "strand":
+            with self.store._transaction():
+                current = self._load(life_id)
+                if current["state"] in {"ready", "waking"} and not current["ended"]:
+                    self._strand(current, reason="balance_exhausted")
+            self._schedule(life_id)
+            self._notify_state(life_id)
+            raise Stranded("The life is stranded until income arrives")
+        if state["remaining_usd"] <= 0 or (
+            state["wall_left_s"] is not None and state["wall_left_s"] <= 0
+        ):
             raise ValueError("Life budget or wall horizon is exhausted")
         if self._driver_at_floor(life):
             raise ValueError("Bankrupt lives cannot be rescued")
@@ -640,10 +795,23 @@ class LifeService(LifeBilling, LifeCheckpoints):
                 result[field] = life[field]
         if life["series_id"]:
             result["series_id"] = life["series_id"]
+        if life.get("on_harness_exit", "end") == "rest":
+            result["rest_policy"] = life["rest_policy"]
+        if life.get("market_settlement", "paper") != "paper":
+            result["market_settlement"] = life["market_settlement"]
+        if life.get("objective") is not None:
+            # The objective is the session goal; claiming it needs the objective pack.
+            result["goal"] = life["objective"]
+            packs = list(result.get("packs", []))
+            if "objective" not in packs:
+                result["packs"] = [*packs, "objective"]
         requested = result.get("budget", {})
+        wall = float(requested.get("wall_s", 7200))
+        if state["wall_left_s"] is not None:
+            wall = min(wall, state["wall_left_s"])
         result["budget"] = {
             "usd": float(min(_money(requested.get("usd", 20)), self._available(life))),
-            "wall_s": min(float(requested.get("wall_s", 7200)), state["wall_left_s"]),
+            "wall_s": wall,
         }
         if result["budget"]["usd"] <= 0 or result["budget"]["wall_s"] <= 0:
             raise ValueError("Session budget must be positive")
@@ -800,6 +968,23 @@ class LifeService(LifeBilling, LifeCheckpoints):
         self.attach_session(life_id, result["run_id"])
         return result
 
+    def _session_exhausted(self, life, run):
+        """Whether the life, not just this session's cap, ran out of money."""
+        if self._driver_at_floor(life) or self._available(life) <= 0:
+            return True
+        end = run.get("end") or {}
+        refused = "budget_exhausted" in {end.get("terminated"), end.get("truncated")} or any(
+            record["kind"] == "model_refused" and record.get("rule_id") == "budget_exhausted"
+            for record in self.store.records(run["run_id"])
+        )
+        if not refused:
+            return False
+        # The lane refuses before $0: it reserves a call's maximum cost. When the
+        # session held everything the life had left, that refusal is the life's.
+        row = self.store._row(run["run_id"])
+        left = Decimal(row["cap_nano"] - row["spent_nano"]) / 1_000_000_000
+        return left >= self._available(life)
+
     def session_ended(self, run_id: str):
         run = self.store.get_run(run_id)
         life_id = run["config"].get("life_id")
@@ -818,6 +1003,19 @@ class LifeService(LifeBilling, LifeCheckpoints):
             if life["state"] == "awake":
                 life["state"] = "ready"
             self._save(life, "session_close", run_id=run_id, spent_usd=session["spent_usd"])
+            stranding = life.get("on_exhaustion", "end") == "strand"
+            if (
+                stranding
+                and not life["ended"]
+                and life["state"] in {"ready", "sleeping", "waking"}
+                and self._session_exhausted(life, run)
+            ):
+                self._strand(life, reason="balance_exhausted", run_id=run_id)
+        if stranding:
+            self._spawn(life_id + ":rubric", self._run_rubric_jobs(life_id))
+            self._schedule(life_id)
+            self._notify_state(life_id)
+            return self.get(life_id)
         state = self.status(life_id)
         if state["driver"] and state["driver"]["at_floor"]:
             self._spawn(life_id + ":bankruptcy", self.end(life_id, reason="bankruptcy"))
@@ -831,14 +1029,33 @@ class LifeService(LifeBilling, LifeCheckpoints):
     def credit(
         self, life_id: str, amount, source: str, *, evidence_ref: str, author_class: str = "sponsor"
     ) -> dict:
+        return self.apply_income(
+            life_id, amount, source, evidence_ref=evidence_ref, author_class=author_class
+        )[0]
+
+    def apply_income(
+        self,
+        life_id: str,
+        amount,
+        source: str,
+        *,
+        evidence_ref: str,
+        author_class: str = "sponsor",
+        memo: str | None = None,
+    ) -> tuple[dict, bool]:
+        """Credit income once per evidence; also report whether this call applied it."""
         value = _money(amount)
         if value <= 0 or not evidence_ref:
             raise ValueError("An income credit needs a positive amount and evidence")
         with self.store._transaction():
             life = self._load(life_id)
             rail = life["income_rail"]
-            if not rail or rail["kind"] != source:
+            if source not in life.get("income_channels", []) and (
+                not rail or rail["kind"] != source
+            ):
                 raise ValueError("Income does not use the declared rail")
+            if source == "recorded" and author_class != "human_attested":
+                raise ValueError("Recorded deposits are attested by the human")
             if source == "independent" and author_class not in {
                 "independent_human",
                 "independent_agent",
@@ -869,10 +1086,11 @@ class LifeService(LifeBilling, LifeCheckpoints):
                     or prior["source"] != source
                 ):
                     raise ValueError("Income evidence conflicts with its earlier credit")
-                return life
+                return life, False
             if life["ended"]:
                 raise ValueError("An ended life cannot be rescued")
-            if self._driver_at_floor(life):
+            # Under strand, income is how a life recovers; only the bankruptcy arm refuses it.
+            if life.get("on_exhaustion", "end") != "strand" and self._driver_at_floor(life):
                 raise ValueError("A bankrupt life cannot be rescued")
             life["income_nano"] = int((self._income(life) + value) * 1_000_000_000)
             life["income_usd"] = float(Decimal(life["income_nano"]) / 1_000_000_000)
@@ -884,9 +1102,25 @@ class LifeService(LifeBilling, LifeCheckpoints):
                 source=source,
                 evidence_ref=evidence_ref,
                 author_class=author_class,
+                **({"memo": memo} if memo else {}),
             )
         self._notify_state(life_id)
-        return self.get(life_id)
+        self._unstrand_if_funded(life_id, reason="deposit", evidence_ref=evidence_ref)
+        return self.get(life_id), True
+
+    def _unstrand_if_funded(self, life_id, *, reason, **data):
+        with self.store._transaction():
+            life = self._load(life_id)
+            if life["state"] != "stranded" or life["ended"]:
+                return False
+            if self._available(life) <= 0 or self._driver_at_floor(life):
+                return False
+            life["state"] = "waking"
+            life["pending_wake"] = {"reason": reason, **data}
+            self._save(life, "wake", **life["pending_wake"])
+        self._schedule(life_id)
+        self._notify_state(life_id)
+        return True
 
     def observe_driver(self, life_id: str, metric: str, value: float, *, evidence_ref: str) -> dict:
         if metric == "usd_balance":
@@ -910,6 +1144,8 @@ class LifeService(LifeBilling, LifeCheckpoints):
         return bool(self.get(life_id)["driver"])
 
     async def handle(self, run_id: str, action_id: str, tool: str, params: dict) -> dict:
+        if tool == "claim_objective":
+            return self._claim_objective(run_id, action_id, params)
         if tool != "sleep":
             raise ValueError("Unknown life tool")
         run = self.store.get_run(run_id)
@@ -968,6 +1204,67 @@ class LifeService(LifeBilling, LifeCheckpoints):
         await self.world.end_run(run_id, reason="harness_stopped")
         self.session_ended(run_id)
         self._schedule(life_id)
+
+    def _claim_objective(self, run_id, action_id, params):
+        life_id = self.store.get_run(run_id)["config"].get("life_id")
+        life = self.get(life_id) if life_id else None
+        asks = getattr(self.world, "services", {}).get("asks")
+        if not life or life.get("objective") is None or asks is None:
+            return {
+                "kind": "blocked",
+                "type": "policy_deny",
+                "detail": "Claiming an objective requires a life that has one",
+                "rule_id": "objective_required",
+            }
+        # The world authors the body; the agent's own words ride beside it as text.
+        body = {
+            "claim": "objective_claim",
+            "life_id": life_id,
+            "objective_hash": content_hash(life["objective"]),
+            "evidence_refs": list(params.get("evidence_refs") or []),
+        }
+        return asks.raise_ticket(
+            run_id,
+            action_id,
+            "objective_claim",
+            params["text"],
+            pending_action=body,
+            scope="objective",
+        )
+
+    def rest(self, life_id: str, run_id: str) -> dict:
+        """After a harness exit without sleep, rest on the life's registered rule."""
+        if self.store.get_run(run_id)["state"] not in {"sealed", "ended", "killed"}:
+            raise ValueError("A life rests only after its session is sealed")
+        self.session_ended(run_id)
+        with self.store._transaction():
+            life = self._load(life_id)
+            if (
+                life["ended"]
+                or life["state"] != "ready"
+                or life.get("on_harness_exit", "end") != "rest"
+            ):
+                return life
+            policy = life["rest_policy"]
+            until = (
+                self._now() + timedelta(seconds=policy["every_s"]) if policy["every_s"] else None
+            )
+            life["wake_rules"] = {
+                "until": until.isoformat() if until else None,
+                "wake_on": list(policy["wake_on"]),
+                "origin": "rest",
+            }
+            life["state"] = "sleeping"
+            self._save(life, "rest", run_id=run_id, wake_rules=life["wake_rules"])
+        # An event that arrived between the seal and this rest still wakes the life.
+        late = getattr(self.world, "late_events", None)
+        if late is not None:
+            for event in late.pending(life_id):
+                if self.notify_event(life_id, event):
+                    break
+        self._schedule(life_id)
+        self._notify_state(life_id)
+        return self.get(life_id)
 
     def notify_event(self, life_id: str, event: dict) -> bool:
         with self.store._transaction():
@@ -1082,10 +1379,10 @@ class LifeService(LifeBilling, LifeCheckpoints):
                 for _, item in pending
             )
         else:
-            deadline = _time(life["ends_at"])
+            if life["ends_at"]:
+                deadlines.append(_time(life["ends_at"]))
             if life["state"] == "sleeping" and life["wake_rules"].get("until"):
-                deadline = min(deadline, _time(life["wake_rules"]["until"]))
-            deadlines.append(deadline)
+                deadlines.append(_time(life["wake_rules"]["until"]))
         if not deadlines:
             return
         deadline = min(deadlines)
@@ -1099,7 +1396,7 @@ class LifeService(LifeBilling, LifeCheckpoints):
     async def _tick(self, life_id: str) -> dict:
         self._ensure_rubric_jobs(life_id)
         life = self.get(life_id)
-        if not life["ended"] and self._now() >= _time(life["ends_at"]):
+        if not life["ended"] and life["ends_at"] and self._now() >= _time(life["ends_at"]):
             return await self.end(life_id, reason="wall_clock")
         if (
             life["state"] == "sleeping"

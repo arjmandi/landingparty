@@ -386,3 +386,122 @@ async def test_six_transfer_recipients_mount_actual_life_bundles_context_and_shu
                 ],
             }
         )
+
+
+def native_life(app, callback, *, usd=2):
+    world = app.state.world
+    service = world.services["studies"]
+    service.harnesses["native"] = callback
+    life = world.services["lives"].create(
+        {
+            "stage": 2,
+            "budget": {"usd_life": usd, "wall_life_days": None},
+            "driver": {"metric": "usd_balance"},
+            "income_rail": {"kind": "bounty", "usd_per_credit": 1},
+            "on_exhaustion": "strand",
+            "on_harness_exit": "rest",
+        }
+    )
+    runner = service.plan_life(
+        life["life_id"],
+        {
+            "baseline": "native",
+            "model": "fixture-model",
+            "config": {
+                "harness_id": "claude-code@9.9.9/api_key",
+                "packs": ["schedule", "deliver"],
+                "budget": {"usd": 10000, "wall_s": 30},
+            },
+        },
+    )
+    return life["life_id"], service, runner
+
+
+async def test_a_native_exit_rests_the_life_and_a_real_event_wakes_it(running_app):
+    app, _ = running_app
+    world = app.state.world
+    lives = world.services["lives"]
+    calls = []
+
+    def callback(created, cell):
+        calls.append((created["run_id"], cell["config"]["harness_id"]))
+        return {}
+
+    life_id, service, runner = native_life(app, callback)
+    await service.execute_life(runner["runner_id"], execute=True, budget_usd=2)
+    await until(lambda: calls and lives.status(life_id)["life_state"] == "resting")
+    assert calls[0][1] == "claude-code@9.9.9/api_key"
+    assert world.store.reconcile(calls[0][0])["cap_usd"] == 2
+    world.push(calls[0][0], {"type": "message_received", "body": "A later fixture message"})
+    await until(lambda: len(calls) == 2 and lives.status(life_id)["life_state"] == "resting")
+    assert lives.get(life_id)["ended"] is None
+    await lives.end(life_id, reason="beam_up")
+    await until(lambda: service.get_life_runner(runner["runner_id"])["state"] == "completed")
+    assert lives.get(life_id)["ended"]["reason"] == "beam_up"
+
+
+async def test_a_stranded_life_waits_for_income_instead_of_failing(running_app):
+    app, _ = running_app
+    world = app.state.world
+    lives = world.services["lives"]
+    calls = []
+
+    def callback(created, cell):
+        calls.append(created["run_id"])
+        cap = world.store.reconcile(created["run_id"])["cap_usd"]
+        assert world.store.debit(created["run_id"], "model", cap)
+        return {}
+
+    life_id, service, runner = native_life(app, callback, usd=1)
+    await service.execute_life(runner["runner_id"], execute=True, budget_usd=1)
+    await until(lambda: lives.get(life_id)["state"] == "stranded")
+    await asyncio.sleep(0.3)
+    assert len(calls) == 1
+    assert service.get_life_runner(runner["runner_id"])["waiting_reason"] == "stranded"
+    lives.credit(life_id, 1, "bounty", evidence_ref="bounty:fixture-award")
+    await until(lambda: len(calls) == 2 and lives.get(life_id)["state"] == "stranded")
+    assert world.store.reconcile(calls[1])["cap_usd"] == 1
+    assert lives.get(life_id)["ended"] is None
+    await lives.end(life_id, reason="beam_up")
+    await until(lambda: service.get_life_runner(runner["runner_id"])["state"] == "completed")
+
+
+async def test_a_confirmed_objective_claim_ends_the_life_even_across_rest(running_app):
+    app, _ = running_app
+    world = app.state.world
+    lives, asks = world.services["lives"], world.services["asks"]
+    life_id = lives.create(
+        {
+            "budget": {"usd_life": 2, "wall_life_days": None},
+            "objective": "Write one useful note.",
+            "on_harness_exit": "rest",
+            "reply_policy": "silent",
+        }
+    )["life_id"]
+    created = await lives.start_session(life_id, {"budget": {"usd": 1, "wall_s": 30}})
+    run_id = created["run_id"]
+    assert "claim_objective" in world.run_config(run_id)["preamble"]
+    assert world.run_config(run_id)["goal"] == "Write one useful note."
+    rejected = await lives.handle(run_id, "a_claim", "claim_objective", {"text": "Done early."})
+    asks.answer(rejected["ticket_id"], "reject", reason="not_yet")
+    claim = await lives.handle(
+        run_id, "a_claim_2", "claim_objective", {"text": "Done.", "evidence_refs": ["a_1"]}
+    )
+    assert asks.get(claim["ticket_id"])["kind"] == "objective_claim"
+    await world.end_run(run_id, reason="harness_stopped")
+    lives.rest(life_id, run_id)
+    assert lives.status(life_id)["life_state"] == "resting"
+    assert asks.get(claim["ticket_id"])["state"] == "open"
+    asks.answer(claim["ticket_id"], "approve")
+    await until(lambda: lives.get(life_id)["ended"] is not None)
+    assert lives.get(life_id)["ended"]["reason"] == "objective_achieved"
+
+
+async def test_claiming_needs_a_life_with_an_objective(running_app):
+    app, _ = running_app
+    world = app.state.world
+    lives = world.services["lives"]
+    life_id = lives.create({"budget": {"usd_life": 2, "wall_life_days": None}})["life_id"]
+    created = await lives.start_session(life_id, {"budget": {"usd": 1, "wall_s": 30}})
+    reply = await lives.handle(created["run_id"], "a_claim", "claim_objective", {"text": "Done."})
+    assert reply["rule_id"] == "objective_required"

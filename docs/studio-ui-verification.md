@@ -44,6 +44,14 @@ optional writable `WORLD_STUDIO_OUTPUT` directory receives desktop and mobile
 screenshots. A packaged-image pass omits the source-asset overrides. No Docker
 socket, world state, native profile, or provider key is mounted into the pilot.
 
+## Source-level result for the life flow
+
+After the Studio gained lives on a balance, the same pilot passed all **31 checks**
+(the thirty below plus the subscription fallback from a life to a single run),
+with **72 local fixture requests, zero provider calls, and zero script errors**.
+That pass used the source assets on a macOS developer host, outside the hardened
+image. The packaged-image pass below predates these assets and must be repeated.
+
 ## Final packaged-image result
 
 On 2026-10-23, actual sandboxed Chromium passed all **30 checks**, with **62 local

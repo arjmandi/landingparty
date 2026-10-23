@@ -478,3 +478,155 @@ async def test_t0_requires_metered_measurements_and_immutable_artifact(setup):
     changed = {**report, "bank_hash": "sha256:changed"}
     with pytest.raises(ValueError, match="immutable"):
         lives.record_t0(life_id, changed)
+
+
+def stranding_life(lives, usd=1, **extra):
+    return lives.create(
+        {
+            "stage": 2,
+            "budget": {"usd_life": usd, "wall_life_days": None},
+            "driver": {"metric": "usd_balance"},
+            "income_rail": {"kind": "market", "usd_per_credit": 1},
+            "on_exhaustion": "strand",
+            **extra,
+        }
+    )["life_id"]
+
+
+async def test_default_lives_keep_their_protocol_identity(setup):
+    _, lives, _ = setup
+    life_id = lives.create({"driver": {"metric": "usd_balance"}})["life_id"]
+    identity = lives.protocol_identity(life_id)
+    assert not {"on_exhaustion", "on_harness_exit", "rest_policy", "objective_hash"} & set(identity)
+    assert identity["driver"]["floor_event"] == "bankruptcy"
+
+
+async def test_open_ended_development_life_has_no_calendar_end(setup):
+    _, lives, clock = setup
+    life_id = lives.create({"budget": {"usd_life": 5, "wall_life_days": None}})["life_id"]
+    assert lives.status(life_id)["wall_left_s"] is None
+    clock.now += timedelta(days=4000)
+    await lives.tick(life_id)
+    assert lives.get(life_id)["ended"] is None
+    prepared = lives.prepare_session(life_id, {"budget": {"usd": 1, "wall_s": 600}})
+    assert prepared["budget"]["wall_s"] == 600
+
+
+async def test_stranding_requires_a_money_driver(setup):
+    _, lives, _ = setup
+    with pytest.raises(ValueError, match="money driver"):
+        lives.create({"on_exhaustion": "strand"})
+    with pytest.raises(ValueError, match="money driver"):
+        lives.create(
+            {
+                "on_exhaustion": "strand",
+                "driver": {"metric": "footprint.followers", "reading_at_start": 10},
+            }
+        )
+
+
+async def test_spending_to_zero_strands_instead_of_ending_and_income_wakes(setup):
+    from worldd.lives import Stranded
+
+    world, lives, _ = setup
+    life_id = stranding_life(lives)
+    run_id = session(world, lives, life_id, 1)
+    assert world.store.debit(run_id, "model", 1)
+    await world.end_run(run_id)
+    lives.session_ended(run_id)
+    assert lives.get(life_id)["state"] == "stranded"
+    assert lives.get(life_id)["ended"] is None
+    assert lives.status(life_id)["life_state"] == "stranded"
+    with pytest.raises(Stranded):
+        lives.prepare_session(life_id, {})
+    lives.credit(life_id, 2, "market", evidence_ref="market:earned")
+    life = lives.get(life_id)
+    assert life["state"] == "waking"
+    assert life["pending_wake"] == {"reason": "deposit", "evidence_ref": "market:earned"}
+    next_run = session(world, lives, life_id, 5)
+    assert world.store.reconcile(next_run)["cap_usd"] == 2
+    wake = world.store.inbox(next_run)["events"][0]
+    assert (wake["type"], wake["reason"]) == ("wake", "deposit")
+
+
+async def test_a_lane_refusal_with_the_whole_balance_strands_the_life(setup):
+    world, lives, _ = setup
+    life_id = stranding_life(lives)
+    run_id = session(world, lives, life_id, 1)
+    assert world.store.debit(run_id, "model", "0.97")
+    world.store.append_record(
+        run_id, "model_refused", rule_id="budget_exhausted", reservation_usd=0.05
+    )
+    await world.end_run(run_id)
+    lives.session_ended(run_id)
+    assert lives.get(life_id)["state"] == "stranded"
+    assert lives.status(life_id)["balance_usd"] == pytest.approx(0.03)
+
+
+async def test_a_refusal_at_a_smaller_session_cap_does_not_strand(setup):
+    world, lives, _ = setup
+    life_id = stranding_life(lives, usd=5)
+    run_id = session(world, lives, life_id, 1)
+    assert world.store.debit(run_id, "model", "0.97")
+    world.store.append_record(run_id, "model_refused", rule_id="budget_exhausted")
+    await world.end_run(run_id)
+    lives.session_ended(run_id)
+    assert lives.get(life_id)["state"] == "ready"
+
+
+async def test_harness_exit_rests_and_wakes_on_an_event_or_the_daily_clock(setup):
+    world, lives, clock = setup
+    life_id = lives.create({"on_harness_exit": "rest"})["life_id"]
+    run_id = session(world, lives, life_id)
+    await world.end_run(run_id)
+    lives.rest(life_id, run_id)
+    life = lives.get(life_id)
+    assert life["state"] == "sleeping"
+    assert life["wake_rules"]["origin"] == "rest"
+    assert "deposit" in life["wake_rules"]["wake_on"]
+    assert lives.status(life_id)["life_state"] == "resting"
+    assert lives.events(life_id)[-1]["kind"] == "rest"
+    assert lives.notify_event(life_id, {"type": "ask_resolved", "event_id": "e_answer"})
+    assert lives.get(life_id)["state"] == "waking"
+
+    run_id = session(world, lives, life_id)
+    await world.end_run(run_id)
+    lives.rest(life_id, run_id)
+    clock.now += timedelta(hours=23)
+    await lives.tick(life_id)
+    assert lives.get(life_id)["state"] == "sleeping"
+    clock.now += timedelta(hours=1)
+    await lives.tick(life_id)
+    assert lives.get(life_id)["state"] == "waking"
+
+
+async def test_rest_requires_a_sealed_session_and_skips_stranded_lives(setup):
+    world, lives, _ = setup
+    life_id = stranding_life(lives, on_harness_exit="rest")
+    run_id = session(world, lives, life_id, 1)
+    with pytest.raises(ValueError, match="sealed"):
+        lives.rest(life_id, run_id)
+    assert world.store.debit(run_id, "model", 1)
+    await world.end_run(run_id)
+    lives.rest(life_id, run_id)
+    assert lives.get(life_id)["state"] == "stranded"
+
+
+async def test_rest_rules_follow_the_registered_wake_policy(setup):
+    _, lives, _ = setup
+    clock_only = lives.create({"on_harness_exit": "rest", "wake_policy": "time"})
+    assert clock_only["rest_policy"] == {"wake_on": [], "every_s": 86400}
+    with pytest.raises(ValueError, match="wake rule"):
+        lives.create({"on_harness_exit": "rest", "wake_policy": "none"})
+
+
+async def test_objective_becomes_the_session_goal_with_its_claim_pack(setup):
+    _, lives, _ = setup
+    life_id = lives.create(
+        {"objective": "  Publish one useful dataset.  ", "on_harness_exit": "rest"}
+    )["life_id"]
+    prepared = lives.prepare_session(life_id, {"packs": ["schedule"]})
+    assert prepared["goal"] == "Publish one useful dataset."
+    assert prepared["packs"] == ["schedule", "objective"]
+    assert prepared["rest_policy"]["every_s"] == 86400
+    assert "objective_hash" in lives.protocol_identity(life_id)

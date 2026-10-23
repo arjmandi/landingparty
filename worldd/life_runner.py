@@ -5,9 +5,12 @@ import inspect
 import json
 from decimal import Decimal
 
+from .lives import Stranded
 from .models import RunConfig
 from .storage import canonical_json, content_hash, utc_now
 from .util import identifier
+
+BUILT_IN_BASELINES = {"B0", "B1", "B2", "B3", "B3b", "B3c", "self-interaction"}
 
 
 class LifeRunner:
@@ -91,11 +94,15 @@ class LifeRunner:
             raise ValueError(
                 "Transcript continuity requires the actual supported reference-loop adapter"
             )
+        # A registered native callback names its own installed harness and version.
+        native = baseline not in BUILT_IN_BASELINES and baseline in self.harnesses
         config["harness_id"] = (
             f"reference-loop@0.1/native-parallel/max-steps={steps}/max-tokens={tokens}"
             if baseline == "B1"
             else config.get("harness_id", "claude-code@native/stop")
             if baseline == "B2"
+            else config["harness_id"]
+            if native and config.get("harness_id")
             else f"{baseline}@0.1/steps={steps}/revisions={revisions}"
         )
         if cell.get("model"):
@@ -105,7 +112,7 @@ class LifeRunner:
         config.update(life_id=life_id, stage=life["stage"], research_mode=life["research_mode"])
         config = RunConfig.model_validate(config).model_dump(mode="json")
         model = cell.get("model") or config.get("model_snapshot_id")
-        if baseline in {"B0", "B1", "B2", "self-interaction"} and not model:
+        if (baseline in {"B0", "B1", "B2", "self-interaction"} or native) and not model:
             raise ValueError("Life computation requires an actual pinned model")
         if life["continuity"] == "resume_transcript" and not config["capture_model_io"]:
             raise ValueError("Transcript continuity requires disclosed captured context")
@@ -358,28 +365,34 @@ class LifeRunner:
                 if value.get("dependency_resolution", {}).get("sources", {}).get("context"):
                     config["context_import_policy"] = "captured"
                 execution_binding = None
-                if value.get("study_binding"):
-                    config = lives.prepare_session(life["life_id"], config)
-                    intent = {
-                        "episode": len(life["sessions"]) + 1,
-                        "config": config,
-                        "configuration_hash": value["configuration_hash"],
-                    }
-                    intent["hash"] = content_hash(intent)
-                    value.setdefault("session_intents", []).append(intent)
-                    self._save_life_runner(value)
-                    execution_binding = {
-                        **value["study_binding"],
-                        "episode": intent["episode"],
-                        "resolution_hash": intent["hash"],
-                        "dependency_protocol_hash": cell["prereg"].get("dependency_protocol_hash"),
-                    }
-                created = await lives.start_session(
-                    life["life_id"],
-                    config,
-                    register_prereg=cell.get("prereg"),
-                    execution_binding=execution_binding,
-                )
+                try:
+                    if value.get("study_binding"):
+                        config = lives.prepare_session(life["life_id"], config)
+                        intent = {
+                            "episode": len(life["sessions"]) + 1,
+                            "config": config,
+                            "configuration_hash": value["configuration_hash"],
+                        }
+                        intent["hash"] = content_hash(intent)
+                        value.setdefault("session_intents", []).append(intent)
+                        self._save_life_runner(value)
+                        execution_binding = {
+                            **value["study_binding"],
+                            "episode": intent["episode"],
+                            "resolution_hash": intent["hash"],
+                            "dependency_protocol_hash": cell["prereg"].get(
+                                "dependency_protocol_hash"
+                            ),
+                        }
+                    created = await lives.start_session(
+                        life["life_id"],
+                        config,
+                        register_prereg=cell.get("prereg"),
+                        execution_binding=execution_binding,
+                    )
+                except Stranded:
+                    # The life now waits for income; the loop above waits with it.
+                    continue
                 active = created["run_id"]
                 value.update(state="running")
                 value["sessions"].append(
@@ -405,11 +418,11 @@ class LifeRunner:
                 result = await outcome if inspect.isawaitable(outcome) else outcome
                 context_ref = self._capture_life_context(value, active, result)
                 sleeping = lives.get(life["life_id"])["state"] in {"sleeping", "waking"}
-                if sleeping:
-                    while self.store.get_run(active)["state"] not in {"sealed", "ended", "killed"}:
-                        await asyncio.sleep(0.01)
-                else:
+                if not sleeping:
                     await self.world.end_run(active, reason="harness_stopped")
+                # A native harness seals its own run on exit; end_run can return mid-seal.
+                while self.store.get_run(active)["state"] not in {"sealed", "ended", "killed"}:
+                    await asyncio.sleep(0.01)
                 analysis = {"status": "unmeasured", "reason": "Post-run pipeline unavailable"}
                 pipeline = self.world.services.get("pipeline")
                 if pipeline:
@@ -451,8 +464,15 @@ class LifeRunner:
                     )
                 self._save_life_runner(value)
                 end = self.store.get_run(active).get("end", {})
-                active = None
-                if not sleeping:
+                ended_run, active = active, None
+                current = lives.get(life["life_id"])
+                if sleeping or current["ended"] or current["state"] == "stranded":
+                    pass
+                elif current.get("on_harness_exit", "end") == "rest":
+                    # A restart is not the agent stopping; recovery reopens the session.
+                    if not (self._life_closing or getattr(self.world, "closing", False)):
+                        lives.rest(life["life_id"], ended_run)
+                else:
                     await lives.end(
                         life["life_id"], reason=end.get("terminated", "harness_stopped")
                     )

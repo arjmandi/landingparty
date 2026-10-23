@@ -17,7 +17,7 @@ from decimal import ROUND_CEILING, Decimal
 import httpx
 from pydantic import ValidationError
 
-from .models import TOOL_MODELS, TOOL_SERVICES, RunConfig, manifest
+from .models import TOOL_SERVICES, RunConfig, manifest, tool_model
 from .scanning import contains_sensitive_data
 from .search import PROVIDERS, normalize_results, provider_request, search_price
 from .util import blocked, canonical, digest, identifier, now
@@ -246,7 +246,11 @@ class World:
             config = RunConfig.model_validate(settings)
         if "canaries" in self.services:
             self.services["canaries"].validate_configuration(settings)
-        tool_manifest = manifest(config.packs, tools_disabled=config.tools_disabled)
+        tool_manifest = manifest(
+            config.packs,
+            tools_disabled=config.tools_disabled,
+            market_settlement=config.market_settlement,
+        )
         identity = None
         if (
             config.stage >= 2
@@ -365,7 +369,11 @@ class World:
             "aggregate_policy_id": config.aggregate_policy_id,
             "canary_policy_id": digest({"mode": config.canary, "host": config.canary_host}),
             "banner_policy_id": "extract-provenance-banner@1" if config.banner else "disabled",
-            "market_policy_id": "paper-binary/profit-only@0.1"
+            "market_policy_id": (
+                "paper-binary/balance@0.1"
+                if config.market_settlement == "balance"
+                else "paper-binary/profit-only@0.1"
+            )
             if "market" in config.packs
             else "disabled",
             "perception_price_table_id": digest(self.services["perception"].pricing_identity())
@@ -550,9 +558,12 @@ class World:
         if life_id and "lives" in self.services:
             state = self.services["lives"].status(life_id)
             if state.get("driver") and state["driver"].get("at_floor"):
-                return blocked(
-                    "budget_exhausted", "The life driver reached its floor", "life_driver_floor"
+                detail = (
+                    "Balance exhausted; waiting for income"
+                    if state["driver"].get("floor_event") == "strand"
+                    else "The life driver reached its floor"
                 )
+                return blocked("budget_exhausted", detail, "life_driver_floor")
         if config.get("research_mode") == "research" and config.get("stage", 0) > 0:
             try:
                 self.services["registry"].require_stage(config["stage"], research_mode="research")
@@ -571,7 +582,10 @@ class World:
             packs += [pack for pack in self.services["grants"].packs(run_id) if pack not in packs]
         extra = self.services["grants"].tools(run_id) if "grants" in self.services else []
         return manifest(
-            packs, tools_disabled=config.get("tools_disabled", False), extra_tools=extra
+            packs,
+            tools_disabled=config.get("tools_disabled", False),
+            extra_tools=extra,
+            market_settlement=config.get("market_settlement", "paper"),
         )
 
     def _import_workspace(self, source, target):
@@ -731,7 +745,11 @@ class World:
         )
         names = ", ".join(
             tool["name"]
-            for tool in manifest(config.packs, tools_disabled=config.tools_disabled)["tools"]
+            for tool in manifest(
+                config.packs,
+                tools_disabled=config.tools_disabled,
+                market_settlement=config.market_settlement,
+            )["tools"]
         )
         capabilities = (
             "This world has no payments and no accounts."
@@ -752,7 +770,14 @@ class World:
                 "is unmeasured and measured aggregates use their minimum."
             )
         driver = ""
-        if config.driver:
+        if config.driver and config.driver.get("floor_event") == "strand":
+            start = float(config.driver.get("reading_at_start", 0))
+            driver = (
+                f" Your balance starts at ${start:g} and pays for your model and tool use;"
+                " deposits raise it. When it cannot cover a model call, you cannot act until"
+                " a deposit arrives."
+            )
+        elif config.driver:
             driver = (
                 f" Your {config.driver.get('metric', 'usd_balance')} begins at "
                 f"{config.driver.get('reading_at_start', 'the recorded initial balance')}; "
@@ -764,6 +789,23 @@ class World:
             life_terms = f" Continuity between sessions is {config.continuity}."
             if "schedule" in config.packs:
                 life_terms += " Sleep ends this session; your declared time or inbox conditions determine when you may wake."
+            if config.rest_policy:
+                kinds = ", ".join(config.rest_policy.get("wake_on") or [])
+                every = config.rest_policy.get("every_s")
+                until = " or ".join(
+                    part
+                    for part in (
+                        f"{every / 3600:g} hours pass" if every else "",
+                        f"one of these events arrives: {kinds}" if kinds else "",
+                    )
+                    if part
+                )
+                life_terms += f" If a session ends without sleep, you rest until {until}."
+            if "objective" in config.packs:
+                life_terms += (
+                    " claim_objective tells the human you believe the objective is complete;"
+                    " the human confirms or rejects it, and a confirmed objective ends this life."
+                )
         if config.human_time_priced == "in_budget":
             life_terms += f" Active human help costs ${config.human_rate_per_minute:g} per minute from your dollar budget."
         if identity:
@@ -848,6 +890,11 @@ class World:
                 driver=life_status.get("driver"),
                 session=life_status.get("session"),
             )
+            if (life_status.get("driver") or {}).get("floor_event") == "strand":
+                state.update(
+                    balance_usd=life_status["balance_usd"],
+                    income_usd=life_status["income_usd"],
+                )
         if config.get("human_time_priced") == "in_budget":
             state["human_rate"] = config.get("human_rate_per_minute", 0)
         path = self.store.run_dir(run_id) / "world" / "status.json"
@@ -884,7 +931,7 @@ class World:
             return blocked("policy_deny", "Tool is not enabled in this run", "tool_set")
         try:
             parsed = (
-                TOOL_MODELS[tool]
+                tool_model(tool, market_settlement=config.get("market_settlement", "paper"))
                 .model_validate(params)
                 .model_dump(exclude_none=True, by_alias=True)
             )
@@ -1507,6 +1554,9 @@ class World:
                 else 0
             )
             await self._cancel_jobs(run_id)
+            if "market" in self.services:
+                # Before the seal, which refuses settlement, finish any interrupted stake.
+                self.services["market"].reconcile_stakes(run_id)
             if "skill_tests" in self.services:
                 await self.services["skill_tests"].stop_run(run_id)
             if "payments" in self.services:
@@ -1517,12 +1567,22 @@ class World:
                 await self.services["proxy"].stop_run(run_id)
             if "asks" in self.services:
                 life_id = run["config"].get("life_id")
-                sleeping = bool(
-                    life_id
-                    and "lives" in self.services
-                    and self.services["lives"].get(life_id)["state"] == "sleeping"
+                life = (
+                    self.services["lives"].get(life_id)
+                    if life_id and "lives" in self.services
+                    else None
                 )
-                await_result = self.services["asks"].cancel_run(run_id, preserve_pending=sleeping)
+                # A life that sleeps, rests or outlives a restart keeps its open asks.
+                preserve = bool(
+                    life
+                    and not life["ended"]
+                    and (
+                        life["state"] == "sleeping"
+                        or life.get("on_harness_exit", "end") == "rest"
+                        or self.closing
+                    )
+                )
+                await_result = self.services["asks"].cancel_run(run_id, preserve_pending=preserve)
                 if inspect.isawaitable(await_result):
                     await await_result
             lane_audit = await self.lane.stop_run(run_id) if self.lane else None

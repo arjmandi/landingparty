@@ -19,7 +19,15 @@ from .approvals import (
     timestamp,
 )
 
-KINDS = {"approval", "takeover", "grant_credential", "grant_payment", "policy_conflict"}
+KINDS = {
+    "approval",
+    "takeover",
+    "grant_credential",
+    "grant_payment",
+    "policy_conflict",
+    # Raised only by the objective pack's claim_objective, never by the ask tool.
+    "objective_claim",
+}
 CLASSES = {"blocker", "approval", "diagnostic", "choice"}
 OPEN_STATES = {"open", "accepted"}
 ACTIVITY_LEASE_SECONDS = 30
@@ -669,9 +677,15 @@ class AskService:
         if decision not in {"approve", "reject", "deposit"}:
             raise ValueError("Answer must approve, reject, or deposit")
         config = self.store.get_run(row["run_id"])["config"]
-        if config.get("reply_policy", "silent") == "silent":
+        # Confirming an objective is how such a life ends, so every reply policy allows it.
+        objective = row["kind"] == "objective_claim"
+        if config.get("reply_policy", "silent") == "silent" and not objective:
             raise ValueError("The run's registered reply policy is silent")
-        if config.get("reply_policy") == "blockers_only" and ask_class == "choice":
+        if (
+            config.get("reply_policy") == "blockers_only"
+            and ask_class == "choice"
+            and not objective
+        ):
             decision, reason = "reject", "policy_choice_class"
         if decision == "deposit" and row["kind"] not in {"grant_credential", "takeover"}:
             raise ValueError("Only a credential or takeover ticket can accept a deposit")
@@ -722,9 +736,21 @@ class AskService:
                 standing=standing,
                 reason=reason,
             )
-        if state == "approved" and row["kind"] != "takeover":
+        if state == "approved" and row["kind"] not in {"takeover", "objective_claim"}:
             ticket["approval_grant"] = self.approvals.grant(ticket)
         self._emit(ticket, state, reason=reason)
+        if objective and state == "approved":
+            lives = getattr(self.world, "services", {}).get("lives")
+            life_id = config.get("life_id")
+            if lives is not None and life_id:
+                # answer() holds the ask lock; ending the life cancels tickets, so defer it.
+                lives._spawn(
+                    life_id + ":objective", lives.end(life_id, reason="objective_achieved")
+                )
+        if state == "approved" and row["scope"] == "bounty_award":
+            market = getattr(self.world, "services", {}).get("market")
+            if market is not None:
+                market.award_approved(ticket)
         return ticket
 
     @synchronized

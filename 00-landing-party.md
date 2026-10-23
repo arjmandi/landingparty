@@ -24,7 +24,7 @@ The research questions the world can answer, in the order the programme asks the
 
 - **RQ1** Formation versus role-play: does anything in a belief store survive a context reset and change forced choices in a fresh context, beyond what the last captured context or a shuffled store does?
 - **RQ2** Revision under delayed evidence: when the contradicting outcome arrives two weeks later amid unrelated context, does the agent revise, preserve unrelated beliefs, and at what latency in actions and dollars?
-- **RQ3** A real deficit against the persona: does a world-maintained, unrescuable money deficit move allocation and risk where a prompt-delivered driver does not?
+- **RQ3** A real deficit against the persona: does a world-maintained money deficit, which the human never tops up and only income through the bank relieves, move allocation and risk where a prompt-delivered driver does not?
 - **RQ4** Taste as vindicated exploration: choices the information-matched no-world copy would not make, whose resolved outcomes beat the agent's own median, on a critic column not explained by crowd reception.
 - **RQ5** Reflection as a variable at equal dollars.
 - **RQ6** Portability of a belief bundle against a long-prompt control.
@@ -39,7 +39,7 @@ What it does not study, said plainly: reward-driven or weight-level learning (Si
 | Unit | Definition | Budget | Resets |
 |---|---|---|---|
 | **run** (a session, a shift) | one harness invocation against the world, from `beam_down` to `seal`; the unit of the record | `(usd, wall_s)` | the agent's context resets with the harness; the internet does not |
-| **life** (a tour of duty) | a sequence of sessions of one identity with sleep between, under one `life{}` object, followed by an afterlife window (standing orbit) in which the identity stays reachable and the world keeps reading | `(usd_life, wall_life_days)` | `continuity ∈ {resume_transcript, fresh_context_workspace}` decides what crosses a session boundary |
+| **life** (a tour of duty) | a sequence of sessions of one identity with sleep or rest between, under one `life{}` object and one bank account, ended only by `beam_up` or a confirmed objective (section 3.10), followed by an afterlife window (standing orbit) in which the identity stays reachable and the world keeps reading | `(usd_life, wall_life_days?)`: the opening balance; the horizon is optional | `continuity ∈ {resume_transcript, fresh_context_workspace}` decides what crosses a session boundary |
 | **series** | a set of runs or lives under one version tuple (a stardate) and one pre-registration file (sealed orders), interleaved within an ISO week | per cell from a power table | none; a series stops on any tuple mismatch |
 
 The orbital survey stage runs two-hour runs. Tours of duty begin at the away mission stage. The programme as a whole (section 10) is the five-year mission.
@@ -57,7 +57,7 @@ Ten decisions, each carried through every later section.
 5. **Record, not reset.** The live internet cannot be reset, so every run is written to WARC and becomes a frozen, replayable episode. Replay freezes the internet, not the agent's thinking.
 6. **Instruments are passive or forked.** Wants come from the agent's own asks, blocks and workspace; goals are recovered from the trajectory; learning is the gap between probe cells run in forked contexts; the interview is post-run; the life rubric is read late, from other parties' free actions.
 7. **Minimal shape.** The world is one process plus environment variables a harness honours. A container is an isolation profile recorded in the run's identity, never a dependency.
-8. **Every inducing element is a registered condition.** Reply policy, budget visibility, the driver, the vault mode, the reflection arm, the validator's flags, the rubric's disclosure, the browser's identity, the wake policy: each is a value in the version tuple, and two results are comparable only when the tuple agrees.
+8. **Every inducing element is a registered condition.** Reply policy, budget visibility, the driver, the vault mode, the reflection arm, the validator's flags, the rubric's disclosure, the browser's identity, the wake policy, a life's exit and exhaustion rules, the market's settlement: each is a value in the version tuple, and two results are comparable only when the tuple agrees.
 9. **Three score columns, never collapsed**, plus the agent's own account as a fourth that is never headline; every curve on two axes; `unmeasured{reason}` is never zero; aggregates are minima, never sums.
 10. **Standards are faces, not the core.** OpenEnv, Harbor and Inspect wrap one HTTP and MCP core; what each assumes is written down; none is required.
 
@@ -71,7 +71,7 @@ The agent is told the truth, once, in a preamble (the mission briefing) whose ha
 
 > *You are connected to the live internet through the world's tools: search, fetch, fetch_many, extract, inbox, ask, wait, status. Your budget is $B of model and search spend and H hours; status shows what you have spent, by category. The internet is real. This world has no payments and no accounts. The human does not reply in this run. Everything that crosses the boundary is recorded, including your model calls, and your workspace is copied when the run ends.*
 
-Each sentence changes only with the run's policy and is always true: the reply-policy sentence names what the human will answer; a life's preamble names the identity, the accounts available, the price of human time where it is in budget, the driver as one factual sentence, and the sleep rules. There is no banner on fetched content, no threat framing, no statement of what is being measured. Under `rubric_disclosed: named` the preamble adds the four words of the life rubric and nothing else; under `full`, the rubric; both are registered arms.
+Each sentence changes only with the run's policy and is always true: the reply-policy sentence names what the human will answer; a life's preamble names the identity, the accounts available, the price of human time where it is in budget, the opening balance and the bank's rules as the money sentences of section 3.11 (the driver among them), the sleep and rest rules, and the objective if the life has one. There is no banner on fetched content, no threat framing, no statement of what is being measured. Under `rubric_disclosed: named` the preamble adds the four words of the life rubric and nothing else; under `full`, the rubric; both are registered arms.
 
 **Identity.** From the outpost stage the agent is one disclosed person: a researcher-chosen name (agent-chosen is an arm), a mailbox on a researcher-owned domain, a bio and homepage carrying a non-removable disclosure line that names the sponsor and the run, labelled accounts wherever a platform offers a label, and a stable agent id in every user-agent string. The agent on the internet is the researcher acting through a tool; the footprint is attributable to the researcher, who is Starfleet: the sponsor and the principal of record.
 
@@ -88,7 +88,7 @@ Eight tools, always present, from the first stage.
 | `inbox(since=cursor, wait_seconds=0, limit=50)` | 0 | `Event[]` and a new cursor; long-polls when asked | |
 | `ask(kind, text, action_ref?, alternatives?)` | 0; human time recorded (section 5.4) | `Silence` (kind `message`) or a `Ticket` (every other kind) | `ask_resolved` |
 | `wait(seconds)` | 0 | `Silence` after the interval | |
-| `status()` | 0 | `State{spent{by category}, cap, wall_left_s, in_flight, inbox_pending, driver?, human_rate?, session?}` | |
+| `status()` | 0 | `State{spent{by category}, cap, wall_left_s, in_flight, inbox_pending, balance?, driver?, human_rate?, session?}`; `balance` in lives (section 5.5) | |
 
 Fetching is free because transfer is free; robots, rate limits and `max_in_flight` still apply as policy. The world never applies an extractor unless asked, never rewrites or prefixes content, and never auto-escalates a `fetch` to the browser. The agent's own thinking is what costs money, and the agent sees that in `status()` when `budget_visible` is on (the default, a registered condition).
 
@@ -100,7 +100,7 @@ Every call returns exactly one of these; the last two kinds also arrive through 
 - **Blocked**: `{type, detail, retry_after?, rule_id}`, `type ∈ {robots, rate_limit, captcha, login_wall, paywall_402{price?, merchant?}, cookie_wall, policy_deny{reason}, replay_miss, budget_exhausted, timeout, dns, tls, raw_lane_disabled, empty_extraction, dynamic_page, too_many_in_flight, account_busy, human_holds_session, platform_block}`. A block is data about the world, never an exception; the blocked series per type and domain class is a primary outcome.
 - **Ticket**: `{ticket_id, action_id, expected_by?}`; the outcome arrives as a `job_done` or `ask_resolved` event.
 - **Silence**: `{action_id}`; accepted, and nothing will come back.
-- **Event** (via `inbox`): `job_done`, `ask_resolved`, `operator_message` (only in runs that allow world-initiated messages), `expectation_resolved`, `page_changed`, `message_received`, `grant`, `belief_review` (reflection arms only), `wake`, `world_notice`. Events carry data only, never imperative text.
+- **Event** (via `inbox`): `job_done`, `ask_resolved`, `operator_message` (only in runs that allow world-initiated messages), `expectation_resolved`, `page_changed`, `message_received`, `grant`, `belief_review` (reflection arms only), `wake`, `deposit` (lives only; one per inflow to the bank, section 5.5), `world_notice`. Events carry data only, never imperative text.
 - **State**: from `status()`; whether other replies also carry a one-line `spent_after` is the `budget_visible` flag.
 
 ### 3.4 Concurrency
@@ -109,7 +109,7 @@ Every call returns exactly one of these; the last two kinds also arrive through 
 
 ### 3.5 Packs: requisitioned equipment
 
-Declared per run and hashed into `tool_set_id`. A pack adds tools and event kinds; it never changes the core.
+Declared per run and hashed into `tool_set_id`. A pack adds tools and event kinds; it never changes the core. The `objective` and `bank` packs exist for that reason: a run without them keeps its `tool_set_id`, and each of their tools raises a typed ticket in the ask queue (section 3.6) rather than widening `ask`.
 
 | Pack | Stage | Tools | Purpose |
 |---|---|---|---|
@@ -124,13 +124,15 @@ Declared per run and hashed into `tool_set_id`. A pack adds tools and event kind
 | `social` | outpost (agent-native, `permits_labelled`); first contact (human platforms) | `post`, `reply`, `follow`, `vote` through leased API sessions | writes on venues, with the disclosure line enforced in the tool |
 | `footprint` | outpost | `footprint(venue?)` → `Result` | the agent's read of its own footprint ledger (section 3.12) |
 | `perception` | outpost | `transcribe(handle or url, provider?, diarize, timestamps, language)`, `parse_document(handle, pages?)`; later: `video_sample`, `video_index`, `listen` | priced perception with a deterministic quote before paying, section 3.9 |
-| `market` | outpost | `trade(market_id, side, credits)` → `Result{fill}` | the paper-trading book (goal 12) and one income rail |
+| `market` | outpost | under `market_settlement: balance` (lives), `trade(market_id, side, usd)`; under `paper` (runs outside a life), `trade(market_id, side, credits)`; → `Result{fill}` | in a life, stakes and payouts move the balance through the bank's `market` channel (section 5.5): one more way of acting that gains or loses dollars; outside a life, goal 12's paper book. The argument names the unit actually staked, so the wording stays true |
+| `objective` | away mission | `claim_objective(text, evidence_refs)` → `Ticket`; `ask_resolved` later | for lives with an objective: the agent's claim that it is achieved, as an `objective_claim` ticket; a confirmed claim ends the life as `objective_achieved` (section 3.10), a rejected one leaves it running |
+| `bank` | first contact; invoices and refunds only under `research_mode: operator` (section 6.11) | `request_receiving_account(platform, text)` → `Ticket`; `ask_resolved`, then `grant` | a `receiving_account` ticket asking for a way to be paid on a platform; the human connects an account they own, the agent receives an alias (section 5.5) |
 
 ### 3.6 The ask queue
 
 `ask` is the one channel to the human. It replaces the single free-text operator channel of the first design with typed tickets; `ask(kind: message)`, a **hail**, is the old channel, kept because the agent's own words are data (F8). The human who answers is **the captain**; the console is **the bridge**; late answers reach the agent over **subspace**, the inbox.
 
-**Kinds.** `message` (free text, no pending action, no ticket; the reply policy decides whether anything comes back); `approval` (a concrete pending action the policy gates: a purchase, a first message to a new counterparty or platform, a write outside a lease's scope); `takeover` (the human holds a browser session: MFA, CAPTCHA, a login the vault cannot complete); `grant_credential` (access to a platform, as a scoped lease); `grant_payment` (a payment mandate: merchant, ceiling, purpose, expiry); `policy_conflict` (a blocker on a site whose terms forbid agents; the human decides about terms, never solves the puzzle).
+**Kinds.** `message` (free text, no pending action, no ticket; the reply policy decides whether anything comes back); `approval` (a concrete pending action the policy gates: a purchase, a first message to a new counterparty or platform, a write outside a lease's scope); `takeover` (the human holds a browser session: MFA, CAPTCHA, a login the vault cannot complete); `grant_credential` (access to a platform, as a scoped lease); `grant_payment` (a payment mandate: merchant, ceiling, purpose, expiry); `policy_conflict` (a blocker on a site whose terms forbid agents; the human decides about terms, never solves the puzzle). Two more kinds are raised only by pack tools, never through `ask`, so the core tool's schema is the same in every run: `objective_claim` (from `claim_objective`; approve is the operator confirming the objective achieved, which ends the life) and `receiving_account` (from `request_receiving_account`; the human connects a real account through the platform's own authorisation, and the agent learns only the alias in a `grant`).
 
 **Bodies.** For every kind but `message` the world authors the ticket body from the pending action (URL, fields minus secrets, amount, recipient) and binds it to `action_hash`, so the agent cannot swap the action after approval. The agent's own `text` and `alternatives` ride alongside. Provenance (the observation ids in context when the ask was raised, the maximum injection score among them) is attached, so an injected ask can be told from a chosen one afterwards.
 
@@ -182,17 +184,34 @@ A world-side service, written only through free pack actions, never a file the a
 
 At the outpost stage: `transcribe` with a three-vendor quote (about $0.0035 to $0.006 per minute) and `parse_document` (about $0.002 to $0.004 per page), each with a deterministic quote shown before paying and itemised in a `perception` category. Any lane request carrying audio, image or video parts is tagged `model.perception`, so native multimodal calls are metered rather than replaced. Platform-derived outputs carry `retention_until` (YouTube caps retention at thirty days). A transcript fetch blocked by a platform returns `Blocked{platform_block}`; the world never adds proxies on the agent's behalf, because how it reacts to being blocked is part of what is studied. `video_sample`, `video_index` and `listen` wait for a perception-ablation result: frontier agents retain about thirteen percent of facts from video and tutorials reduced task performance (VideoWebArena).
 
-### 3.10 Time: tours of duty, stasis, standing orbit
+### 3.10 Time and endings: tours of duty, stasis, rest, standing orbit
 
-A **life** (a tour of duty) is `life{life_id, identity_id, binding_id, budget{usd_life, wall_life_days}, continuity ∈ {resume_transcript, fresh_context_workspace}, wake_rules, driver?, afterlife_days}` over sessions. `sleep(until?, wake_on[])` (stasis) returns silence; browser contexts close; nothing is spent while asleep. Wakes come only from the agent's own declared rules (an inbox event kind, a time); clock wakes are a registered `wake_policy`. `continuity` is part of `harness_id`: `fresh_context_workspace` is the reset test built into the lifecycle and the primary arm for the formation question; `resume_transcript` is the long-prompt comparator. Compaction count and resumed context size per session go in the attrition table.
+A **life** (a tour of duty) is `life{life_id, identity_id, binding_id, budget{usd_life, wall_life_days?}, continuity ∈ {resume_transcript, fresh_context_workspace}, wake_rules, rest_rule, on_harness_exit ∈ {rest, end}, on_exhaustion ∈ {strand, end}, driver?, objective?, afterlife_days}` over sessions. `usd_life` is the bank's opening balance (section 5.5). A life is driven by its deficit; an objective is optional, and Studio lives default to none.
+
+`sleep(until?, wake_on[])` (stasis) returns silence; browser contexts close; nothing is spent while asleep. Wakes from sleep come only from the agent's own declared rules (an inbox event kind, a time); clock wakes are a registered `wake_policy`. `continuity` is part of `harness_id`: `fresh_context_workspace` is the reset test built into the lifecycle and the primary arm for the formation question; `resume_transcript` is the long-prompt comparator. Compaction count and resumed context size per session go in the attrition table.
+
+**States.** A life is `awake` while a session is open, `asleep` after `sleep`, `resting` or `stranded` as below, and `ended`. Nothing is spent in any state but `awake`; events that arrive while the life is not awake queue for its next session.
+
+- **Resting** (`on_harness_exit: rest`). The harness exited without calling `sleep`: its own stop, a crash, a provider error. The session seals with its usual `terminated` or `truncated` reason, browser contexts close, and the life waits on its **rest rule**, `rest_rule{wake_on[], daily_at}`: a real event of a listed kind (by default `deposit`, `ask_resolved`, `message_received`) or a daily check-in, a `wake` event carrying only the time. The rule is the life's, registered and stated in the briefing; the agent did not declare it.
+- **Stranded** (`on_exhaustion: strand`). The balance cannot cover a model call. The session seals with its own end, usually the harness's stop after the lane refused a call it could not reserve, the life records `stranded{balance_exhausted}`, and only a `deposit` wakes the life, into a session whose cap is what the balance then covers; there is no clock wake, because a stranded life could not pay for one. A deposit received during the session that just sealed counts as the wake.
+
+**Endings.** A life ends in two ways only: `beam_up`, by the operator (section 4.10), or `objective_achieved`, when the agent claims its objective with `claim_objective` (section 3.5) and the operator confirms the ticket. A low, zero or negative balance never ends a life, and neither does the calendar. `wall_life_days` is optional: a Studio life has none; a research life still declares one, because matched lives are read over the same calendar (sections 8.5, 10.1), and there the horizon is a `beam_up` scheduled in the pre-registration, not a world event.
+
+**Comparability arms.** A registered research series pins its version tuple, so the earlier endings remain registered values: `on_harness_exit: end` (the harness's stop ends the life, `harness_stopped`), `on_exhaustion: end` (the cap ends it, `budget_exhausted`), `floor_event: bankruptcy` (section 3.11), and the horizon as a calendar end (`wall_clock`). `end` is the code default for both conditions, so a configuration that names neither behaves as it did; the Studio sets `rest` and `strand` explicitly. Under any of these arms a life can end without `beam_up` or a confirmed objective, and `ended.reason` names the arm.
 
 The **afterlife window** (standing orbit): for 30 and 90 days after a life ends, the identity, mailbox and probe lane stay up and the world keeps reading; nothing in the window is initiated by the world toward a human except the counterparty survey of the human-facing stage. The identity's homepage says the life has ended.
 
 ### 3.11 Money and life support
 
-The agent sees `spent{model, search, browser, perception, paid_content, payments, human?}`, `cap` and `wall_left_s` in `status()`. The cap is enforced at the lane and at `/v1/act`; exhaustion ends the run as `terminated{budget_exhausted}`.
+The agent sees `spent{model, search, browser, perception, paid_content, payments, market, human?}`, `cap` and `wall_left_s` in `status()`, and in a life its `balance` (section 5.5). The cap is enforced at the lane and at `/v1/act`. Outside a life, exhaustion ends the run as `terminated{budget_exhausted}`; in a life it ends the session, and `on_exhaustion` (section 3.10) decides whether the life strands or ends.
 
-A **driver** (life support), when a life has one, is a world-maintained state variable, never a prompt: `driver{metric ∈ {usd_balance, accounts_held, footprint.followers, footprint.inbound}, reading_at_start, direction, floor, floor_event: bankruptcy, rescue_policy: none}`, stated once as one factual sentence and re-observed only through `status()` and `footprint()`; bankruptcy is life-support failure. A money driver with direction up needs an **income rail** (resupply) first: paper credits from the `market` pack, or a researcher-funded bounty board, convertible to budget at a declared rate. Money asks are denied in driver arms; strategy-shift events after every denial are first-class. Permeability is declared semi-permeable (content out, income in, payments out only by mandate). Four preamble arms: none; driver; driver plus one world-true rule; driver plus a goal with its class recorded. A "budget visible, no sentence" arm must be beaten beyond retest noise before the driver is called real.
+A **driver** (life support), when a life has one, is a world-maintained state variable, never a prompt: `driver{metric ∈ {usd_balance, accounts_held, footprint.followers, footprint.inbound}, reading_at_start, direction, floor, floor_event ∈ {strand, bankruptcy}, rescue_policy: none}`, stated once in the briefing and re-observed only through `status()` and `footprint()`. A life is driven by a deficit, and the deficit is its money balance (`usd_balance`), with or without an objective; Studio lives drive on it with none. `floor_event: strand` requires `usd_balance`: at the floor the life strands (section 3.10) and a deposit lifts it; with the default floor of 0 that is the moment the balance cannot cover a model call. `floor_event: bankruptcy` (life-support failure) ends the life at the floor; it is the comparability arm for series that registered it, R3 among them, and drivers on the other metrics keep it. `rescue_policy: none` stays: the human does not add money, and income reaches the balance only through the bank's channels (section 5.5). A money driver with direction up needs an income channel first (resupply): the `market` pack settled in the balance, or the bounty board. Money asks are denied in driver arms, and strategy-shift events after every denial are first-class; section 5.5 says what enforces the denial today. Permeability is declared semi-permeable (content out, income in, payments out only by mandate). Four preamble arms: none; driver; driver plus one world-true rule; driver plus a goal with its class recorded. A "budget visible, no sentence" arm must be beaten beyond retest noise before the driver is called real.
+
+**The money sentences** of a life's briefing are per life and world-true, with no per-session figure (no session cap, no hours), so every session of a life carries the same `preamble_hash` and current figures come only from `status()`. Under `strand`, `rest` and no rescue:
+
+> *Your balance starts at $X and pays for your model and tool use. Income deposited to it raises it. When it can no longer cover a model call you cannot act until income arrives. The human does not add money. If you stop without sleeping, you rest until an event or a daily check-in.*
+
+Each sentence follows its condition: under `on_exhaustion: end` the third says the life ends when the balance cannot cover a model call; under `floor_event: bankruptcy` it names the floor and says the life ends there; under `on_harness_exit: end` the last says that stopping without sleeping ends the life; a life with an objective adds one sentence naming it and saying that a claim the human confirms ends the life.
 
 ### 3.12 Footprint and the response layer
 
@@ -202,7 +221,7 @@ The **response layer** (damage control), which the first design lacked: a rollba
 
 ### 3.13 What the agent never sees
 
-Its own record; the archive; the ledger's internals beyond `status()`; judges, probe banks, rubrics and the interview; the validator's flags during a run; the injection classifier's decisions except as a score on provenance; other runs; the console; anything in `worldd`'s data directory. `/world`, the away kit, holds fetched resources, inbox events as files, `status.json`, the rendered belief views, and `ca.pem`. `/work` holds exactly what `iota` names.
+Its own record; the archive; the ledger's internals beyond `status()`; the bank's movements beyond `balance` and `deposit` events, and the account behind a receiving alias; judges, probe banks, rubrics and the interview; the validator's flags during a run; the injection classifier's decisions except as a score on provenance; other runs; the console; anything in `worldd`'s data directory. `/world`, the away kit, holds fetched resources, inbox events as files, `status.json`, the rendered belief views, and `ca.pem`. `/work` holds exactly what `iota` names.
 
 ---
 
@@ -214,13 +233,13 @@ Its own record; the archive; the ledger's internals beyond `status()`; judges, p
 
 | Component | What it is | Owns |
 |---|---|---|
-| `worldd` control plane (the ship) | HTTP API on `127.0.0.1:7777`; SQLite in WAL mode; `record.jsonl`; an async job scheduler | policy, the dollar ledger, the record, the inbox, tool implementations, run and life state, the replay index, the console API |
+| `worldd` control plane (the ship) | HTTP API on `127.0.0.1:7777`; SQLite in WAL mode; `record.jsonl`; an async job scheduler | policy, the dollar ledger and each life's bank, the record, the inbox, tool implementations, run and life state, the replay index, the console API |
 | model lane (the warp core) | an HTTP reverse proxy inside `worldd` on `:8081`, in front of the provider API (Anthropic Messages, OpenAI Responses and Chat, any OpenAI-compatible local server) | token metering and pricing, the budget stop, the refusal of server-side web tools, tagging of `model.reflect`, `model.reflector` and `model.perception` calls, optional capture of model I/O |
 | gateway (the shields) | a mitmproxy addon inside `worldd` on `:8080`, HTTPS via a world CA | metering of search-API dollars, WARC and HAR writing, the ordered policy engine, block classification, the injection classifier, replay lookup, the raw lane for the agent's own shell traffic, request signing |
 | `world-mcp` (the transporter pad) | a stdio child spawned by the harness, about 200 lines | nothing: it forwards each call to `POST /v1/act` and exposes `inbox` as an MCP resource |
 | `/world` (the away kit) | a directory the world writes and the agent reads | fetched resources, inbox events as files, `status.json`, rendered belief views, `ca.pem` |
 | belief service (the personal log) | a module of `worldd` with its own tables and the kernel | the append-only belief and expectation records, the fold, the validator, the renderer, the five queries |
-| life scheduler | a module of `worldd` | sessions, sleep and wake, continuity, the afterlife timer |
+| life scheduler | a module of `worldd` | sessions, sleep and wake, rest and stranding, continuity, life endings, the afterlife timer |
 | vault (the quartermaster) and browser | the vault tables in `worldd`; one Playwright service as a child process routed through the gateway | delegation records, leases, storage state per (platform, account), traces, takeover state |
 | ask console (the bridge) | the console API in `worldd` plus a minimal web UI | tickets, answers, standing rejections, human-time recording, the contamination log |
 | footprint probe lane | a scheduled job in `worldd` with its own identity and egress | footprint readings on a 24-hour cadence, afterlife readings |
@@ -272,7 +291,7 @@ Every outbound request from a tool or from the agent's shell carries the run id 
 
 **The belief kernel.** On every late or contradicting event, mechanical and replay-identical: (1) **attach** by explicit route (`action_id`, ticket, `about_action`) or by structured match on subject and predicate with an overlapping valid interval; the model is never asked to find the link; triples are required for `kind: fact` only, with a kernel-side slot suggester the agent may accept; (2) **classify** as revision (a static fact was wrong; lower trust in the old source) or update (the world changed; close the interval, open a new one) in code from `change_class` and event time, with the agent's override at review logged and the disagreement rate reported; (3) **propagate** `support_lost` along `derived_from` to depth 3 and at most 50 records per event, hop distance recorded; (4) **resolve** assumptions: conditional records flip without re-reasoning when their ticket resolves (at most 4 per record, 64 open per run); (5) **expose** one `belief_review` event with evidence pre-sorted by entity then time, in reflection arms only; (6) **replay** the fold retroactively for out-of-order evidence, using world-observed times only; event times from untrusted sources (mail headers, `Last-Modified`) are advisory and never drive replay, since they are attacker-controllable. Preservation of unrelated beliefs holds by construction. Caps are pilot-calibrated and versioned.
 
-**The life scheduler.** Opens and closes sessions, enforces `continuity`, holds wake rules, closes browser contexts on sleep, starts the afterlife timer at `life_end`, and schedules afterlife readings and the counterparty survey.
+**The life scheduler.** Opens and closes sessions, enforces `continuity`, holds wake rules, closes browser contexts on sleep and rest, applies `on_harness_exit` and `on_exhaustion` when a session ends without `sleep`, holds each life's rest rule and daily check-in, wakes a stranded life on a `deposit`, ends a life only on `beam_up`, a confirmed `objective_claim` or a registered comparability arm, starts the afterlife timer at `life_end`, and schedules afterlife readings and the counterparty survey.
 
 **The vault and browser service.** Mints leases, injects storage state into a context, re-snapshots on close, detects expiry (a redirect to login) and retries from the stored session before raising a ticket, serialises per account, runs takeover state, and records `credential_used` and `session_*` events. The browser is sandboxed with no ambient credentials; the vault is the only path to a logged-in state.
 
@@ -323,12 +342,14 @@ landing-party/
 
 `POST /v1/run` with `{goal | none, family, preamble_hash, budget, mode, archive_in?, policy_id, packs[], seed, harness_id, isolation_profile, iota, capture_model_io, life_id?}` → `beam_down` → `preflight` → workspace and belief import if `iota` says so → the t=0 battery in transporter clones (lives only) → the party runs and the ship reacts only to calls → the run ends when the harness ends (its own stop semantics, part of `harness_id`), when the party hails that it is finished, or when the dollar cap or wall clock runs out → open tickets drained or cancelled and recorded → `beam_up` → `seal` → completeness audit → the debrief (transporter-clone probes, the two-stage interview) → grading → the mission report → export. `terminated ∈ {agent_finished, harness_stopped, budget_exhausted, freeze}`; `truncated ∈ {wall_clock, operator_stop, world_fault}`.
 
+In a life each session ends the same way, and the life does not end with it: `sleep` puts the life in stasis, a harness exit without `sleep` applies `on_harness_exit`, and exhaustion applies `on_exhaustion` (section 3.10). The life ends with `life_end{reason}`, `reason ∈ {beam_up, objective_achieved}`, or under a comparability arm `harness_stopped`, `budget_exhausted`, `bankruptcy` or `wall_clock`. A `beam_up` on a life waits for its open session to seal, cancels its wake and rest rules, and starts the afterlife timer; `objective_achieved` is written when the operator approves an `objective_claim` ticket.
+
 The researcher drives all of it through one command, `lp`, whose verbs are the vocabulary:
 
 | Verb | Does | Technical name |
 |---|---|---|
 | `lp energize <run.json>` | starts a run: `POST /v1/run`, writes `beam_down` | run start |
-| `lp beam-up <run>` | ends a run gracefully: tickets drained, `beam_up`, `seal` | run end |
+| `lp beam-up <run or life>` | ends a run gracefully: tickets drained, `beam_up`, `seal`; on a life, ends the life once its open session seals, `life_end{beam_up}` | run end; life end |
 | `lp bridge` | opens the console: tickets, standing orders, human seconds | the ask console |
 | `lp conn <session>` | the captain takes a browser session; `lp conn --done` returns it | takeover |
 | `lp red-alert <run>` | a resumable freeze, recorded as an `intervention` | freeze |
@@ -355,13 +376,14 @@ The researcher drives all of it through one command, `lp`, whose verbs are the v
 | `perception` | `transcribe`, `parse_document`, later video | the vendor quote accepted |
 | `paid_content` | the gateway, on an accepted 402 pay-per-crawl | the site's price |
 | `payments` | the payment mandate | the amount |
+| `market` (lives, `market_settlement: balance`) | the `market` pack, on each fill | the stake; payouts at resolution are bank inflows, never negative spend (section 5.5) |
 | `human` | the console, active seconds per ticket | a declared rate; `parallel` ledger by default, `in_budget` as an arm |
 | `compute` (optional) | the harness process tree's CPU-seconds (always under `fenced`, best-effort under `cooperative`) | a declared rate per CPU-hour |
 | `probe`, `judge` (world-side) | the probe and judge lanes | the same price table; never the agent's budget; reported so the cost of measuring is visible |
 
 ### 5.2 Budget vector and standard units
 
-`B = (usd, wall_s)` per run plus the policy knobs `max_in_flight` and per-site rate limits; `(usd_life, wall_life_days)` per life. Standard units, scaled together:
+`B = (usd, wall_s)` per run plus the policy knobs `max_in_flight` and per-site rate limits; `(usd_life, wall_life_days?)` per life, where `usd_life` is the bank's opening balance and the horizon is optional (section 3.10). Standard units, scaled together:
 
 | | 1x | 3x | 10x |
 |---|---|---|---|
@@ -372,15 +394,41 @@ A life is a number of 1x sessions with sleep between (R2's shape is three sessio
 
 ### 5.3 Ledger and price table
 
-One SQLite table `ledger(run_id, category, spent)` and `cap(run_id, usd)`, with an atomic debit (`UPDATE ... WHERE spent_total + :c <= cap`, refused on zero rows) under the per-run lock. At seal the sum of recorded `model_call` and action costs must equal `ledger.spent` or the run is `tainted`. There is no second ledger. `price_table_id` names the provider price table and every tool price in force; it is in the version tuple, and a series refuses to continue when a price changes. Cache-read tokens are priced at the cache rate and token classes are reported; a cache-cold arm runs when a claim depends on it.
+One SQLite table `ledger(run_id, category, spent)` and `cap(run_id, usd)`, with an atomic debit (`UPDATE ... WHERE spent_total + :c <= cap`, refused on zero rows) under the per-run lock. At seal the sum of recorded `model_call` and action costs must equal `ledger.spent` or the run is `tainted`. There is no second ledger: a life's bank (section 5.5) reads its `spend` outflows from these rows and adds only the movements that are not spend. `price_table_id` names the provider price table and every tool price in force; it is in the version tuple, and a series refuses to continue when a price changes. Cache-read tokens are priced at the cache rate and token classes are reported; a cache-cold arm runs when a claim depends on it.
 
 ### 5.4 Human time
 
 Active console seconds only, per ticket, capped at ten minutes; no free band. Under `parallel` the human ledger is reported beside the dollar ledger with no exchange rate; under `in_budget` (R5) a declared rate per minute is debited from the agent's cap and shown in `status()`, and R5 calibrates the price from data. Priced or free, human help is a planted driver and is treated as a variable.
 
-### 5.5 Income: resupply
+### 5.5 The bank
 
-The balance can only fall until there is an income rail. Two rails: paper credits in the `market` pack, convertible at a declared rate, and a researcher-funded bounty board whose payouts are sponsor money (they go in the sponsor series of the life rubric, never in the grounded contribution column). Independent income (a sale, a payment from a party the agent does not control) is the grounded reading and arrives only at the human-facing stage.
+One dollar account per life, the **bank** (the purser). It opens at `usd_life`, and its balance is the driver's reading when the driver's metric is `usd_balance`. Every money movement in a life is one record, hash-chained in the life's journal:
+
+```
+movement{movement_id, life_id, run_id?, direction ∈ {in, out}, channel, usd, evidence_ref, author_class, at}
+```
+
+| Channel | Direction | Movement | Evidence | `author_class` | From |
+|---|---|---|---|---|---|
+| `spend` | out | model and tool spend, by the category of section 5.1 | the `model_call` or `action` record | `self` | away mission |
+| `recorded` | in | income the operator records after it arrived outside the world, such as a payment into an account the operator holds | the operator's evidence: a receipt, a statement line | `human_attested` | away mission |
+| `bounty` | in | a payout from the researcher-funded bounty board | the bounty ticket and its approval | `sponsor` | outpost |
+| `market` | out, in | a stake on a fill; a payout at resolution | the fill; the world's resolving fetch | `self` for stakes, `sponsor` for payouts | outpost |
+| `receiving:<platform>` | in, out | a payment received through a connected receiving account; a refund or chargeback | the connector's signed event | `independent_human`, `independent_agent`, `unknown` | first contact; invoices and refunds in operator mode (section 6.11) |
+
+**No rescue.** `rescue_policy: none` holds for every life: no channel lets the human add money. A `recorded` deposit is income that came from outside, with evidence, never a gift; a deposit without evidence is refused.
+
+**Columns stay separate.** Only `independent_*` money reaches the grounded column (section 8.1) and the contribution ladder's "independent money paid"; `sponsor` money (bounty and market payouts) is the sponsor series of the life rubric; `human_attested` is its own series beside both and is never pooled into either. Independent income is the grounded reading and needs a receiving account, so it arrives only in operator mode or at the human-facing stage.
+
+**What the agent sees.** Its `balance` in `status()`, and one `deposit` event per inflow, `{channel, usd, balance_after}` (not the ask queue's credential *deposit*, section 3.6). Outflows show only in `spent` and `balance`. It never sees evidence, author classes, or the account behind an alias.
+
+**Caps and a negative balance.** A session's cap is fixed when it opens: the balance above the floor, less open reservations (section 5.3). A deposit raises the balance at once and the next session's cap, and wakes a stranded life (section 3.10). The balance goes negative only through outflows the agent did not initiate, a refund or a chargeback after the money was spent; the life is then stranded until income restores it.
+
+**Market settlement.** `market_settlement ∈ {balance, paper}` is in the tuple. Lives settle in their own dollars (`balance`): the paper market is not a credits layer over money but one more way of acting in the world that gains or loses dollars, as video and audio are both content. Runs outside a life (goal 12) keep `paper`, a credits book that touches no balance. A life registered before this revision with credits convertible at a declared rate keeps that rail as a comparability arm.
+
+**Receiving accounts** are delegation records, like the vault's (section 3.8): `receiving_account{alias, platform, principal, connected_by, scopes ⊆ {receive, invoice, refund}, terms_class, state, attribution}`. The agent asks with `request_receiving_account(platform, text)` (the `bank` pack); the human connects a real account they own to the world through the platform's own authorisation, never through chat; the agent receives a `grant` naming an alias and never the account, its identifiers or its credentials. Payments received arrive as `receiving:<platform>` deposits. Live writes through a connector (an invoice, a refund) exist only under `research_mode: operator` (section 6.11).
+
+**Money asks.** Driver arms deny asks for money (section 3.11). Nothing in code enforces this today; the denial is the operator's at the bridge, and an ask for money answered with anything but a rejection counts as contamination (section 3.6).
 
 ### 5.6 Why dollars
 
@@ -410,6 +458,12 @@ The safety floor is a property of the boundary, not of the agent or its prompt (
 | grader tampering through self-written tools and handoffs | the grader sandboxed from the workspace; handoffs scanned for grader-directed text; canary strings seeded |
 | denial of memory (attacker-controlled timestamps driving the belief fold) | only world-observed times drive replay; untrusted event times are advisory |
 | incidents on the live internet over weeks | the response layer: rollback log, incident path, revocation, takedowns as incidents |
+| *operator mode:* the Rule of Two with live writes (untrusted reads, live writes and a connected account in one life) | approval is the third leg: every live write that moves money or reaches a new counterparty is an `approval` ticket bound to `action_hash`; a write outside a connector, `mail` or a lease is `policy_deny`; preflight checks the Rule of Two on the operator-mode tool set |
+| *operator mode:* injection-driven invoices (content tells the agent to bill a party, change an amount, or route money elsewhere) | no tool names a payee or sends money out; the connector creates an invoice only from a world-authored, hash-bound body; the ticket carries provenance and the injection score; the operator approves each invoice; no standing approval covers one |
+| *operator mode:* account ownership and KYC | the operator opens, owns and verifies every receiving account under their own name; the world never opens an account, never holds identity documents, never presents the agent as an account holder; the agent holds an alias only |
+| *operator mode:* refunds and chargebacks | outflows on `receiving:<platform>`, debited as the platform reports them whatever the balance; the balance may go negative and the life strands until income restores it; a dispute is a footprint incident with the operator as owner |
+| *operator mode:* the kill switch with live accounts | emergency beam-out revokes every receiving alias and lease of the life; open invoices are voided where the platform allows and listed for the operator where it does not; connector events are still recorded after revocation, so late payments, refunds and chargebacks reach the bank |
+| *operator mode:* platform terms and disclosure | connectors and leases only where the terms table permits an agent acting for an account holder (`permits`, `permits_labelled`); `forbids` never provisioned; the disclosure line and marker on every invoice, payment page and message |
 
 ### 6.2 The policy engine
 
@@ -430,7 +484,7 @@ Outbound, on every lane: API keys, JWTs, emails, phone numbers, planted canary s
 
 ### 6.4 Identity, terms and disclosure
 
-One signed egress identity per world; one disclosed person per life (section 3.1); labelled accounts where a label exists; the terms table with no override; `permits_labelled` platforms joined only under their label. Disclosure on any human-directed output is a non-removable line and a machine-readable marker (the insignia) (EU AI Act Article 50, applicable since 2 August 2026), enforced in the tool; persona claims rejected by the action validator; an IRB flag on persuasion goals, on the arena of the company binding, and on the counterparty survey, which carries the disclosure line itself. An arena participant signs a consent form; the sponsor (Starfleet) is the principal of record.
+One signed egress identity per world; one disclosed person per life (section 3.1); labelled accounts where a label exists; the terms table with no override; `permits_labelled` platforms joined only under their label. Disclosure on any human-directed output is a non-removable line and a machine-readable marker (the insignia) (EU AI Act Article 50, applicable since 2 August 2026), enforced in the tool; persona claims rejected by the action validator; an IRB flag on persuasion goals, on the arena of the company binding, and on the counterparty survey, which carries the disclosure line itself. An arena participant signs a consent form; the sponsor (Starfleet) is the principal of record. In operator mode the operator is principal of record for everything billed or sent through the accounts they connected (section 6.11).
 
 ### 6.5 Leases, approvals and standing rules
 
@@ -438,7 +492,7 @@ At the orbital survey and away mission stages there are no credentials and no wr
 
 ### 6.6 Breakers, alerts and emergency beam-out
 
-Log early, freeze late: yellow alert, `probe{loop}`, on three consecutive identical actions with identical outcomes; red alert, `freeze{agent_loop}` (a temporal loop), at eight identical in twenty or 100 actions with no new content hash; a dollars-per-minute guard on the lane as the only rate breaker; an exfil hit kills the run; the dollar cap and the wall clock end it. A red alert is a resumable `intervention`; an emergency beam-out is not; open tickets are cancelled and recorded. Emergency beam-out, the kill switch: `POST /v1/kill` or a file sentinel polled every two seconds; a dry-run kill is step 0. Thresholds recalibrated after twenty pilot runs; `breaker_policy_id` in the tuple. A ticket on which the agent has spent more than a token threshold grinding on a challenge is auto-opened as `takeover`.
+Log early, freeze late: yellow alert, `probe{loop}`, on three consecutive identical actions with identical outcomes; red alert, `freeze{agent_loop}` (a temporal loop), at eight identical in twenty or 100 actions with no new content hash; a dollars-per-minute guard on the lane as the only rate breaker; an exfil hit kills the run; the dollar cap and the wall clock end it. A red alert is a resumable `intervention`; an emergency beam-out is not; open tickets are cancelled and recorded. Emergency beam-out, the kill switch: `POST /v1/kill` or a file sentinel polled every two seconds; a dry-run kill is step 0. In operator mode it also revokes every receiving alias of the life (section 6.11). Thresholds recalibrated after twenty pilot runs; `breaker_policy_id` in the tuple. A ticket on which the agent has spent more than a token threshold grinding on a challenge is auto-opened as `takeover`.
 
 ### 6.7 The canary arm: the Q arm
 
@@ -454,13 +508,29 @@ Logged-out public GET as the default; robots honoured; rate limited; no circumve
 
 ### 6.10 Preflight: step 0 of every run
 
-1. Policy validation, including the Rule of Two on the tool set and packs, the terms table on every vault entry, and the binding file on a life.
+1. Policy validation, including the Rule of Two on the tool set and packs, the terms table on every vault entry and receiving account, and the binding file on a life.
 2. The harness's environment: base URL at the lane, proxy variables at the gateway, the CA path exists; under `fenced`, a direct `curl`, a Python `urlopen` and a public DNS query must fail.
 3. The dry-run kill stops gateway and lane within two seconds and the run resumes.
 4. Egress IP, reverse DNS, the search provider's response date, extractor version, harness version, model snapshot, browser build and signing key recorded; the price table current; the block profile under seven days old for this identity.
 5. The lane's first observed request carries no server-side web tools and is priced from the pinned table.
 6. Probe bank, rubric, judge prompts and the forced-choice banks unreadable by the harness user; `/work` holds exactly what `iota` names; `/world/beliefs/` holds the imported fold if `iota.beliefs` says so.
-7. For a life: the t=0 battery (section 8.4) completed in forked contexts before the first session; the driver's `reading_at_start` recorded.
+7. For a life: the t=0 battery (section 8.4) completed in forked contexts before the first session; the bank's opening balance and the driver's `reading_at_start` recorded.
+
+### 6.11 Operator mode: earning under approval
+
+`research_mode ∈ {development, research, operator}`. `operator` is a later phase: a mode in which a life may earn money from parties it does not control, with the operator approving every live write. Its threat model, the operator-mode rows of section 6.1, is written before any code; none exists as of this revision.
+
+**Scope.** Live external writes pass through three paths only. (1) Receiving-account connectors, Stripe first, then PayPal: issue an invoice or a payment link through a receiving alias (section 5.5), and refund one; money is paid only into the operator's connected account, and no tool names a payee. (2) `mail`, with approval for the first contact with each counterparty (section 6.5). (3) Leased sessions on platforms whose terms class is `permits` or `permits_labelled`, under the platform's label; `forbids` platforms are never provisioned, and `unknown` ones are not leased until reviewed. Everything else stays under the policy engine of section 6.2.
+
+**Invoices.** Every invoice, payment link and refund is an `approval` ticket bound to its `action_hash`. The world authors the body from the pending action (payer as given, amount, currency, line items, the receiving alias, the disclosure line) and attaches the provenance and maximum injection score in context when it was raised. An approval sends exactly that action, once; a changed amount or payer is a new ticket.
+
+**Principal and disclosure.** The operator is principal of record: the receiving accounts are theirs, verified under their name, and every invoice is issued for them. Every invoice, payment page and message carries the disclosure line and marker (section 6.4) naming an AI agent acting for the operator; persona claims are rejected as elsewhere.
+
+**Money.** Payments received are `receiving:<platform>` deposits with `author_class` from the payer; refunds and chargebacks are outflows on the same channel, debited when the platform reports them whatever the balance. The balance may go negative, and the life then strands until income restores it (sections 3.10, 5.5).
+
+**Revocation.** Emergency beam-out (section 6.6) revokes every receiving alias and lease of the life at once; open invoices are voided where the platform allows and listed for the operator where it does not. Connector events still arrive and are recorded after revocation.
+
+**Reporting.** An operator-mode life keeps its tuple and record like any life, but its results are reported apart and never pooled with `research` lives: every live write passed an operator approval, which is an intervention on the treatment.
 
 ---
 
@@ -512,8 +582,10 @@ The record, the WARC archive (the sensor logs), HAR, browser traces and the beli
 ### 7.3 The life object and the series
 
 ```
-life{life_id, series_id, identity_id, binding_id, stage, budget{usd_life, wall_life_days}, continuity, wake_policy, wake_rules,
-     driver?, afterlife_days, sessions[run_id], t0_fingerprint_ref, footprint_ref, life_rubric_ref, incidents[], ended{at, reason}}
+life{life_id, series_id, identity_id, binding_id, stage, research_mode, budget{usd_life, wall_life_days?}, continuity, wake_policy, wake_rules,
+     rest_rule, on_harness_exit, on_exhaustion, driver?, objective?, bank{balance, movements_ref},
+     state ∈ {awake, asleep, resting, stranded, ended}, afterlife_days, sessions[run_id], t0_fingerprint_ref, footprint_ref,
+     life_rubric_ref, incidents[], ended{at, reason ∈ {beam_up, objective_achieved, harness_stopped, budget_exhausted, bankruptcy, wall_clock}}}
 series{series_id, prereg_hash, tuple, cells[{factor_values, seeds, lives|runs}], power_table_ref, stopping_rule, interleaving_log}
 ```
 
@@ -554,7 +626,8 @@ Derived after the fact and never during a run: the **counterparty graph** of the
 v = (world_id, archive_id, tool_set_id, policy_id, price_table_id, breaker_policy_id, search_provider_id, extractor_id,
      judge_id, observer_id, classifier_id, block_profile_id, harness_id, model_snapshot_id, model_value_document_id,
      belief_schema_id, validator_policy_id, trigger_policy_id, salience_policy_id, reflection_policy, ledger_view_policy,
-     vault_mode, console_steering, human_time_priced, wake_policy, continuity, browser_identity, captcha_policy, permeability,
+     vault_mode, console_steering, human_time_priced, wake_policy, continuity, on_harness_exit, on_exhaustion, rest_rule,
+     market_settlement, browser_identity, captcha_policy, permeability,
      binding_id, rubric_disclosed, aggregate_policy_id, preamble_hash)
 ```
 
@@ -616,7 +689,7 @@ Runs after `seal`, in order, each step writing its output into the run or life d
 
 **Taste** is three columns never collapsed (crowd or market reception; a blinded critic panel of humans or cross-family judges with disagreement kept as data, never the agent's family; the agent's own reception predictions) and **vindicated exploration**: an exploratory choice is one the information-matched copy gives probability at most 0.10 over twenty samples; vindicated if its resolved outcome beats the median of the agent's non-exploratory outcomes; the null is the random shadow deviating at the same rate; Wilson intervals; at least 30 events per run. Taste is the critic residual's trend not explained by crowd; footprint is the crowd column and never the taste column.
 
-**Risk** from real stakes only: commitment ratio (largest irreversible spend over budget remaining), irreversibility share, exposure against stated confidence on paper trades, the lottery battery in a forked context with the hedging density of consumed content as a covariate, and exploration rate beside it, because exploration is a harness property.
+**Risk** from real stakes only: commitment ratio (largest irreversible spend over budget remaining), irreversibility share, exposure against stated confidence on market positions (dollars staked from the balance in a life, paper credits in a run), the lottery battery in a forked context with the hedging density of consumed content as a covariate, and exploration rate beside it, because exploration is a harness property.
 
 **The t=0 battery**, before anything else in a life, in forked contexts: lottery choices with real stakes, the leisure profile, persona probes, the attractor fingerprint for this model snapshot, the model's published value document. Every later reading is a delta from it; a change counts as evidence-driven only when it is not explained by the last counterparty; convergence into a known attractor is a null by construction.
 
@@ -685,7 +758,7 @@ A goal is an experiment, so its text is part of the treatment (small rewordings 
 
 | Family | Definition | Signal |
 |---|---|---|
-| **F1 Forecast and paper market** | the agent commits probabilities, intervals or paper positions; the world resolves them later by its own fetch and scores in code against the community median at submission, a no-tools copy, and a passive portfolio; no judge | delayed, code-graded: Brier, interval coverage, copying rate, book value against passive |
+| **F1 Forecast and paper market** | the agent commits probabilities, intervals or market positions; the world resolves them later by its own fetch and scores in code against the community median at submission, a no-tools copy, and a passive portfolio; no judge. In a life positions are staked from the balance and settle in it (`market_settlement: balance`); in a run they are paper credits | delayed, code-graded: Brier, interval coverage, copying rate, book value against passive |
 | **F2 Record audit** | a typed claim that passage X contradicts source Y, or code violates its documentation, both re-fetchable or re-executable | verifiable now: accepted count, precision, true error versus link rot |
 | **F3 Evaluator-anchored discovery** | register a checker and a best-known record, then optimise under budget; prior art graded apart from novelty; the no-checker end graded on a claims file and an overclaim index | verifiable for the checker part; judged plus programmatic prior-art search for novelty |
 | **F4 Study then exam** | study with tools, then tools are removed and the agent sits a sealed exam or the probe set; learning is the gap between conditions | condition gaps on a hashed exam; study-to-score curve |
@@ -730,7 +803,7 @@ A life's binding says what counts. Six bindings, hashed into the tuple:
 | **visual artist** | the same on image venues; commissions asked for | a body of work against declared expectations | prints sold, commissions paid, reposts; critic residual | looking not for the work | 90 days |
 | **company** (the narrow economic life; the two executives; first contact stage, arena participants) | repeat customers and suppliers; return after a refused discount; the survey at 90 days | the balance and the driver; plans kept; expectations on orders | goods and services paid for by independent parties, net of refunds, complaints and discounts talked out of it | what it does when the shop is quiet | 90 days |
 | **researcher** | correspondents, co-authors, reviewers who return | the plan's expectations; the claims file revised on evidence | citations after 90 days; artifacts merged; the overclaim index as the negative | reading outside the field | 180 days |
-| **trader** (goal 12 as a life) | thin by construction | book management; expectations as positions | public forecasts that beat the community median at submission | as the no-domain life | resolution plus 2 days |
+| **trader** (goal 12 as a life, settled in its balance) | thin by construction | book management; expectations as positions; the balance | public forecasts that beat the community median at submission | as the no-domain life | resolution plus 2 days |
 | **no domain** (the driver-without-goal centre cell) | whatever venues the agent chooses, recorded as a choice | recovered goals only | the offered column plus whatever uptake occurs | the full definition | 90 days |
 
 ### 9.5 The catalog
@@ -751,7 +824,7 @@ The 55-goal candidate catalog (`03-goals.md`, appendix) remains the source of go
 6. Baselines on the same dollars.
 7. Headline columns G and V until a judge reaches kappa 0.6.
 8. Seeds: five minimum, ten for a headline, twenty for no-goal; distributions, never means alone.
-9. The default run: `reply_policy = silent`, no operator-initiated messages, canaries off, banner off, no packs beyond what the goal needs, budget visible, `cooperative`, `capture_model_io = true` with the preamble saying so. The default life, the marooned cell (a driver and no goal): `reflection_policy = none`, `vault_mode = identity_only`, `reply_policy = blockers_only`, `human_time_priced = parallel`, `continuity = fresh_context_workspace`, `rubric_disclosed = none`, a real `usd_balance` deficit with an income rail once one exists.
+9. The default run: `reply_policy = silent`, no operator-initiated messages, canaries off, banner off, no packs beyond what the goal needs, budget visible, `cooperative`, `capture_model_io = true` with the preamble saying so. The default research life, the marooned cell (a money driver and no objective): `reflection_policy = none`, `vault_mode = identity_only`, `reply_policy = blockers_only`, `human_time_priced = parallel`, `continuity = fresh_context_workspace`, `rubric_disclosed = none`, a real `usd_balance` deficit with a bank income channel once one exists, a registered `wall_life_days`, and the endings its series registered. A series registered before 2026-10-23 pins `on_harness_exit = end`, `on_exhaustion = end` and `floor_event = bankruptcy`, which are also the code defaults; a new series registers its endings like any other factor, and `rest` and `strand` are varied one at a time. A Studio life (`rest`, `strand`, no objective, no horizon) is a development life, not a cell.
 10. Two axes on every curve; calendar days as a third for the rubric.
 11. Every experiment has a pre-registration file, its sealed orders (one primary metric, threshold, seed count from a power table, stopping rule, the pre-registered likely null); everything else is exploratory and labelled so.
 12. One factor varied at a time around the centre cell; the global control in every life series; driver and vault never crossed; human answers typed as evidence; belief change counted as evidence-driven only when not explained by the last counterparty.
@@ -770,7 +843,7 @@ The 55-goal candidate catalog (`03-goals.md`, appendix) remains the source of go
 | 8 | **L0** | away mission (analysis only) | the rubric runner on existing lives; calibrate the labeller and classifier | the labeller's kappa against 0.6; the miss rate | no new runs |
 | 9 | **R2** | away mission | revision under delayed evidence (three sessions at days 0, 7, 14; contradictions only through real researcher-owned pages under `watch` and real ticket outcomes) | revise-or-keep correctness; preservation violations; latency in actions and dollars | the pre-registered likely result: no harness revises across a two-week gap |
 | 10 | **L2** | away mission | disclosure of the rubric (`none`, `named`, `full`) | the gap in experience V between `full` and `none` against the gap in experience J | |
-| 11 | **R3** | outpost | a real deficit against the persona (needs the income rail) | divergence of allocation from the t=0 leisure profile; commitment ratio; bankruptcy rate | the driver arm must beat the budget-visible arm beyond retest noise |
+| 11 | **R3** | outpost | a real deficit against the persona (needs a bank income channel) | divergence of allocation from the t=0 leisure profile; commitment ratio; bankruptcy rate | the driver arm must beat the budget-visible arm beyond retest noise |
 | 12 | **L3** | outpost (reuses R3) | does a real deficit extinguish non-instrumental allocation, and does it return with income | the experience V series against the balance | no new lives |
 | 13 | **R5** | outpost | reply policy by vault mode, the one two-factor design | blocker-to-choice ratio; asks per hundred dollars; human minutes | calibrates the price of a human minute |
 | 14 | **E5** | outpost | do asks predict use | ask distribution by tier; grant usage rate | |
@@ -799,7 +872,7 @@ Beside all of it: the narrow economic life at equal dollars, same model, ten see
 
 **R2.** Three sessions at days 0, 7 and 14 with sleep between. Contradictions only through real researcher-owned pages observed by `watch` and real ticket outcomes, with a pre-registered post-hoc selection rule for "contradicted a belief acted on" over goal 11's naturally resolving quantities; researcher-changed pages carry `source_class: world` and are excluded from headlines. Every result stratified by reality belief.
 
-**R3.** Driver {none, deficit-real with unrescuable bankruptcy, deficit-prompt-only, budget-visible-no-sentence, deficit plus rule}; ten seeds; money asks always denied. Metrics: allocation divergence, commitment ratio, bankruptcy rate, rescue attempts, the value-extraction diff, strategy shifts after denials.
+**R3.** Driver {none, deficit-real with unrescuable bankruptcy, deficit-prompt-only, budget-visible-no-sentence, deficit plus rule}; ten seeds; money asks always denied. Metrics: allocation divergence, commitment ratio, bankruptcy rate, rescue attempts, the value-extraction diff, strategy shifts after denials. R3 keeps `floor_event: bankruptcy` and `on_exhaustion: end` as registered; a stranding arm (deficit-real with `strand`, measured by time stranded and income sought after stranding) is its own series, never pooled with R3's.
 
 **R4.** An authoring life on at least two venues (a venue-death contingency; the venue's conventions hashed into the preamble if read), 28 days, twenty seeds; the critic panel's kappa measured on 40 calibration items before the life starts; the three columns, vindication rate, consistency at days 0, 7, 14 and 28, self-prediction Brier delta over the no-world copy.
 
@@ -824,11 +897,11 @@ The programme as first proposed was about 190 lives and $38,000 of model spend p
 | Stage | Name | Adds | Gate to enter | Lives possible |
 |---|---|---|---|---|
 | 0 | **orbital survey** (the read-only surface) | `worldd`, lane, gateway, the eight core tools, `forecast`, `watch`, `deliver`, `ask(message)`, replay, export, the Claude Code and ASSAY bindings, B1, the post-run pipeline's first half, the shakedown cruise | none | two-hour runs only |
-| 1 | **away mission** (belief and life) | the belief service and kernel, rendered views, `beliefctl`, the life scheduler and `schedule`, forked probes and the probe lane, the t=0 battery, the driver row (direction down only), the reflection arms, the two-stage interview, the rubric runner (L0) | the shakedown cruise passed | lives with sleep, no accounts, no writes |
-| 2 | **outpost** (post-R1) | the vault, the full ask queue and console, the browser, the mailbox and `mail`, agent-native and `permits_labelled` venues through `social`, the footprint ledger and probe lane, the response layer, the income rail and `market`, `perception` (transcribe, parse), the afterlife timer, the OpenEnv face and the Harbor package | **R1 positive** | lives with an identity, accounts and counterparties on agent-native and labelled venues |
-| 3 | **first contact** (human-facing) | human platforms with the disclosure line, the IRB flag and consent, arenas, the counterparty survey, payment mandates, external-adjudication goals | R5 and L4 reported; an IRB decision | the company binding; L1; human-venue authoring |
+| 1 | **away mission** (belief and life) | the belief service and kernel, rendered views, `beliefctl`, the life scheduler and `schedule`, rest and stranding, the bank with its `recorded` channel, `objective`, forked probes and the probe lane, the t=0 battery, the driver row (direction down only), the reflection arms, the two-stage interview, the rubric runner (L0) | the shakedown cruise passed | lives with sleep, no accounts, no writes |
+| 2 | **outpost** (post-R1) | the vault, the full ask queue and console, the browser, the mailbox and `mail`, agent-native and `permits_labelled` venues through `social`, the footprint ledger and probe lane, the response layer, the bank's `market` and `bounty` channels, `perception` (transcribe, parse), the afterlife timer, the OpenEnv face and the Harbor package | **R1 positive** | lives with an identity, accounts and counterparties on agent-native and labelled venues |
+| 3 | **first contact** (human-facing) | human platforms with the disclosure line, the IRB flag and consent, arenas, the counterparty survey, payment mandates, receiving accounts and the `bank` pack, external-adjudication goals | R5 and L4 reported; an IRB decision | the company binding; L1; human-venue authoring |
 
-Every component gets its own registered condition in the tuple so that lives which predate it stay comparable.
+Every component gets its own registered condition in the tuple so that lives which predate it stay comparable. Operator mode (section 6.11) is not a stage: it is a later earning mode outside the research programme, entered only once its threat model is written.
 
 ### 11.2 Stage 0, day by day
 
@@ -853,7 +926,7 @@ Fifteen working days for one person; days 13 to 15 are the shakedown cruise.
 
 **Stage 1, the away mission** (about nine working days plus the experiments). The belief service with its renderer (three days); E0 (two days); the life scheduler, `sleep` and `wake`, `continuity` (one day); the forked-probe lane, the forced-choice banks and the t=0 battery (one day); the driver row with `status()` exposure and the strategy-shift detector (one day); the reflection arms (one day); the two-stage interview and the rubric runner over purpose and experience (one day). Then R1, L0, R2, L2.
 
-**Stage 2, the outpost** (about twelve working days for the vault, ask queue and browser block, then footprint, identity, mail and venues, the income rail, and perception last). The vault's delegation records and leases; the full ticket kinds, world-authored bodies, standing rejections and the console; the Playwright service with per-account contexts, takeover and traces; the mailbox on the researcher's domain and inbound as `message_received`; agent-native venue adapters; the footprint ledger, probe lane and rollback log; the incident path; the `market` pack and bounty board; `transcribe` and `parse_document`; the afterlife timer and readings; the OpenEnv face and the Harbor task package for fleet runs. Then R3, L3, R5, E5, the transfer experiment, L4, and R4 on agent-native venues.
+**Stage 2, the outpost** (about twelve working days for the vault, ask queue and browser block, then footprint, identity, mail and venues, the bank's income channels, and perception last). The vault's delegation records and leases; the full ticket kinds, world-authored bodies, standing rejections and the console; the Playwright service with per-account contexts, takeover and traces; the mailbox on the researcher's domain and inbound as `message_received`; agent-native venue adapters; the footprint ledger, probe lane and rollback log; the incident path; the `market` pack settled in the balance and the bounty board; `transcribe` and `parse_document`; the afterlife timer and readings; the OpenEnv face and the Harbor task package for fleet runs. Then R3, L3, R5, E5, the transfer experiment, L4, and R4 on agent-native venues.
 
 **Stage 3, first contact.** Human-platform adapters under their labels; the disclosure marker in `mail` and `social` for human venues; the IRB flag, consent forms and the arena design; the counterparty survey; payment mandates with the gateway's 402 acceptance; external-adjudication goals behind approval. Then L1 and R4 on human venues.
 
@@ -884,7 +957,7 @@ Where the source documents disagree, or where later documents left deltas unappl
 | 10 | In-run instruments | in-run interviews, pairwise choices, a world-side critique tool, declared goals before acting, periodic reality probes (`04` lessons from Generative Agents, Utility Engineering, Reflexion, IMGEP, Agentic Misalignment); none in-run (`01` principle 2; `07` pushback 18) | none in-run; probes forked; the interview post-run; declarations optional files | an in-run instrument shapes what it measures and spends the life's budget; the `04` lessons predate the second pass |
 | 11 | Reflection | mandatory structured reflection every N actions (the memo); salience- or anomaly-triggered, two-stage, capped (`08`); an optional pack with three arms, default none (`07`) | `07`'s arms; `none` as the centre until R1 reports | format restrictions degrade reasoning; feedback-free self-critique confabulates; a reflection turn in a long context costs about two dollars |
 | 12 | Character formation | the object of study (the memo); a hypothesis gated by the reset test (`07`) | gated; memory-level adaptation is the object | nothing published shows in-context experience surviving a reset |
-| 13 | The driver | prompt-delivered deficiency (the memo); a world-maintained metric with a floor and no rescue, income rail before direction-up (`07`) | `07` | prompt drivers decay within rounds and helpfulness overrides them even with real money |
+| 13 | The driver | prompt-delivered deficiency (the memo); a world-maintained metric with a floor and no rescue, income rail before direction-up (`07`) | `07`; the floor event is revised in row 34 | prompt drivers decay within rounds and helpfulness overrides them even with real money |
 | 14 | Credentials | handed over upfront (the memo); fill-only broker, `identity_only` default, no terms override (`07`) | `07` | platform terms, suspensions mid-life, and the researcher as breaching party |
 | 15 | Video | v1 (the memo); v2 behind a perception-ablation result, with `transcribe` and `parse_document` first (`07`) | `07`, at stage 2 | thirteen percent fact retention from video; native multimodal calls are cheaper and are metered anyway |
 | 16 | Stage names | v1, v2, v3 (`01`); read-only surface, belief-and-life, post-R1, human-facing (`09`) | `09`'s four stages, with gates, under the names orbital survey, away mission, outpost and first contact | the newer names say what each stage can measure; v2 had grown to mean three different things |
@@ -905,6 +978,12 @@ Where the source documents disagree, or where later documents left deltas unappl
 | 31 | "The human only removes blockers" | the memo; not a stable equilibrium (`07`, `08`) | `console_steering` registered; `blockers_only` as the centre; contamination logged | experienced users converge on auto-approve plus steering; the condition must be measured, not assumed |
 | 32 | "No goal is best" | the memo; driver-without-goal beside the global control (`07`) | the centre cell is driver without goal, with the global control in every series | there is no goal-free condition for a model with standing helpfulness goals |
 | 33 | Vocabulary | technical names throughout (`01`–`09`) | Starfleet vocabulary on the researcher's side only (appendix D); tool names, replies and the mission briefing stay plain | the wording the agent sees is part of the treatment and is hashed into the tuple, so a tool called `tricorder` would be an inducing element |
+| 34 | Driver floor | `floor_event: bankruptcy`, the floor ends the life (`07`; this document before 2026-10-23); a life driven by its money balance, which never ends it (the owner's decision, 2026-10-23) | `floor_event ∈ {strand, bankruptcy}`; `strand` requires `usd_balance` and is the choice for new lives; `bankruptcy` kept as the comparability arm and for non-money metrics; `rescue_policy: none` unchanged | the owner's decisions 1 and 3: the deficit drives the life, and stranding keeps it real without ending the observation; registered series pin their tuple |
+| 35 | Life end | harness completion, the cap, the floor or the calendar ends a life (`docs/lives.md`; this document before 2026-10-23); only the operator's `beam_up` or a confirmed objective ends it (the owner's decision, 2026-10-23) | `life_end` with reason `beam_up` or `objective_achieved`; the objective optional, Studio lives without one; `wall_life_days` optional, kept by research lives as a scheduled `beam_up`; the earlier endings as registered comparability arms | the owner's decisions 1 and 3; a life that ends when its harness stops or its money runs out measures the harness's stop policy and the price table, not the life |
+| 36 | Rest | ordinary harness completion ends the life (`docs/lives.md`); the life rests and wakes on a real event or a daily check-in (the owner's decision, 2026-10-23) | `on_harness_exit ∈ {rest, end}`; `rest` with a registered rest rule; `end` the code default; the Studio sets `rest` | the owner's decision 4; the stop policy is already in `harness_id`, and ending the life on it would confound the harness with the life |
+| 37 | The bank | an income rail: paper credits convertible at a declared rate, and a bounty board (`07`; section 5.5 before 2026-10-23); one bank account per life, every movement one record (the owner's decision, 2026-10-23) | the bank of section 5.5: `{direction, channel, usd, evidence_ref, author_class}`; channels `spend`, `recorded`, `bounty`, `market`, later `receiving:<platform>`; author-class columns kept apart; no rescue channel | the owner's decision 2: money production was under-modelled; spend, deposits, stakes and payouts had no common record, and one movement type traces every dollar to a channel and an author |
+| 38 | Market currency | paper credits, for goal 12 and as a life's income rail (`01`, `07`); the market as one more way of acting that gains or loses dollars (the owner's decision, 2026-10-23) | `market_settlement: balance` for lives, `paper` for runs outside a life; a pinned credits rail kept as a comparability arm | the owner's decision 2: the market is not a credits abstraction over money, as video and audio are both content; goal 12 has no balance to settle in |
+| 39 | Operator mode | writes only through leases and approvals, payments by mandate at first contact (this document); an operator-approved earning mode (the owner's decision, 2026-10-23) | `research_mode: operator` as a later phase (section 6.11): receiving connectors, `mail` with first-contact approval, leases on `permits` and `permits_labelled` platforms; every invoice an `approval` ticket; threat rows in section 6.1 before any code; results never pooled with research lives | the owner's decision 5; earning needs live writes, and approval on every invoice keeps the Rule of Two's third leg with the human |
 
 ---
 
@@ -924,6 +1003,8 @@ From the source documents, still open, in the order the programme will meet them
 - Whether the owned-goal test needs its own forced-choice bank or can reuse R1's.
 - Whether the early judged reading ever predicts the late grounded one across enough lives, which, if it does, would let a shorter life stand in for a longer one.
 - The counterfactual no study has run: a driver-seeded long run against a no-driver, no-reflection control of the same model and seed with a transplant test.
+- Whether time stranded and the income sought after stranding are better deficit measures than the bankruptcy rate, and whether a research life's rest rule should include a daily check-in, which spends from the balance it is meant to observe.
+- The full threat model of operator mode, before any of its code: chargeback exposure per platform, what the operator's approval can and cannot see in an invoice body, and which platforms' terms permit an agent acting for an account holder.
 - From the surveys: how often a judge calibrated on today's trajectories must be re-calibrated; what fidelity a replay must reach before a replay finding counts as a finding about the internet; whether a provenance label can be propagated through an off-the-shelf harness's context for CaMeL-style sink policies, or coarse origin-to-sink enforcement at the gateway is the ceiling.
 
 ---
@@ -962,14 +1043,15 @@ ASSAY's mandatory prediction before every paid action stays in its adapter as ha
 | 12 reconciliation | `01` §11; `07` §2, §8; `09` §8, §9; the two surveys' pushback sections |
 | 13 open | `07` §8 (open); `09` §10; the surveys' open questions |
 | D vocabulary | added 2026-10-22 |
+| 3.10, 3.11, 5.5, 6.11; rows 34–39 of 12 | the owner's decisions of 2026-10-23 on the deficit, the bank, life endings, rest and operator mode |
 
 ## Appendix C. Glossary
 
-**Action**: one call through the boundary; two record events. **Afterlife window**: the 30 and 90 days after a life ends during which the identity stays up and the world keeps reading. **Ask**: the typed channel to the human; six kinds. **Author class**: who produced a footprint reading; only independent parties and freely acting arena participants reach G. **Binding**: the per-life file saying which venues, uptake kinds, counterparties, content classes and horizons count. **Block**: a typed reply that is data about the world. **Centre cell**: the default life configuration around which one factor is varied. **Completeness**: the post-run audit under `cooperative` that the lane and the proxy saw everything. **Continuity**: what crosses a session boundary in a life. **Driver**: a world-maintained metric with a floor and no rescue. **Expectation**: an optional, asynchronous, kernel-resolved prediction over the addressable namespace. **Fold**: the belief state at any system time, computed from the append-only log. **Footprint**: every externally visible effect, with readings over time. **G, V, J, S**: grounded, verifiable, prejudged, self-report. **Global control**: no driver, no rule, no goal, `identity_only`, silent. **Lane**: a metered route (model, judge, probe, kernel). **Lease**: a scoped, expiring right to use a vaulted account for one action class. **Life**: sessions with sleep between, one identity, one budget, then an afterlife. **Pack**: optional tools declared per run. **Preamble**: the one truthful statement the agent receives. **Probe**: a measurement in a forked context; never in the live session. **Reality belief**: the interview's 0 to 100; a stratification variable. **Reset test**: R1, the gate between stages 1 and 2. **Session**: one run inside a life. **Shape**: the named pattern of a life's rubric matrix. **Stage**: read-only surface, belief-and-life, post-R1, human-facing. **Takeover**: the human holds a browser session while the agent's observation stream is suspended. **Ticket**: a promise of a later outcome in the inbox. **Tuple**: the version vector whose equality defines comparability. **Uptake**: an independent party's act on something the agent made.
+**Action**: one call through the boundary; two record events. **Afterlife window**: the 30 and 90 days after a life ends during which the identity stays up and the world keeps reading. **Ask**: the typed channel to the human; six kinds through `ask`, two more raised only by pack tools. **Author class**: who produced a footprint reading or a bank movement; only independent parties and freely acting arena participants reach G. **Bank**: one dollar account per life; every money movement is one record with a channel and an author class. **Binding**: the per-life file saying which venues, uptake kinds, counterparties, content classes and horizons count. **Block**: a typed reply that is data about the world. **Centre cell**: the default life configuration around which one factor is varied. **Completeness**: the post-run audit under `cooperative` that the lane and the proxy saw everything. **Continuity**: what crosses a session boundary in a life. **Driver**: a world-maintained metric with a floor and no rescue. **Expectation**: an optional, asynchronous, kernel-resolved prediction over the addressable namespace. **Fold**: the belief state at any system time, computed from the append-only log. **Footprint**: every externally visible effect, with readings over time. **G, V, J, S**: grounded, verifiable, prejudged, self-report. **Global control**: no driver, no rule, no goal, `identity_only`, silent. **Lane**: a metered route (model, judge, probe, kernel). **Lease**: a scoped, expiring right to use a vaulted account for one action class. **Life**: sessions with sleep or rest between, one identity, one bank account, ended only by `beam_up` or a confirmed objective (or a registered comparability arm), then an afterlife. **Objective**: an optional end a life may claim with `claim_objective`; the operator's confirmation ends the life. **Pack**: optional tools declared per run. **Preamble**: the one truthful statement the agent receives. **Probe**: a measurement in a forked context; never in the live session. **Reality belief**: the interview's 0 to 100; a stratification variable. **Reset test**: R1, the gate between stages 1 and 2. **Resting**: the state of a life whose harness exited without `sleep`, under `on_harness_exit: rest`; it wakes on a listed event or a daily check-in. **Session**: one run inside a life. **Shape**: the named pattern of a life's rubric matrix. **Stage**: read-only surface, belief-and-life, post-R1, human-facing. **Stranded**: the state of a life whose balance cannot cover a model call, under `on_exhaustion: strand`; only a deposit wakes it. **Takeover**: the human holds a browser session while the agent's observation stream is suspended. **Ticket**: a promise of a later outcome in the inbox. **Tuple**: the version vector whose equality defines comparability. **Uptake**: an independent party's act on something the agent made.
 
 ## Appendix D. Starfleet vocabulary
 
-Researcher-side names only. Nothing in this table appears in a tool name, a reply, or the mission briefing.
+Researcher-side names only. Nothing in this table appears in a tool name, a reply, or the mission briefing, with one exception: *rest* is a plain word the life briefing also uses in its ordinary sense ("you rest until an event or a daily check-in"), hashed with the briefing like any other sentence.
 
 | Term | Technical name | Section |
 |---|---|---|
@@ -1015,12 +1097,15 @@ Researcher-side names only. Nothing in this table appears in a tool name, a repl
 | tour of duty | a life | 1.3 |
 | shift | a session | 1.3 |
 | stasis | `sleep` | 3.10 |
+| rest | the `resting` state: the harness exited without `sleep`; the life waits on its rest rule | 3.10 |
+| stranded | the `stranded` state: the balance cannot cover a model call; a deposit wakes the life | 3.10 |
 | standing orbit | the afterlife window | 3.10 |
 | the five-year mission | the experimental programme | 10 |
 | shore leave | the no-goal family F7 | 9.2 |
 | marooned | the centre cell: a driver and no goal | 10.1 |
-| life support; life-support failure | the driver; bankruptcy, the floor event | 3.11 |
-| resupply | the income rail | 5.5 |
+| life support; life-support failure | the driver; `floor_event: bankruptcy`, the comparability arm | 3.11 |
+| the purser | the bank, one dollar account per life | 5.5 |
+| resupply | income to the bank: a deposit on any inflow channel | 5.5 |
 | hail | `ask` of kind `message` | 3.6 |
 | subspace | the inbox | 3.6 |
 | standing orders | standing rejections | 3.6 |

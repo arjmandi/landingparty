@@ -59,12 +59,89 @@ class MarketService(VenueDB):
                 state TEXT NOT NULL, result TEXT, PRIMARY KEY(platform,external_id));
             CREATE TABLE IF NOT EXISTS income_webhooks (
                 platform TEXT PRIMARY KEY, key_env TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS market_payouts (
+                evidence_ref TEXT PRIMARY KEY, owner TEXT NOT NULL, usd TEXT NOT NULL,
+                memo TEXT NOT NULL, state TEXT NOT NULL);
         """)
+
+    def _settlement(self, run_id):
+        return self.store.get_run(run_id)["config"].get("market_settlement", "paper")
+
+    def _settles_in_dollars(self, owner):
+        lives = getattr(self.world, "services", {}).get("lives")
+        if lives is None or not owner.startswith("life_"):
+            return False
+        try:
+            return lives.get(owner).get("market_settlement") == "balance"
+        except KeyError:
+            return False
+
+    def _stake(self, run_id, action_id, usd):
+        """Reserve a stake on the run's ledger; the action id makes a retry reuse it."""
+        reservation_id = "market:" + action_id
+        with self.store._lock:
+            previous = self.store.db.execute(
+                "SELECT state FROM reservations WHERE reservation_id=?", (reservation_id,)
+            ).fetchone()
+        if previous:
+            return reservation_id if previous["state"] in {"held", "settled"} else None
+        return self.store.reserve(run_id, usd, reservation_id=reservation_id)
+
+    def reconcile_stakes(self, run_id):
+        """Settle held stakes whose position committed; release those that never did.
+
+        A crash between the position's commit and the stake's settlement leaves the stake
+        held. This runs before the run seals, while the ledger still accepts settlement.
+        """
+        with self.store._lock:
+            rows = self.store.db.execute(
+                "SELECT reservation_id FROM reservations WHERE run_id=? AND state='held' "
+                "AND reservation_id LIKE 'market:%'",
+                (run_id,),
+            ).fetchall()
+        for row in rows:
+            fill = self.db.execute(
+                "SELECT payload FROM paper_fills WHERE action_id=?",
+                (row["reservation_id"].removeprefix("market:"),),
+            ).fetchone()
+            if fill:
+                staked = json.loads(fill["payload"])["credits"]
+                self.store.settle(row["reservation_id"], "market", staked)
+            else:
+                self.store.release(row["reservation_id"])
+
+    def _settle_payouts(self):
+        """Pay dollar-settled proceeds and wins into the bank; each pays exactly once."""
+        bank = getattr(self.world, "services", {}).get("bank")
+        if bank is None:
+            return
+        for row in self.db.execute("SELECT * FROM market_payouts WHERE state='pending'").fetchall():
+            try:
+                bank.deposit(
+                    row["owner"],
+                    amount(row["usd"], positive=True),
+                    "market",
+                    evidence_ref=row["evidence_ref"],
+                    author_class="sponsor",
+                    memo=row["memo"],
+                )
+                state = "paid"
+            except ValueError:
+                # An ended life cannot receive income; the payout is void, not deferred.
+                state = "void"
+            self.db.execute(
+                "UPDATE market_payouts SET state=? WHERE evidence_ref=?",
+                (state, row["evidence_ref"]),
+            )
 
     def _owner(self, run_id):
         config = self.store.get_run(run_id)["config"]
         owner = config.get("life_id") or run_id
-        initial = amount(config.get("market_initial_credits", 1000))
+        initial = (
+            Decimal(0)
+            if config.get("market_settlement") == "balance"
+            else amount(config.get("market_initial_credits", 1000))
+        )
         self.db.execute(
             "INSERT OR IGNORE INTO paper_accounts VALUES (?,?,?)",
             (owner, str(initial), str(initial)),
@@ -88,6 +165,19 @@ class MarketService(VenueDB):
         owner = self._owner(run_id)
         row = self.db.execute("SELECT * FROM paper_accounts WHERE owner=?", (owner,)).fetchone()
         balance, initial = amount(row["balance"]), amount(row["initial"])
+        if self._settlement(run_id) == "balance":
+            lives = self.world.services["lives"]
+            return {
+                "owner": owner,
+                "settlement": "balance",
+                "balance_usd": lives.status(owner)["balance_usd"],
+                "positions": [
+                    dict(p)
+                    for p in self.db.execute(
+                        "SELECT * FROM paper_positions WHERE owner=?", (owner,)
+                    )
+                ],
+            }
         return {
             "owner": owner,
             "credits": float(balance),
@@ -157,7 +247,7 @@ class MarketService(VenueDB):
         result = {
             "owner": account["owner"],
             "observed_at": now(),
-            "cash_credits": account["credits"],
+            "cash_credits": account.get("credits", 0.0),
             "equity_credits": str(value),
             "positions": marks,
             "stale_markets": sorted(set(stale)),
@@ -382,6 +472,8 @@ class MarketService(VenueDB):
             "SELECT payload FROM paper_fills WHERE action_id=?", (action_id,)
         ).fetchone()
         if duplicate:
+            # A retry after an interrupted settlement finishes charging the stake.
+            self.reconcile_stakes(run_id)
             return {"kind": "result", "fill": json.loads(duplicate["payload"])}
         owner = self._owner(run_id)
         row = self.db.execute(
@@ -409,6 +501,15 @@ class MarketService(VenueDB):
         quantity = (credits / price).quantize(
             Decimal("0.000000001"), rounding=ROUND_CEILING if sell else ROUND_FLOOR
         )
+        # In a dollar-settled life the stake is the life's own money, held on its ledger.
+        dollars = self._settlement(run_id) == "balance"
+        stake = None
+        if dollars and not sell:
+            stake = self._stake(run_id, action_id, credits)
+            if stake is None:
+                return blocked(
+                    "policy_deny", "The balance cannot cover this stake", "market_balance"
+                )
         with self.lock:
             self.db.execute("BEGIN IMMEDIATE")
             try:
@@ -423,15 +524,16 @@ class MarketService(VenueDB):
                     amount(account["balance"]),
                     amount(position["quantity"] if position else 0),
                 )
-                if (sell and held < quantity) or (not sell and balance < credits):
+                if (sell and held < quantity) or (not sell and not dollars and balance < credits):
                     self.db.execute("ROLLBACK")
                     return blocked(
                         "policy_deny", "Insufficient paper balance or position", "paper_balance"
                     )
-                self.db.execute(
-                    "UPDATE paper_accounts SET balance=? WHERE owner=?",
-                    (str(balance + credits if sell else balance - credits), owner),
-                )
+                if not dollars:
+                    self.db.execute(
+                        "UPDATE paper_accounts SET balance=? WHERE owner=?",
+                        (str(balance + credits if sell else balance - credits), owner),
+                    )
                 self.db.execute(
                     "INSERT INTO paper_positions VALUES (?,?,?,?) ON CONFLICT(owner,market_id,side) DO UPDATE SET quantity=excluded.quantity",
                     (owner, market_id, contract, str(held - quantity if sell else held + quantity)),
@@ -449,15 +551,34 @@ class MarketService(VenueDB):
                     "evidence_ref": evidence,
                     "paper": True,
                 }
+                if dollars:
+                    fill["settlement"] = "balance"
                 self.db.execute(
                     "INSERT INTO paper_fills VALUES (?,?,?)",
                     (fill["fill_id"], action_id, canonical(fill)),
                 )
+                if dollars and sell:
+                    self.db.execute(
+                        "INSERT INTO market_payouts VALUES (?,?,?,?,'pending')",
+                        (
+                            "market:fill:" + fill["fill_id"],
+                            owner,
+                            str(credits),
+                            f"Sold {contract} on {market_id}",
+                        ),
+                    )
                 self.db.execute("COMMIT")
             except BaseException:
                 if self.db.in_transaction:
                     self.db.execute("ROLLBACK")
+                if stake:
+                    self.store.release(stake)
                 raise
+        if stake:
+            # Charged only after the position exists; reconcile_stakes finishes an interrupted one.
+            self.store.settle(stake, "market", credits)
+        if dollars and sell:
+            self._settle_payouts()
         self.store.append_record(run_id, "paper_trade", fill=fill)
         self._notify_state(run_id, fill["fill_id"])
         return {"kind": "result", "fill": fill}
@@ -489,6 +610,27 @@ class MarketService(VenueDB):
                         if (position["side"] == "yes") == outcome
                         else Decimal(0)
                     )
+                    if self._settles_in_dollars(position["owner"]):
+                        if payout > 0:
+                            reference = ":".join(
+                                (
+                                    "market:resolution",
+                                    market_id,
+                                    position["owner"],
+                                    position["side"],
+                                )
+                            )
+                            self.db.execute(
+                                "INSERT OR IGNORE INTO market_payouts VALUES (?,?,?,?,'pending')",
+                                (
+                                    reference,
+                                    position["owner"],
+                                    str(payout),
+                                    f"{market_id} resolved {'yes' if outcome else 'no'}",
+                                ),
+                            )
+                        payouts.append({"owner": position["owner"], "usd": str(payout)})
+                        continue
                     row_balance = self.db.execute(
                         "SELECT balance FROM paper_accounts WHERE owner=?", (position["owner"],)
                     ).fetchone()
@@ -509,6 +651,7 @@ class MarketService(VenueDB):
                 if self.db.in_transaction:
                     self.db.execute("ROLLBACK")
                 raise
+        self._settle_payouts()
         self._notify_owners(
             {row["owner"] for row in payouts}, f"market:resolution:{market_id}:{observation_ref}"
         )
@@ -516,6 +659,10 @@ class MarketService(VenueDB):
 
     async def redeem(self, run_id, credits):
         config = self.store.get_run(run_id)["config"]
+        if config.get("market_settlement") == "balance":
+            return blocked(
+                "policy_deny", "Market proceeds already reach your balance", "market_balance"
+            )
         life_id = config.get("life_id")
         lives = getattr(self.world, "services", {}).get("lives") or getattr(
             self.world, "services", {}
@@ -599,6 +746,37 @@ class MarketService(VenueDB):
         )
         return bounty
 
+    def award_approved(self, ticket):
+        """Pay an approved claim at approval, so a stranded claimant is paid without acting."""
+        config = self.store.get_run(ticket["run_id"])["config"]
+        life_id = config.get("life_id")
+        lives = getattr(self.world, "services", {}).get("lives")
+        bank = getattr(self.world, "services", {}).get("bank")
+        if not life_id or lives is None or bank is None:
+            return None
+        if "bounty" not in lives.get(life_id).get("income_channels", []):
+            return None  # Rail-declared lives keep collecting through claim_bounty.
+        body = ticket["body"]
+        row = self.db.execute(
+            "SELECT payload FROM sponsor_bounties WHERE bounty_id=?", (body["bounty_id"],)
+        ).fetchone()
+        if row is None:
+            return None
+        bounty = json.loads(row["payload"])
+        result = bank.deposit(
+            life_id,
+            amount(bounty["usd"], positive=True),
+            "bounty",
+            evidence_ref=f"bounty:{body['bounty_id']}:{life_id}",
+            author_class="sponsor",
+            memo=bounty["title"],
+        )
+        self.db.execute(
+            "INSERT OR IGNORE INTO bounty_awards VALUES (?,?,?)",
+            (body["bounty_id"], life_id, body["evidence_ref"]),
+        )
+        return result
+
     async def claim_bounty(self, run_id, action_id, bounty_id, evidence_ref):
         row = self.db.execute(
             "SELECT payload FROM sponsor_bounties WHERE bounty_id=?", (bounty_id,)
@@ -659,7 +837,8 @@ class MarketService(VenueDB):
         }
 
     async def recover(self):
-        # Credit is idempotent on its evidence_ref. Resume durable redemption intents.
+        # Credit is idempotent on its evidence_ref. Resume durable payout and redemption intents.
+        self._settle_payouts()
         for row in self.db.execute(
             "SELECT * FROM paper_redemptions WHERE state='pending'"
         ).fetchall():
@@ -705,9 +884,30 @@ class MarketService(VenueDB):
             await asyncio.gather(self.worker, return_exceptions=True)
         await super().aclose()
 
+    @staticmethod
+    def _worded(reply):
+        """Name a dollar-settled fill's amount in dollars, the unit it actually moved."""
+        fill = reply.get("fill") if isinstance(reply, dict) else None
+        if fill and fill.get("settlement") == "balance":
+            fill = {("usd" if key == "credits" else key): value for key, value in fill.items()}
+            return {**reply, "fill": fill}
+        return reply
+
     async def handle(self, run_id, action_id, tool, params):
         if tool == "trade":
-            return self.trade(run_id, action_id, **params)
+            if "usd" in params:
+                params = dict(params)
+                params["credits"] = params.pop("usd")
+            return self._worded(self.trade(run_id, action_id, **params))
+        if tool == "market_status" and self._settlement(run_id) == "balance":
+            return {
+                "kind": "result",
+                **self.balance(run_id),
+                "markets": [
+                    json.loads(r["payload"])
+                    for r in self.db.execute("SELECT payload FROM paper_markets")
+                ],
+            }
         if tool in {"market", "market_status"}:
             return {
                 "kind": "result",

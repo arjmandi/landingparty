@@ -284,3 +284,124 @@ async def test_live_key_updates_do_not_reprice_an_existing_run(product):
 def test_subscription_cannot_claim_research_or_measurement_conditions(change):
     with pytest.raises(ValueError, match="subscription"):
         RunConfig(model_billing_mode="subscription", **change)
+
+
+def life_body(**changes):
+    return {
+        "harness_id": "codex",
+        "auth_mode": "api_key",
+        "model": "studio-model",
+        "balance_usd": 2,
+        "session_minutes": 10,
+        **changes,
+    }
+
+
+async def until(predicate):
+    import asyncio
+
+    async with asyncio.timeout(3):
+        while not predicate():
+            await asyncio.sleep(0.01)
+
+
+async def test_a_life_lives_on_its_balance_with_no_objective_and_holds_its_harness(product):
+    world, _studio, client, requests, launches, _connection = product
+    world.instance_settings.update_provider("openai", api_key="fixture-openai-key")
+    response = await client.post("/api/lives", json=life_body(name="First life"))
+    assert response.status_code == 201, response.text
+    life_id = response.json()["life"]["life_id"]
+    await until(lambda: launches)
+    info, harness, auth_mode, model = launches[0]
+    config = world.run_config(info["run_id"])
+    assert config["life_id"] == life_id and config["goal"] is None
+    assert "schedule" in config["packs"] and "objective" not in config["packs"]
+    assert "bounty" in config["packs"] and "market" not in config["packs"]
+    assert world.store.reconcile(info["run_id"])["cap_usd"] == 2
+    assert "Your balance starts at $2" in config["preamble"]
+    assert "you rest until 24 hours pass" in config["preamble"]
+    life = world.services["lives"].get(life_id)
+    assert (life["on_exhaustion"], life["on_harness_exit"], life["ends_at"]) == (
+        "strand",
+        "rest",
+        None,
+    )
+    assert (harness, auth_mode, model) == ("codex", "api_key", "studio-model")
+    listed = (await client.get("/api/lives")).json()["lives"]
+    assert [row["life_id"] for row in listed] == [life_id]
+    assert listed[0]["name"] == "First life" and listed[0]["life_state"] == "awake"
+    held = await client.post("/api/runs", json=run_body())
+    assert held.status_code == 400 and "living life" in held.json()["detail"]
+    assert not requests
+
+
+async def test_a_resting_life_wakes_on_a_recorded_deposit_and_beam_up_ends_it(product):
+    world, _studio, client, _requests, launches, _connection = product
+    world.instance_settings.update_provider("openai", api_key="fixture-openai-key")
+    life_id = (await client.post("/api/lives", json=life_body())).json()["life"]["life_id"]
+    await until(lambda: launches)
+    await world.end_run(launches[0][0]["run_id"], reason="harness_stopped")
+    await until(lambda: world.services["lives"].status(life_id)["life_state"] == "resting")
+    deposited = await client.post(
+        f"/api/lives/{life_id}/deposits",
+        json={
+            "usd": 1,
+            "source": "Client paid invoice 3",
+            "evidence": "Statement line 12",
+            "request_id": "deposit-0001",
+        },
+    )
+    assert deposited.status_code == 201, deposited.text
+    account = deposited.json()["account"]
+    assert account["income_by_channel"] == {"recorded": 1}
+    await until(lambda: len(launches) == 2)
+    inbox = world.store.inbox(launches[1][0]["run_id"])["events"]
+    assert any(event["type"] == "deposit" for event in inbox)
+    ended = await client.post(f"/api/lives/{life_id}/beam-up", json={})
+    assert ended.json()["life"]["ended"]["reason"] == "beam_up"
+    await until(
+        lambda: (
+            not world.services["studies"].list_life_runners(life_id)[-1]["state"]
+            in {"running", "waiting"}
+        )
+    )
+    assert (await client.post("/api/runs", json=run_body())).status_code == 201
+
+
+async def test_an_objective_is_optional_and_becomes_the_session_goal(product):
+    world, _studio, client, _requests, launches, _connection = product
+    world.instance_settings.update_provider("openai", api_key="fixture-openai-key")
+    body = life_body(objective="  Publish one useful dataset.  ", market=True)
+    assert (await client.post("/api/lives", json=body)).status_code == 201
+    await until(lambda: launches)
+    config = world.run_config(launches[0][0]["run_id"])
+    assert config["goal"] == "Publish one useful dataset."
+    assert {"objective", "market"} <= set(config["packs"])
+    assert config["market_settlement"] == "balance"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"auth_mode": "subscription", "model": None},
+        {"harness_id": "arbitrary"},
+        {"packs": ["browse"]},
+        {"goal": "A run field"},
+    ],
+)
+async def test_unsupported_lives_create_nothing(product, changes):
+    world, _studio, client, _requests, launches, connection = product
+    world.instance_settings.update_provider("openai", api_key="fixture-openai-key")
+    connection.update(state="connected", auth_method="subscription")
+    response = await client.post("/api/lives", json=life_body(**changes))
+    assert response.status_code == 400
+    assert not world.services["lives"].list() and not launches
+
+
+async def test_bounties_are_posted_and_listed(product):
+    _world, _studio, client, _requests, _launches, _connection = product
+    posted = await client.post(
+        "/api/bounties", json={"title": "Fix a dead link", "criterion": "Merged", "usd": 3}
+    )
+    assert posted.status_code == 201, posted.text
+    assert posted.json()["bounties"][0]["title"] == "Fix a dead link"
