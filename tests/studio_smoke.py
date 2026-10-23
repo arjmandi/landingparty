@@ -245,6 +245,8 @@ async def main():
                     result = detail()
                 else:
                     result = {"runs": runs}
+            elif path == "/api/lives":
+                result = {"lives": []}
             elif path == "/api/runs/r_fixture":
                 result = detail()
             elif path == "/api/runs/r_fixture/asks":
@@ -302,7 +304,7 @@ async def main():
         assert not any(path == "/api/runs" for _, path, _ in calls)
         await page.get_by_label("Operator token", exact=True).fill(token)
         await page.get_by_role("button", name="Open workspace").click()
-        await page.get_by_role("heading", name="A world for your agent to get to work.").wait_for()
+        await page.get_by_role("heading", name="A world your agent can live in.").wait_for()
         checks["session_gate_and_token_cleared"] = (
             await page.locator("#operator-token").input_value() == ""
         )
@@ -382,7 +384,12 @@ async def main():
         checks["model_lists_match_billing_mode"] = await page.locator(
             "#run-models option"
         ).evaluate_all("(items)=>items.map(item=>item.value)") == ["", "sonnet"]
-        await page.get_by_label("What should it work on?").fill(malicious)
+        checks["subscription_falls_back_to_a_single_run"] = (
+            await page.locator("#shape-life").is_disabled()
+            and await page.locator("#shape-run").is_checked()
+        )
+        await page.get_by_text("Add an objective").click()
+        await page.get_by_label("Objective").fill(malicious)
         await page.locator("#launch-button").click()
         await page.get_by_text("Model dollars are unavailable.", exact=False).wait_for()
         checks["subscription_real_world_cost_unmeasured_model"] = (

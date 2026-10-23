@@ -171,7 +171,7 @@ def _source_windows(run, records, fractions):
     cap = _number(run["config"]["budget"]["usd"])
     dollars, points = 0.0, []
     for index, record in enumerate(records):
-        if record["kind"] == "ledger_debit":
+        if record["kind"] == "ledger_debit" and record.get("category") != "market":
             dollars += record.get("amount_nano", float(record.get("cost_usd", 0)) * 1e9) / 1e9
             through = record["seq"]
             # Lane settlement precedes its model_call record. Include that

@@ -41,6 +41,7 @@ nav:
   - Design: design.md
   - World services:
       - Lives and retention: lives.md
+      - Operator earning (planned): operator-earning.md
       - Network boundary: gateway.md
       - Delegation and approvals: credentials.md
       - Clearances and capabilities: capabilities.md

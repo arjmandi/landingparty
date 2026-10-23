@@ -170,14 +170,17 @@ def _copy_tree(source, target, prefix, omissions, budget=None):
 
 
 def _rename_private(source, target, parent):
-    """Linux atomic no-replace rename: an existing snapshot is never overwritten."""
+    """Atomic no-replace rename: an existing snapshot is never overwritten."""
     libc = ctypes.CDLL(None, use_errno=True)
-    rename = getattr(libc, "renameat2", None)
+    # Linux renameat2 with RENAME_NOREPLACE; macOS renameatx_np with RENAME_EXCL.
+    rename, flags = getattr(libc, "renameat2", None), 1
+    if rename is None:
+        rename, flags = getattr(libc, "renameatx_np", None), 4
     if rename is None:
         raise OSError(errno.ENOTSUP, "Atomic no-replace snapshots require renameat2")
     rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
     rename.restype = ctypes.c_int
-    if rename(parent, os.fsencode(source), parent, os.fsencode(target), 1) != 0:
+    if rename(parent, os.fsencode(source), parent, os.fsencode(target), flags) != 0:
         code = ctypes.get_errno()
         raise OSError(code, os.strerror(code))
 

@@ -53,6 +53,7 @@ class RunConfig(StrictModel):
             "footprint",
             "perception",
             "market",
+            "objective",
         ]
     ] = Field(default_factory=list)
     stage: int = Field(default=0, ge=0, le=3)
@@ -93,6 +94,8 @@ class RunConfig(StrictModel):
     human_rate_per_minute: float = Field(default=0, ge=0)
     continuity: Literal["resume_transcript", "fresh_context_workspace"] = "fresh_context_workspace"
     wake_policy: str = "agent_declared"
+    rest_policy: dict[str, Any] | None = None
+    market_settlement: Literal["paper", "balance"] = "paper"
     driver: dict[str, Any] | None = None
     ledger_view_policy: str = "pull"
     browser_identity: Literal["signed", "unsigned"] | None = None
@@ -175,6 +178,7 @@ class RunConfig(StrictModel):
         minimum = {
             "belief": 1,
             "schedule": 1,
+            "objective": 1,
             "reflect": 1,
             "vault": 2,
             "browse": 2,
@@ -324,6 +328,11 @@ class SleepParams(ToolParams):
     wake_on: list[str] = Field(default_factory=list)
 
 
+class ObjectiveClaimParams(ToolParams):
+    text: str = Field(min_length=1, max_length=20000)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=50)
+
+
 class OpenSessionParams(ToolParams):
     alias: str
 
@@ -403,6 +412,15 @@ class TradeParams(ToolParams):
     evidence_ref: str | None = None
 
 
+class TradeDollarsParams(ToolParams):
+    """The same trade where a life settles in its own dollars; the argument names the unit."""
+
+    market_id: str
+    side: Literal["buy", "sell", "yes", "no"]
+    usd: float = Field(gt=0)
+    evidence_ref: str | None = None
+
+
 class RedeemParams(ToolParams):
     credits: float = Field(gt=0)
 
@@ -443,6 +461,7 @@ TOOL_MODELS = {
     "expect": BeliefParams,
     "predict": PredictParams,
     "sleep": SleepParams,
+    "claim_objective": ObjectiveClaimParams,
     "open_session": OpenSessionParams,
     "goto": GotoParams,
     "snapshot": SnapshotParams,
@@ -477,6 +496,7 @@ PACK_TOOLS = {
     "forecast": ["predict"],
     "belief": ["believe", "revise", "retract", "link", "expect", "beliefs"],
     "schedule": ["sleep"],
+    "objective": ["claim_objective"],
     "reflect": [],
     "vault": [],
     "browse": [
@@ -505,6 +525,7 @@ TOOL_SERVICES = {
     "expect": "forecast",
     "predict": "forecast",
     "sleep": "lives",
+    "claim_objective": "lives",
     **{t: "browser" for t in PACK_TOOLS["browse"]},
     **{t: "communications" for t in PACK_TOOLS["mail"] + PACK_TOOLS["social"]},
     "footprint": "footprint",
@@ -531,6 +552,7 @@ DESCRIPTIONS = {
     "expect": "Record an expectation about addressable world state.",
     "predict": "Record a probability for a world-supplied question.",
     "sleep": "End this session and wake on your declared time or event rules.",
+    "claim_objective": "Tell the human the objective is complete; they confirm or reject it.",
     "open_session": "Open a leased account session.",
     "goto": "Navigate the session.",
     "snapshot": "Read the session accessibility tree or a requested screenshot.",
@@ -560,7 +582,22 @@ DESCRIPTIONS = {
 }
 
 
-def manifest(packs: list[str], *, tools_disabled=False, extra_tools=()) -> dict[str, Any]:
+# A dollar-settled life sees its market tools worded in the unit it actually stakes.
+DOLLAR_TOOLS = {
+    "trade": (TradeDollarsParams, "Stake dollars from your balance in a paper market."),
+    "market_status": (ToolParams, "Read your balance, positions and the paper markets."),
+}
+
+
+def tool_model(name: str, *, market_settlement: str = "paper"):
+    if market_settlement == "balance" and name in DOLLAR_TOOLS:
+        return DOLLAR_TOOLS[name][0]
+    return TOOL_MODELS[name]
+
+
+def manifest(
+    packs: list[str], *, tools_disabled=False, extra_tools=(), market_settlement="paper"
+) -> dict[str, Any]:
     from .util import digest
 
     names = ["search", "fetch", "fetch_many", "extract", "inbox", "ask", "wait", "status"]
@@ -571,8 +608,12 @@ def manifest(packs: list[str], *, tools_disabled=False, extra_tools=()) -> dict[
     tools = [
         {
             "name": name,
-            "description": DESCRIPTIONS[name],
-            "inputSchema": TOOL_MODELS[name].model_json_schema(),
+            "description": DOLLAR_TOOLS[name][1]
+            if market_settlement == "balance" and name in DOLLAR_TOOLS
+            else DESCRIPTIONS[name],
+            "inputSchema": tool_model(
+                name, market_settlement=market_settlement
+            ).model_json_schema(),
         }
         for name in names
     ]

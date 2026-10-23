@@ -147,11 +147,20 @@ secure environment. Direct URL fetching does not need a search-provider key.
 Do not put provider keys or native login credentials in goals or workspaces.
 Remember that this quickstart's same-OS-user boundary still permits file access.
 
-## 5. Start, follow and stop a run
+## 5. Begin, follow and end a life or a run
 
-Click **Start with this connection** or **Start run**. Select the harness and
-connection, optionally name the run, give it a goal or leave room for exploration,
-and set its dollar allowance and time limit. A first goal can be:
+Click **Start with this connection** or **Begin**. The dialog opens on **A life**:
+select the harness and an API connection, set its starting balance and session
+length, and leave the objective empty unless you want one. The balance pays for
+its model and tool use. When it stops without sleeping it rests until an event or
+a daily check-in; when its balance cannot cover a model call it is stranded until
+a deposit arrives. Low money never ends a life: only **Beam up**, or your
+confirmation of an objective it claims, does. Record income it earned elsewhere
+with **Record a deposit** on the life.
+
+Choose **A single run** for one session with a dollar allowance and time limit; a
+subscription connection always starts a single run, because its model spend
+cannot be metered into a balance. An objective for a first run can be:
 
 > Inspect the world tools, call status, and deliver a short note. Do not contact
 > anyone or publish anything.

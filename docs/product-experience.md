@@ -5,7 +5,7 @@ Start `worldd` and open its control address in a browser, normally
 same origin. The website explains the project; this application runs and observes
 your own world. The advanced console remains at `/bridge`.
 
-## Start and follow a run
+## Begin and follow a life or a run
 
 1. Open **Settings** to check model access and provider configuration. Supply
    credentials through the protected settings flow or the server's environment;
@@ -13,14 +13,18 @@ your own world. The advanced console remains at `/bridge`.
 2. Choose a supported integration in the **Harness Library**. Its installation
    and connection controls describe what is available on this host. A configured
    integration is separate from a running agent.
-3. Create a run with its goal, model, harness, dollar allowance, and time limit.
-   The creation flow records these conditions. Connect or start the selected
-   harness through the available run controls.
+3. Begin a life with its model, harness, starting balance, and session length;
+   an objective is optional and empty by default. A life rests between sessions,
+   is stranded when its balance cannot cover a model call, and wakes on a
+   deposit; it ends only when you beam it up or confirm an objective it claims.
+   A single run takes a dollar allowance and time limit instead. The creation
+   flow records these conditions.
 4. Follow the run's timeline, state, costs, open asks, beliefs, and footprint.
    Reading these panels does not call an agent tool, consume its inbox, change
    its beliefs, or purchase a completion.
 5. Handle individual asks through their explicit approval or reply controls.
-   Stop the run through its stop control when finished. There is no general
+   Record a deposit for income a life earned elsewhere; it is labelled as
+   attested by you. Beam up a life, or stop a run, through its explicit control. There is no general
    operator chat that silently steers an ongoing agent.
 
 The run list shows actual subject runs; internal measurement and world-accounting

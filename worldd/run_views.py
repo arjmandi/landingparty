@@ -130,7 +130,13 @@ class RunViews:
         actual = self.store.spend(run_id)
         subscription = config.get("model_billing_mode") == "subscription"
         model = _sum(value for key, value in actual.items() if key in _MODEL_CATEGORIES)
-        tools = _sum(value for key, value in actual.items() if key not in _MODEL_CATEGORIES)
+        # A market stake is money placed in the world, not the price of a tool.
+        stakes = _sum(value for key, value in actual.items() if key == "market")
+        tools = _sum(
+            value
+            for key, value in actual.items()
+            if key not in _MODEL_CATEGORIES and key != "market"
+        )
         recorded = _sum(actual.values())
         billing = {
             "mode": "subscription" if subscription else "api_key",
@@ -164,6 +170,7 @@ class RunViews:
             "usd_total": None if subscription else recorded,
             "model_usd": None if subscription else model,
             "world_tools_usd": tools,
+            "market_stakes_usd": stakes,
             "recorded_usd": recorded,
             "by_category": {
                 key: None if subscription and key in _MODEL_CATEGORIES else value
@@ -195,7 +202,7 @@ class RunViews:
         name = config.get("name")
         if not isinstance(name, str) or not name.strip():
             text = " ".join(goal.split()) if isinstance(goal, str) else ""
-            name = (text[:77] + "…" if len(text) > 80 else text) or "Open exploration"
+            name = (text[:77] + "…" if len(text) > 80 else text) or "No objective"
         return _safe(
             {
                 "run_id": run["run_id"],

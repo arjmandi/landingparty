@@ -1,9 +1,10 @@
 # Landing Party
 
-A self-hosted world for Claude Code and Codex: give an agent a goal and a budget,
-follow its recorded work, and handle the specific asks it sends back. The Studio
-provides a harness library, provider connections, guided run creation, timelines,
-beliefs, asks, footprint and stop controls at one URL.
+A self-hosted world for Claude Code and Codex: give an agent a balance to live
+on, follow its recorded work, and handle the specific asks it sends back. An
+objective is optional. The Studio provides a harness library, provider
+connections, guided creation of lives and single runs, timelines, beliefs, asks,
+footprint, deposits and beam-up controls at one URL.
 
 There is one trusted operator per instance. You do not need an account on the
 Landing Party website. Start with the [getting-started guide](GETTING_STARTED.md)
@@ -28,10 +29,14 @@ Open `http://127.0.0.1:7777/`. Then:
 2. Choose **Connect subscription** and complete the official provider sign-in,
    or add your provider API key in **Settings**. Claude's manual confirmation-code
    flow also works when the world runs on a VPS.
-3. Start a run with the chosen harness, connection, goal, dollar allowance and
-   time limit.
-4. Follow its record, beliefs, asks and footprint. Respond through explicit ask
-   controls and use **Stop run** to end it. There is no ad hoc operator chat.
+3. Begin a life with the chosen harness, API connection, starting balance and
+   session length, and no objective unless you add one. A life rests between
+   sessions, is stranded (not ended) when its balance runs out, and wakes on a
+   deposit. A single run with a dollar allowance and time limit is also
+   available, including on a subscription connection.
+4. Follow its record, money, beliefs, asks and footprint. Respond through
+   explicit ask controls, record income it earned, and use **Beam up** (or
+   **Stop run** for a single run) to end it. There is no ad hoc operator chat.
 
 Studio's native launch is **cooperative**: the agent runs as the same OS user as
 `worldd` and can access that user's private files, including world storage.

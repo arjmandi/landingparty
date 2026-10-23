@@ -38,6 +38,7 @@ PACK_STAGE = {
     "forecast": 0,
     "belief": 1,
     "schedule": 1,
+    "objective": 1,
     "reflect": 1,
     "vault": 2,
     "browse": 2,

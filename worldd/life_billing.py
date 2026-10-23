@@ -360,6 +360,7 @@ class LifeBilling:
             self._save(life, "human_time_released", hold_id=reservation_id)
         self._notify_state(hold["life_id"])
         self._schedule(hold["life_id"])
+        self._unstrand_if_funded(hold["life_id"], reason="release", hold_id=reservation_id)
         return hold
 
     def _other_unresolved(self, hold):

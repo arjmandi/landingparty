@@ -121,6 +121,9 @@ def create_app(
     auth = harnesses.auth
     world.services.update(harness_auth=auth, harnesses=harnesses)
     app.state.studio = StudioService(world, world.instance_settings, harnesses)
+    if "studies" in world.services:
+        # Registered before the lifespan's recovery resumes any Studio life's runner.
+        world.services["studies"].harnesses["native"] = app.state.studio.native_session
     app.include_router(create_studio_router(app.state.studio))
     from .model_callbacks import configure_models
 

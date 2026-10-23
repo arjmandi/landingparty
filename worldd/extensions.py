@@ -6,6 +6,7 @@ import inspect
 SERVICE_MODULES = [
     ("registry", "worldd.registry", "RegistryService"),
     ("lives", "worldd.lives", "LifeService"),
+    ("bank", "worldd.bank", "BankService"),
     ("identity", "worldd.identity", "IdentityService"),
     ("asks", "worldd.asks", "AskService"),
     ("vault", "worldd.vault", "VaultService"),

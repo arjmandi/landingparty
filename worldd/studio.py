@@ -27,6 +27,38 @@ class StartRun(StrictModel):
     packs: list[str] = Field(default_factory=lambda: ["deliver", "belief", "footprint"])
 
 
+class StartLife(StrictModel):
+    harness_id: str = Field(min_length=1, max_length=80)
+    auth_mode: str = "api_key"
+    model: str | None = Field(default=None, max_length=200)
+    objective: str | None = Field(default=None, max_length=20000)
+    name: str | None = Field(default=None, max_length=120)
+    balance_usd: float = Field(default=20, gt=0, le=10000)
+    session_minutes: float = Field(default=120, gt=0, le=10080)
+    reply_policy: str = "blockers_only"
+    packs: list[str] = Field(default_factory=lambda: ["deliver", "belief", "footprint"])
+    market: bool = False
+
+
+class RecordDeposit(StrictModel):
+    usd: float = Field(gt=0, le=100000)
+    source: str = Field(min_length=1, max_length=500)
+    evidence: str = Field(min_length=1, max_length=2000)
+    request_id: str = Field(min_length=8, max_length=100)
+
+
+class PostBounty(StrictModel):
+    title: str = Field(min_length=1, max_length=200)
+    criterion: str = Field(min_length=1, max_length=2000)
+    usd: float = Field(gt=0, le=10000)
+    days: float = Field(default=7, gt=0, le=365)
+
+
+# How long a resumed life waits for its harness before treating the launch as a rest.
+LAUNCH_ATTEMPTS, LAUNCH_RETRY_S = 10, 3.0
+TERMINAL_RUNS = {"sealed", "ended", "killed"}
+
+
 class StudioService:
     def __init__(self, world, settings, harnesses):
         self.world, self.settings, self.harnesses = world, settings, harnesses
@@ -135,56 +167,77 @@ class StudioService:
         }
         return result
 
-    async def start(self, request):
+    @staticmethod
+    def _check(request):
         if request.auth_mode not in {"api_key", "subscription"}:
             raise ValueError("Select API key or subscription account")
         if request.reply_policy not in {"silent", "blockers_only"}:
             raise ValueError("The studio supports silence or answers to the agent's asks")
         if set(request.packs) - {"deliver", "belief", "footprint", "forecast", "watch"}:
             raise ValueError("Choose one of the supported episode tool packs")
-        async with self._launch:
-            library = await self.catalog()
-            matching = [item for item in library["harnesses"] if item["id"] == request.harness_id]
-            if len(matching) != 1:
-                raise ValueError("Choose an installed harness from the library")
-            item = matching[0]
-            mode = next(row for row in item["modes"] if row["id"] == request.auth_mode)
-            if not mode["ready"]:
-                raise ValueError(mode["reason"] or "Harness setup is incomplete")
-            if self.harnesses.is_busy(request.harness_id):
-                raise ValueError("This harness account already has an active run")
-            model = request.model or None
-            if request.auth_mode == "api_key" and (
-                not model
-                or not any(
-                    row["id"] == model and "api_key" in row["auth_modes"] for row in item["models"]
-                )
-            ):
-                raise ValueError("Select an exact priced model for this API provider")
-            config = RunConfig(
-                name=request.name,
-                goal=request.goal.strip() if request.goal and request.goal.strip() else None,
-                family="F7",
-                stage=2,
-                research_mode="development",
-                isolation_profile="cooperative",
-                packs=list(dict.fromkeys(["deliver", *request.packs])),
-                model_snapshot_id=model,
-                model_billing_mode=request.auth_mode,
-                native_output_token_limit=min(
-                    4096,
-                    int(
-                        self.settings.model_prices(self.world.model_pricing_base)
-                        .get("models", {})
-                        .get(model, {})
-                        .get("max_output_tokens", 4096)
-                    ),
+
+    async def _resolve(self, request):
+        """The installed, ready harness and exact priced model a request names."""
+        library = await self.catalog()
+        matching = [item for item in library["harnesses"] if item["id"] == request.harness_id]
+        if len(matching) != 1:
+            raise ValueError("Choose an installed harness from the library")
+        item = matching[0]
+        mode = next(row for row in item["modes"] if row["id"] == request.auth_mode)
+        if not mode["ready"]:
+            raise ValueError(mode["reason"] or "Harness setup is incomplete")
+        if self.harnesses.is_busy(request.harness_id):
+            raise ValueError("This harness account already has an active run")
+        if self.reserved(request.harness_id):
+            raise ValueError("A living life holds this harness; beam it up first")
+        model = request.model or None
+        if request.auth_mode == "api_key" and (
+            not model
+            or not any(
+                row["id"] == model and "api_key" in row["auth_modes"] for row in item["models"]
+            )
+        ):
+            raise ValueError("Select an exact priced model for this API provider")
+        return item, model
+
+    def _config(self, request, item, model, *, goal, packs, budget):
+        return RunConfig(
+            name=request.name,
+            goal=goal,
+            family="F7",
+            stage=2,
+            research_mode="development",
+            isolation_profile="cooperative",
+            packs=packs,
+            model_snapshot_id=model,
+            model_billing_mode=request.auth_mode,
+            native_output_token_limit=min(
+                4096,
+                int(
+                    self.settings.model_prices(self.world.model_pricing_base)
+                    .get("models", {})
+                    .get(model, {})
+                    .get("max_output_tokens", 4096)
                 ),
-                harness_id=f"{item['id']}@{item['version']}/{request.auth_mode}",
+            ),
+            harness_id=f"{item['id']}@{item['version']}/{request.auth_mode}",
+            budget=budget,
+            reply_policy=request.reply_policy,
+            operator_messages_allowed=False,
+            capture_model_io=True,
+        )
+
+    async def start(self, request):
+        self._check(request)
+        async with self._launch:
+            item, model = await self._resolve(request)
+            config = self._config(
+                request,
+                item,
+                model,
+                goal=request.goal.strip() if request.goal and request.goal.strip() else None,
+                packs=list(dict.fromkeys(["deliver", *request.packs])),
                 budget={"usd": request.budget_usd, "wall_s": request.wall_minutes * 60},
-                reply_policy=request.reply_policy,
-                operator_messages_allowed=False,
-                capture_model_io=True,
             )
             info = self.world.create_run(config)
             try:
@@ -199,6 +252,203 @@ class StudioService:
             result = self.views.get(info["run_id"])
             result["session"] = session
             return result
+
+    def _lives(self):
+        return self.world.services["lives"]
+
+    def _studies(self):
+        return self.world.services["studies"]
+
+    def _runner(self, life_id):
+        runners = [
+            value
+            for value in self._studies().list_life_runners(life_id)
+            if value["cell"]["baseline"] == "native"
+        ]
+        return runners[-1] if runners else None
+
+    def reserved(self, harness_id):
+        """A Studio life holds its harness from birth until it ends, resting included."""
+        for life in self._lives().list():
+            runner = None if life["ended"] else self._runner(life["life_id"])
+            if runner and runner["cell"]["config"]["harness_id"].startswith(harness_id + "@"):
+                return True
+        return False
+
+    async def start_life(self, request):
+        """A life on a balance, with no objective unless one is given; it rests and strands."""
+        if request.auth_mode != "api_key":
+            raise ValueError(
+                "A life's balance needs metered model spend; subscriptions can't be metered"
+            )
+        self._check(request)
+        objective = request.objective.strip() if request.objective else ""
+        async with self._launch:
+            item, model = await self._resolve(request)
+            packs = ["deliver", "schedule", *request.packs, *(["market"] if request.market else [])]
+            config = self._config(
+                request,
+                item,
+                model,
+                goal=None,
+                packs=list(dict.fromkeys(packs)),
+                # The session may use everything the life has left; the life caps it.
+                budget={"usd": 10000, "wall_s": request.session_minutes * 60},
+            ).model_dump(mode="json")
+            lives = self._lives()
+            life = lives.create(
+                {
+                    "stage": 2,
+                    "research_mode": "development",
+                    "name": request.name,
+                    "objective": objective or None,
+                    "budget": {"usd_life": request.balance_usd, "wall_life_days": None},
+                    "continuity": "fresh_context_workspace",
+                    "wake_policy": "time_or_events",
+                    "reply_policy": request.reply_policy,
+                    "driver": {"metric": "usd_balance", "floor": 0},
+                    "on_exhaustion": "strand",
+                    "on_harness_exit": "rest",
+                    "income_channels": [
+                        "recorded",
+                        "bounty",
+                        *(["market"] if request.market else []),
+                    ],
+                    "market_settlement": "balance" if request.market else "paper",
+                    "afterlife_days": [],
+                }
+            )
+            life_id = life["life_id"]
+            try:
+                runner = self._studies().plan_life(
+                    life_id, {"baseline": "native", "model": model, "config": config}
+                )
+                await self._studies().execute_life(
+                    runner["runner_id"], execute=True, budget_usd=request.balance_usd
+                )
+            except BaseException:
+                await lives.end(life_id, reason="studio_launch_failed")
+                raise
+        return self.life(life_id)
+
+    async def native_session(self, created, cell):
+        """Life-runner callback: one native harness session, awaited until it is sealed."""
+        config = cell["config"]
+        harness_id = config["harness_id"].split("@")[0]
+        auth_mode = config.get("model_billing_mode", "api_key")
+        for attempt in range(LAUNCH_ATTEMPTS):
+            try:
+                session = await self.harnesses.launch(
+                    created, harness_id, auth_mode=auth_mode, model=cell["model"]
+                )
+                break
+            except ValueError as error:
+                # Startup recovery can still hold a stale session; a later attempt may pass.
+                if attempt + 1 == LAUNCH_ATTEMPTS:
+                    self.world.store.append_record(
+                        created["run_id"], "harness_launch_failed", reason=str(error)[:500]
+                    )
+                    await self.world.end_run(
+                        created["run_id"], reason="harness_launch_failed", truncated=True
+                    )
+                    return {}
+                await asyncio.sleep(LAUNCH_RETRY_S)
+        task = self.harnesses.tasks.get(session["session_id"])
+        if task is not None:
+            # Shielded: pausing the runner must not cancel the session's own cleanup and seal.
+            await asyncio.shield(task)
+        else:
+            # A session this process does not own still ends with its run's seal.
+            while self.world.store.get_run(created["run_id"])["state"] not in TERMINAL_RUNS:
+                await asyncio.sleep(0.25)
+        return {}
+
+    def _life_summary(self, life):
+        lives = self._lives()
+        status = lives.status(life["life_id"])
+        runner = self._runner(life["life_id"])
+        config = runner["cell"]["config"] if runner else {}
+        return {
+            "life_id": life["life_id"],
+            "name": life.get("name"),
+            "objective": life.get("objective"),
+            "life_state": status["life_state"],
+            "balance_usd": status["balance_usd"],
+            "spent_usd": status["spent_usd"],
+            "income_usd": status["income_usd"],
+            "created_at": life["created_at"],
+            "ended": life["ended"],
+            "sessions": len(life["sessions"]),
+            "active_run_id": life["active_run_id"],
+            "wake_rules": life["wake_rules"],
+            "harness_id": config.get("harness_id"),
+            "model": runner["cell"].get("model") if runner else None,
+            "runner_state": runner["state"] if runner else None,
+            "market": "market" in life.get("income_channels", []),
+        }
+
+    def lives(self):
+        return {
+            "lives": [
+                self._life_summary(life)
+                for life in reversed(self._lives().list())
+                if self._runner(life["life_id"])
+            ]
+        }
+
+    def life(self, life_id):
+        life = self._lives().get(life_id)
+        if not self._runner(life_id):
+            raise KeyError(life_id)
+        runs = {row["run_id"]: row for row in self.views.list_runs()["runs"]}
+        return {
+            "life": self._life_summary(life),
+            "account": self.world.services["bank"].account(life_id),
+            "sessions": [
+                runs[item["run_id"]]
+                for item in reversed(life["sessions"])
+                if item["run_id"] in runs
+            ],
+        }
+
+    async def beam_up(self, life_id):
+        self.life(life_id)
+        await self._lives().end(life_id, reason="beam_up")
+        return self.life(life_id)
+
+    def record_deposit(self, life_id, request):
+        self.life(life_id)
+        self.world.services["bank"].record(
+            life_id,
+            usd=request.usd,
+            source=request.source,
+            evidence=request.evidence,
+            request_id=request.request_id,
+        )
+        return self.life(life_id)
+
+    def bounties(self):
+        market = self.world.services["market"]
+        return {
+            "bounties": [
+                json.loads(row["payload"])
+                for row in market.db.execute(
+                    "SELECT payload FROM sponsor_bounties ORDER BY rowid DESC"
+                )
+            ]
+        }
+
+    def post_bounty(self, request):
+        from datetime import UTC, datetime, timedelta
+
+        self.world.services["market"].register_bounty(
+            title=request.title,
+            criterion=request.criterion,
+            usd=request.usd,
+            sponsor="operator",
+            expires_at=(datetime.now(UTC) + timedelta(days=request.days)).isoformat(),
+        )
+        return self.bounties()
 
 
 def create_studio_router(studio):
@@ -289,6 +539,48 @@ def create_studio_router(studio):
             return await auth_action(harness_id, "submit_code", code=body["code"])
         except (ValueError, TypeError):
             raise HTTPException(400, "The authorization code could not be submitted") from None
+
+    @router.get("/api/lives")
+    async def lives():
+        return studio.lives()
+
+    @router.post("/api/lives", status_code=201)
+    async def start_life(request: Request):
+        try:
+            body = StartLife.model_validate(await _body(request))
+        except ValidationError:
+            raise HTTPException(400, "Check the life settings and selected harness") from None
+        return await studio.start_life(body)
+
+    @router.get("/api/lives/{life_id}")
+    async def life(life_id: str):
+        return studio.life(life_id)
+
+    @router.post("/api/lives/{life_id}/beam-up")
+    async def beam_up(life_id: str):
+        return await studio.beam_up(life_id)
+
+    @router.post("/api/lives/{life_id}/deposits", status_code=201)
+    async def deposit(life_id: str, request: Request):
+        try:
+            body = RecordDeposit.model_validate(await _body(request))
+        except ValidationError:
+            raise HTTPException(
+                400, "Enter an amount, where it came from, and its evidence"
+            ) from None
+        return studio.record_deposit(life_id, body)
+
+    @router.get("/api/bounties")
+    async def bounties():
+        return studio.bounties()
+
+    @router.post("/api/bounties", status_code=201)
+    async def post_bounty(request: Request):
+        try:
+            body = PostBounty.model_validate(await _body(request))
+        except ValidationError:
+            raise HTTPException(400, "A bounty needs a title, criterion and payout") from None
+        return studio.post_bounty(body)
 
     @router.get("/api/runs")
     async def runs():
