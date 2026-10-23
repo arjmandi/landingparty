@@ -82,6 +82,9 @@ class RunConfig(StrictModel):
     wait_budget_s: float = Field(default=60, gt=0, le=60)
     model_snapshot_id: str | None = None
     model_billing_mode: Literal["api_key", "subscription"] = "api_key"
+    # How model spend reaches the ledger: priced at the lane, or estimated from the
+    # native client's own transcript when a subscription bypasses the lane.
+    model_metering: Literal["lane", "transcript"] = "lane"
     native_output_token_limit: int = Field(default=4096, gt=0, le=1000000, strict=True)
     model_value_document_id: str | None = None
     policy_id: str | None = None
@@ -129,10 +132,13 @@ class RunConfig(StrictModel):
 
     @model_validator(mode="after")
     def check_conditions(self):
+        if self.model_metering == "transcript" and self.model_billing_mode != "subscription":
+            raise ValueError("Transcript estimates are only for native subscription sessions")
         if self.model_billing_mode == "subscription" and (
             self.research_mode != "development"
             or self.isolation_profile != "cooperative"
-            or self.life_id
+            # A life lives on a balance; only an estimate from the transcript can debit it.
+            or (self.life_id and self.model_metering != "transcript")
             or self.series_id
             or self.measurement_of
             or self.metering_lane != "harness"

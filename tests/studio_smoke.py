@@ -376,20 +376,35 @@ async def main():
         checks["subscription_setup_without_key"] = not settings["credentials"]["anthropic"][
             "configured"
         ]
-        await page.get_by_role("button", name="Start with this connection").click()
+        await page.get_by_role("button", name="Beam down with this connection").click()
         await page.locator("#new-run-dialog[open]").wait_for()
+        checks["subscription_life_is_estimated_on_priced_models"] = (
+            await page.locator("#shape-life").is_checked()
+            and not await page.locator("#shape-life").is_disabled()
+            and "estimated" in await page.locator("#shape-note").inner_text()
+            and await page.locator("#run-models option").evaluate_all(
+                "(items)=>items.map(item=>item.value)"
+            )
+            == ["claude-fixture-priced"]
+            and await page.locator("#run-model").input_value() == "claude-fixture-priced"
+        )
+        await page.locator("#run-model").fill("claude-unpriced-fixture")
+        unpriced_life_blocked = await page.locator("#launch-button").is_disabled()
+        await page.locator("#shape-run").check()
+        checks["switching_to_a_run_restores_launch"] = (
+            unpriced_life_blocked and not await page.locator("#launch-button").is_disabled()
+        )
         checks["subscription_blank_model_allowed"] = await page.locator(
             "#run-model"
         ).input_value() == "" and not await page.locator("#run-model").get_attribute("required")
         checks["model_lists_match_billing_mode"] = await page.locator(
             "#run-models option"
         ).evaluate_all("(items)=>items.map(item=>item.value)") == ["", "sonnet"]
-        checks["subscription_falls_back_to_a_single_run"] = (
-            await page.locator("#shape-life").is_disabled()
-            and await page.locator("#shape-run").is_checked()
-        )
+        checks["subscription_single_run_still_available"] = await page.locator(
+            "#shape-run"
+        ).is_checked()
         await page.get_by_text("Add an objective").click()
-        await page.get_by_label("Objective").fill(malicious)
+        await page.get_by_role("textbox", name="Objective").fill(malicious)
         await page.locator("#launch-button").click()
         await page.get_by_text("Model dollars are unavailable.", exact=False).wait_for()
         checks["subscription_real_world_cost_unmeasured_model"] = (
@@ -451,11 +466,20 @@ async def main():
             == ["claude-fixture-priced"]
             and await page.locator("#run-model").input_value() == "claude-fixture-priced"
         )
-        await page.get_by_role("button", name="Close new run", exact=True).click()
+        await page.locator("#run-model").fill("claude-unpriced-fixture")
+        checks["unpriced_model_flagged_at_field"] = (
+            "no reviewed price" in await page.locator("#model-note").inner_text()
+            and await page.locator("#launch-button").is_disabled()
+        )
+        await page.locator("#run-model").fill("claude-fixture-priced")
+        checks["priced_model_restores_launch"] = not await page.locator(
+            "#launch-button"
+        ).is_disabled()
+        await page.get_by_role("button", name="Close beam-down", exact=True).click()
         await page.locator("[data-page=runs]").click()
-        await page.get_by_role("button", name="Stop run", exact=True).click()
+        await page.get_by_role("button", name="Beam up", exact=True).click()
         checks["stop_requires_explicit_confirmation"] = runs[0]["state"] == "running"
-        await page.get_by_role("button", name="Stop and seal", exact=True).click()
+        await page.get_by_role("button", name="Beam up and seal", exact=True).click()
         await page.get_by_text("Sealed", exact=True).first.wait_for()
         checks["stop_and_actual_state"] = runs[0]["state"] == "sealed"
         checks["no_browser_storage_or_secret_headers"] = await page.evaluate(

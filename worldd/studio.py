@@ -197,11 +197,15 @@ class StudioService:
                 row["id"] == model and "api_key" in row["auth_modes"] for row in item["models"]
             )
         ):
-            raise ValueError("Select an exact priced model for this API provider")
+            raise ValueError(
+                "This model has no reviewed price, so API mode cannot meter it. Choose a "
+                "priced model, or add its rates to the world's price table."
+            )
         return item, model
 
-    def _config(self, request, item, model, *, goal, packs, budget):
+    def _config(self, request, item, model, *, goal, packs, budget, model_metering="lane"):
         return RunConfig(
+            model_metering=model_metering,
             name=request.name,
             goal=goal,
             family="F7",
@@ -277,14 +281,25 @@ class StudioService:
 
     async def start_life(self, request):
         """A life on a balance, with no objective unless one is given; it rests and strands."""
-        if request.auth_mode != "api_key":
-            raise ValueError(
-                "A life's balance needs metered model spend; subscriptions can't be metered"
-            )
         self._check(request)
+        # A subscription bypasses the model lane, so its life's balance is estimated from
+        # the transcript. Only Claude Code's usage reports are confirmed for that so far.
+        metering = "transcript" if request.auth_mode == "subscription" else "lane"
+        if metering == "transcript" and request.harness_id != "claude-code":
+            raise ValueError(
+                "A Codex life needs an API key for now: its subscription transcript's usage "
+                "reports are not yet confirmed for estimating a balance"
+            )
         objective = request.objective.strip() if request.objective else ""
         async with self._launch:
             item, model = await self._resolve(request)
+            if metering == "transcript" and not any(
+                row["id"] == model and "api_key" in row["auth_modes"] for row in item["models"]
+            ):
+                raise ValueError(
+                    "A subscription life needs an exact priced model, so its estimated spend "
+                    "can be priced; aliases and the account default cannot"
+                )
             # Every Studio life may claim bounties; trading stays an explicit opt-in.
             packs = [
                 "deliver",
@@ -301,6 +316,7 @@ class StudioService:
                 packs=list(dict.fromkeys(packs)),
                 # The session may use everything the life has left; the life caps it.
                 budget={"usd": 10000, "wall_s": request.session_minutes * 60},
+                model_metering=metering,
             ).model_dump(mode="json")
             lives = self._lives()
             life = lives.create(
@@ -322,6 +338,7 @@ class StudioService:
                         *(["market"] if request.market else []),
                     ],
                     "market_settlement": "balance" if request.market else "paper",
+                    "model_metering": metering,
                     "afterlife_days": [],
                 }
             )
@@ -387,11 +404,14 @@ class StudioService:
             "ended": life["ended"],
             "sessions": len(life["sessions"]),
             "active_run_id": life["active_run_id"],
+            # Its personal log and footprint carry forward into the latest session.
+            "latest_run_id": life["sessions"][-1]["run_id"] if life["sessions"] else None,
             "wake_rules": life["wake_rules"],
             "harness_id": config.get("harness_id"),
             "model": runner["cell"].get("model") if runner else None,
             "runner_state": runner["state"] if runner else None,
             "market": "market" in life.get("income_channels", []),
+            "estimated": life.get("model_metering") == "transcript",
         }
 
     def lives(self):
@@ -416,6 +436,19 @@ class StudioService:
                 for item in reversed(life["sessions"])
                 if item["run_id"] in runs
             ],
+        }
+
+    def life_asks(self, life_id):
+        """Every ticket the life raised, across its sessions, newest session first."""
+        life = self._lives().get(life_id)
+        if not self._runner(life_id):
+            raise KeyError(life_id)
+        return {
+            "tickets": [
+                ticket
+                for item in reversed(life["sessions"])
+                for ticket in self.views.asks(item["run_id"]).get("tickets", [])
+            ]
         }
 
     async def beam_up(self, life_id):
@@ -562,6 +595,10 @@ def create_studio_router(studio):
     @router.get("/api/lives/{life_id}")
     async def life(life_id: str):
         return studio.life(life_id)
+
+    @router.get("/api/lives/{life_id}/asks")
+    async def life_asks(life_id: str):
+        return studio.life_asks(life_id)
 
     @router.post("/api/lives/{life_id}/beam-up")
     async def beam_up(life_id: str):

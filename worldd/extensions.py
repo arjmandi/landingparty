@@ -7,6 +7,7 @@ SERVICE_MODULES = [
     ("registry", "worldd.registry", "RegistryService"),
     ("lives", "worldd.lives", "LifeService"),
     ("bank", "worldd.bank", "BankService"),
+    ("transcript_meter", "worldd.transcript_meter", "TranscriptMeter"),
     ("identity", "worldd.identity", "IdentityService"),
     ("asks", "worldd.asks", "AskService"),
     ("vault", "worldd.vault", "VaultService"),
