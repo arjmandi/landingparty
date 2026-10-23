@@ -378,16 +378,26 @@ async def main():
         ]
         await page.get_by_role("button", name="Beam down with this connection").click()
         await page.locator("#new-run-dialog[open]").wait_for()
+        checks["subscription_life_is_estimated_on_priced_models"] = (
+            await page.locator("#shape-life").is_checked()
+            and not await page.locator("#shape-life").is_disabled()
+            and "estimated" in await page.locator("#shape-note").inner_text()
+            and await page.locator("#run-models option").evaluate_all(
+                "(items)=>items.map(item=>item.value)"
+            )
+            == ["claude-fixture-priced"]
+            and await page.locator("#run-model").input_value() == "claude-fixture-priced"
+        )
+        await page.locator("#shape-run").check()
         checks["subscription_blank_model_allowed"] = await page.locator(
             "#run-model"
         ).input_value() == "" and not await page.locator("#run-model").get_attribute("required")
         checks["model_lists_match_billing_mode"] = await page.locator(
             "#run-models option"
         ).evaluate_all("(items)=>items.map(item=>item.value)") == ["", "sonnet"]
-        checks["subscription_falls_back_to_a_single_run"] = (
-            await page.locator("#shape-life").is_disabled()
-            and await page.locator("#shape-run").is_checked()
-        )
+        checks["subscription_single_run_still_available"] = await page.locator(
+            "#shape-run"
+        ).is_checked()
         await page.get_by_text("Add an objective").click()
         await page.get_by_role("textbox", name="Objective").fill(malicious)
         await page.locator("#launch-button").click()

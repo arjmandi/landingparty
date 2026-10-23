@@ -129,22 +129,33 @@ class RunViews:
         config, run_id = run["config"], run["run_id"]
         actual = self.store.spend(run_id)
         subscription = config.get("model_billing_mode") == "subscription"
+        estimated = config.get("model_metering") == "transcript"
         model = _sum(value for key, value in actual.items() if key in _MODEL_CATEGORIES)
+        # Estimated from the native transcript: model spend, but never a measured dollar.
+        estimate = _sum(value for key, value in actual.items() if key == "model.estimated")
         # A market stake is money placed in the world, not the price of a tool.
         stakes = _sum(value for key, value in actual.items() if key == "market")
         tools = _sum(
             value
             for key, value in actual.items()
-            if key not in _MODEL_CATEGORIES and key != "market"
+            if key not in _MODEL_CATEGORIES and key not in {"market", "model.estimated"}
         )
         recorded = _sum(actual.values())
         billing = {
             "mode": "subscription" if subscription else "api_key",
             "model_cost_measured": not subscription,
+            "model_cost_estimated": estimated,
             "model_cost_usd": None if subscription else model,
-            "cap_scope": "world_tools" if subscription else "all_metered_spend",
-            "cap_spent_usd": tools if subscription else recorded,
-            "reason": "Native subscription model usage is not priced by this ledger; the dollar cap covers world tools only."
+            "model_estimated_usd": estimate if estimated else None,
+            "cap_scope": "estimated_model_and_world_tools"
+            if estimated
+            else "world_tools"
+            if subscription
+            else "all_metered_spend",
+            "cap_spent_usd": recorded if estimated else tools if subscription else recorded,
+            "reason": "Model spend is estimated from the native transcript at pinned API prices; the cap covers that estimate and world tools."
+            if estimated
+            else "Native subscription model usage is not priced by this ledger; the dollar cap covers world tools only."
             if subscription
             else None,
         }
@@ -166,7 +177,8 @@ class RunViews:
                 if isinstance(value, (float, int)) and not isinstance(value, bool):
                     tokens[name] += value
         costs = {
-            "status": "partial" if subscription else "measured",
+            "status": "estimated" if estimated else "partial" if subscription else "measured",
+            "model_estimated_usd": estimate if estimated else None,
             "usd_total": None if subscription else recorded,
             "model_usd": None if subscription else model,
             "world_tools_usd": tools,

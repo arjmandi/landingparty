@@ -203,6 +203,8 @@ class LifeService(LifeBilling, LifeCheckpoints):
             identity["income_channels"] = life["income_channels"]
         if life.get("market_settlement", "paper") != "paper":
             identity["market_settlement"] = life["market_settlement"]
+        if life.get("model_metering", "lane") != "lane":
+            identity["model_metering"] = life["model_metering"]
         return identity
 
     def events(self, life_id: str) -> list[dict]:
@@ -558,6 +560,11 @@ class LifeService(LifeBilling, LifeCheckpoints):
             if not isinstance(objective, str) or not objective.strip() or len(objective) > 20000:
                 raise ValueError("An objective must be non-empty text")
             objective = objective.strip()
+        model_metering = config.get("model_metering", "lane")
+        if model_metering not in {"lane", "transcript"}:
+            raise ValueError("Unknown model metering")
+        if model_metering == "transcript" and research_mode != "development":
+            raise ValueError("Transcript estimates are for development lives only")
         name = config.get("name")
         if name is not None and (not isinstance(name, str) or len(name) > 120):
             raise ValueError("A life name is at most 120 characters")
@@ -586,6 +593,7 @@ class LifeService(LifeBilling, LifeCheckpoints):
             "driver": driver,
             "income_rail": rail,
             "income_channels": channels,
+            "model_metering": model_metering,
             "market_settlement": settlement,
             "income_usd": 0,
             "income_nano": 0,
@@ -799,6 +807,9 @@ class LifeService(LifeBilling, LifeCheckpoints):
             result["rest_policy"] = life["rest_policy"]
         if life.get("market_settlement", "paper") != "paper":
             result["market_settlement"] = life["market_settlement"]
+        if life.get("model_metering", "lane") != "lane":
+            # Every session of an estimated life is estimated the same way.
+            result["model_metering"] = life["model_metering"]
         if life.get("objective") is not None:
             # The objective is the session goal; claiming it needs the objective pack.
             result["goal"] = life["objective"]

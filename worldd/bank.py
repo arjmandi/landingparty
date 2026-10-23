@@ -44,6 +44,8 @@ class BankService:
                         "usd": usd,
                         "run_id": session["run_id"],
                         "at": session.get("ended_at") or session["started_at"],
+                        # Priced from the session's own transcript, not metered at the lane.
+                        "estimated": category == "model.estimated",
                     }
                 )
         for event in lives.events(life_id):

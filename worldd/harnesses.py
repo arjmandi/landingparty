@@ -29,6 +29,8 @@ from .util import identifier as new_id
 
 MAX_LINE = 64 * 1024
 MAX_LOG = 2 * 1024 * 1024
+# A metered line is read whole, apart from the log's limits, so its usage is never cut off.
+METER_LINE = 8 * 1024 * 1024
 TERMINAL = {"completed", "failed", "stopped", "interrupted"}
 SECRET_FIELD = re.compile(
     r"""(?i)(["']?(?:access_token|refresh_token|api_key|authorization|password|secret|WORLD_RUN_TOKEN)["']?\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s,}\n]+)"""
@@ -654,6 +656,10 @@ class HarnessService(VenueDB):
         pending, total, stored = bytearray(), 0, 0
         discard = False
         path = root / ("stdout.jsonl" if channel == "stdout" else "stderr.log")
+        meter = self.world.services.get("transcript_meter") if channel == "stdout" else None
+        if meter is not None and not meter.metered(value["run_id"]):
+            meter = None
+        metered, overflowed = bytearray(), False
         with path.open("xb") as transcript:
             path.chmod(0o600)
 
@@ -688,6 +694,19 @@ class HarnessService(VenueDB):
             while chunk := await stream.read(8192):
                 total += len(chunk)
                 for part in chunk.splitlines(keepends=True):
+                    if meter is not None:
+                        if len(metered) + len(part) > METER_LINE:
+                            if not overflowed:
+                                meter.overflow(value["run_id"])
+                            overflowed = True
+                            metered.clear()
+                        elif not overflowed:
+                            metered.extend(part)
+                        if part.endswith(b"\n"):
+                            if metered and not overflowed:
+                                meter.observe(value["run_id"], metered.decode(errors="replace"))
+                            metered.clear()
+                            overflowed = False
                     if not discard:
                         pending.extend(part[: max(0, MAX_LINE - len(pending))])
                         if len(pending) >= MAX_LINE:
@@ -704,6 +723,8 @@ class HarnessService(VenueDB):
                         discard = False
             if pending:
                 await emit(bytes(pending))
+            if meter is not None and metered and not overflowed:
+                meter.observe(value["run_id"], metered.decode(errors="replace"))
         current = self._load(session_id)
         current[channel + "_bytes"] = total
         self._save(current)

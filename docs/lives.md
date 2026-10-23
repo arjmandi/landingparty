@@ -123,6 +123,15 @@ belong to `research_mode: operator`, whose threat model must be written before
 any of its code.
 
 Money-driver readings derive from actual ledger spend and bank movements.
+A life on a native subscription uses `model_metering: transcript`: the
+transcript meter (`worldd/transcript_meter.py`) prices the usage the client
+reports in its own stream at the run's pinned API prices and debits it as
+`model.estimated`. It stops the session when what is left would not cover
+another message like its largest, recording a `model_refused` so the life
+strands as under the lane; it records `estimate_overshoot` rather than going
+past the cap, and fails closed with `estimate_unavailable` on unpriced or
+unreadable usage. Estimated dollars are labelled as such and never pooled with
+metered ones. Only Claude Code's stream is confirmed for this so far.
 `floor_event: strand` requires the `usd_balance` metric; other driver metrics
 keep `floor_event: bankruptcy` and accept only trusted observations through
 `observe_driver`. Driver arms deny money asks, but no code enforces this today:

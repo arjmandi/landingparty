@@ -47,7 +47,12 @@ async def product(tmp_path, monkeypatch):
             tmp_path,
             gateway=Gateway(),
             lane_client=upstream,
-            prices={"models": {"studio-model": price()}},
+            prices={
+                "models": {
+                    "studio-model": price(),
+                    "claude-studio": {**price(), "provider": "anthropic"},
+                }
+            },
         )
         world, studio = control.state.world, control.state.studio
         connection = {"state": "auth_required", "auth_method": "unknown"}
@@ -408,3 +413,38 @@ async def test_bounties_are_posted_and_listed(product):
     )
     assert posted.status_code == 201, posted.text
     assert posted.json()["bounties"][0]["title"] == "Fix a dead link"
+
+
+async def test_a_claude_code_subscription_life_lives_on_an_estimated_balance(product):
+    world, _studio, client, requests, launches, connection = product
+    connection.update(state="connected", auth_method="subscription")
+    body = life_body(harness_id="claude-code", auth_mode="subscription", model="claude-studio")
+    response = await client.post("/api/lives", json=body)
+    assert response.status_code == 201, response.text
+    assert response.json()["life"]["estimated"] is True
+    await until(lambda: launches)
+    info, harness, auth_mode, model = launches[0]
+    assert (harness, auth_mode, model) == ("claude-code", "subscription", "claude-studio")
+    config = world.run_config(info["run_id"])
+    assert config["model_metering"] == "transcript"
+    assert config["model_billing_mode"] == "subscription"
+    assert "estimated from your session's own usage reports" in config["preamble"]
+    billing = (await client.get(f"/api/runs/{info['run_id']}")).json()["billing"]
+    assert billing["model_cost_estimated"] is True and billing["model_cost_usd"] is None
+    assert not requests
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"harness_id": "codex", "auth_mode": "subscription", "model": "studio-model"},
+        {"harness_id": "claude-code", "auth_mode": "subscription", "model": "sonnet"},
+        {"harness_id": "claude-code", "auth_mode": "subscription", "model": None},
+    ],
+)
+async def test_subscription_lives_need_claude_code_and_an_exact_priced_model(product, changes):
+    world, _studio, client, _requests, launches, connection = product
+    connection.update(state="connected", auth_method="subscription")
+    response = await client.post("/api/lives", json=life_body(**changes))
+    assert response.status_code == 400
+    assert not world.services["lives"].list() and not launches

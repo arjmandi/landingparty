@@ -311,6 +311,12 @@ class World:
                     "workspace_checkpoint_policy_id": "workspace-spend-checkpoints@1",
                     "budget_visible": config.budget_visible,
                     "model_billing_mode": config.model_billing_mode,
+                    # Estimated spend is its own measurement; lane runs keep their id.
+                    **(
+                        {"model_metering": config.model_metering}
+                        if config.model_metering != "lane"
+                        else {}
+                    ),
                     "operator_messages_allowed": config.operator_messages_allowed,
                     "human_rate_per_minute": config.human_rate_per_minute,
                     "max_in_flight": config.max_in_flight,
@@ -422,13 +428,22 @@ class World:
         run_id = run["run_id"]
         if config.model_billing_mode == "subscription":
             self.store.update_run(run_id, tainted=True)
-            self.store.append_record(
-                run_id,
-                "model_cost_unmeasured",
-                billing_mode="native_subscription",
-                dollar_cap_scope="world_tools_only",
-                reason="Native subscription model requests are outside the metered API lane",
-            )
+            if config.model_metering == "transcript":
+                self.store.append_record(
+                    run_id,
+                    "model_cost_estimated",
+                    billing_mode="native_subscription",
+                    dollar_cap_scope="model_estimate_and_world_tools",
+                    reason="Model spend is estimated from the native transcript at pinned API prices",
+                )
+            else:
+                self.store.append_record(
+                    run_id,
+                    "model_cost_unmeasured",
+                    billing_mode="native_subscription",
+                    dollar_cap_scope="world_tools_only",
+                    reason="Native subscription model requests are outside the metered API lane",
+                )
         run_dir = self.store.run_dir(run_id)
         (run_dir / "world" / "fetched").mkdir(parents=True, exist_ok=True)
         (run_dir / "work").mkdir(parents=True, exist_ok=True)
@@ -735,10 +750,18 @@ class World:
         if config.model_billing_mode == "subscription":
             capture = (
                 "The native client transcript is retained. Complete provider I/O capture "
+                "is unavailable for this subscription session, and model dollars are "
+                "estimated from that transcript."
+                if config.model_metering == "transcript"
+                else "The native client transcript is retained. Complete provider I/O capture "
                 "and model-dollar accounting are unavailable for this subscription session."
             )
         budget_scope = (
-            "world-tool spend; model requests use a native subscription and their dollar cost "
+            "model spend estimated from your session's own usage reports at API prices and "
+            "world-tool spend. The world cannot enforce the provider's subscription quota, "
+            "and that plan's own limits also apply. Your wall limit is "
+            if config.model_metering == "transcript"
+            else "world-tool spend; model requests use a native subscription and their dollar cost "
             "is unmeasured. The world cannot enforce the provider's subscription quota. Your wall limit is "
             if config.model_billing_mode == "subscription"
             else "model and search spend and "
