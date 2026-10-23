@@ -197,7 +197,10 @@ class StudioService:
                 row["id"] == model and "api_key" in row["auth_modes"] for row in item["models"]
             )
         ):
-            raise ValueError("Select an exact priced model for this API provider")
+            raise ValueError(
+                "This model has no reviewed price, so API mode cannot meter it. Choose a "
+                "priced model, or add its rates to the world's price table."
+            )
         return item, model
 
     def _config(self, request, item, model, *, goal, packs, budget):

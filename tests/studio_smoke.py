@@ -451,6 +451,15 @@ async def main():
             == ["claude-fixture-priced"]
             and await page.locator("#run-model").input_value() == "claude-fixture-priced"
         )
+        await page.locator("#run-model").fill("claude-unpriced-fixture")
+        checks["unpriced_model_flagged_at_field"] = (
+            "no reviewed price" in await page.locator("#model-note").inner_text()
+            and await page.locator("#launch-button").is_disabled()
+        )
+        await page.locator("#run-model").fill("claude-fixture-priced")
+        checks["priced_model_restores_launch"] = not await page.locator(
+            "#launch-button"
+        ).is_disabled()
         await page.get_by_role("button", name="Close beam-down", exact=True).click()
         await page.locator("[data-page=runs]").click()
         await page.get_by_role("button", name="Beam up", exact=True).click()
