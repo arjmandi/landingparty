@@ -1554,6 +1554,9 @@ class World:
                 else 0
             )
             await self._cancel_jobs(run_id)
+            if "market" in self.services:
+                # Before the seal, which refuses settlement, finish any interrupted stake.
+                self.services["market"].reconcile_stakes(run_id)
             if "skill_tests" in self.services:
                 await self.services["skill_tests"].stop_run(run_id)
             if "payments" in self.services:

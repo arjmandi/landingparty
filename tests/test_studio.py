@@ -316,6 +316,7 @@ async def test_a_life_lives_on_its_balance_with_no_objective_and_holds_its_harne
     config = world.run_config(info["run_id"])
     assert config["life_id"] == life_id and config["goal"] is None
     assert "schedule" in config["packs"] and "objective" not in config["packs"]
+    assert "bounty" in config["packs"] and "market" not in config["packs"]
     assert world.store.reconcile(info["run_id"])["cap_usd"] == 2
     assert "Your balance starts at $2" in config["preamble"]
     assert "you rest until 24 hours pass" in config["preamble"]

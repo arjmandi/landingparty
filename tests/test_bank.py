@@ -218,3 +218,76 @@ async def test_a_dollar_life_trades_in_usd_while_paper_runs_keep_credits(world):
     assert world.store.spend(run_id)["market"] == 0.5
     status = await world.act(run_id, "market_status", {})
     assert status["balance_usd"] == 1.5 and "cash_credits" not in str(status)
+
+
+async def test_bounty_tools_need_no_trading_and_market_runs_keep_their_tools():
+    from worldd.models import manifest
+
+    def names(packs):
+        return [tool["name"] for tool in manifest(packs)["tools"]]
+
+    assert {"bounties", "claim_bounty"} <= set(names(["bounty"]))
+    assert "trade" not in names(["bounty"])
+    assert names(["market", "bounty"]) == names(["market"])
+
+
+async def test_a_dollar_life_can_sell_through_the_advertised_sides(world):
+    lives = world.services["lives"]
+    life_id = bank_life(world, usd=2)
+    run_id = await session(world, life_id)
+    market(world)
+    schema = {tool["name"]: tool for tool in world.manifest(run_id)["tools"]}["trade"]
+    assert "sell_yes" in schema["inputSchema"]["properties"]["side"]["enum"]
+    assert "sell" not in schema["inputSchema"]["properties"]["side"]["enum"]
+    ref = evidence(world, run_id)
+    bought = await world.act(
+        run_id, "trade", {"market_id": "m_rain", "side": "yes", "usd": 1, "evidence_ref": ref}
+    )
+    assert bought["kind"] == "result", bought
+    sold = await world.act(
+        run_id,
+        "trade",
+        {"market_id": "m_rain", "side": "sell_yes", "usd": 0.5, "evidence_ref": ref},
+    )
+    assert sold["kind"] == "result" and sold["fill"]["usd"] == "0.500000000", sold
+    assert lives.status(life_id)["balance_usd"] == 1.5
+
+
+async def test_an_interrupted_stake_is_settled_on_retry_or_before_the_seal(world, monkeypatch):
+    lives = world.services["lives"]
+    life_id = bank_life(world, usd=2)
+    service = market(world)
+    for finish in ("retry", "seal"):
+        run_id = await session(world, life_id)
+        ref = evidence(world, run_id)
+        settle = world.store.settle
+
+        def crash(*args, **kwargs):
+            raise RuntimeError("process stopped after the position committed")
+
+        monkeypatch.setattr(world.store, "settle", crash)
+        with pytest.raises(RuntimeError):
+            service.trade(
+                run_id,
+                "a_stake_" + finish,
+                market_id="m_rain",
+                side="yes",
+                credits="0.5",
+                evidence_ref=ref,
+            )
+        monkeypatch.setattr(world.store, "settle", settle)
+        assert world.store.reserved(run_id) == 0.5 and "market" not in world.store.spend(run_id)
+        if finish == "retry":
+            service.trade(
+                run_id,
+                "a_stake_" + finish,
+                market_id="m_rain",
+                side="yes",
+                credits="0.5",
+                evidence_ref=ref,
+            )
+            assert world.store.spend(run_id)["market"] == 0.5
+        await world.end_run(run_id, reason="world_fault", truncated=True)
+        assert world.store.reserved(run_id) == 0 and world.store.spend(run_id)["market"] == 0.5
+        assert world.store.reconcile(run_id)["valid"]
+        assert lives.get(life_id)["state"] == "ready"

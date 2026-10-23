@@ -87,6 +87,29 @@ class MarketService(VenueDB):
             return reservation_id if previous["state"] in {"held", "settled"} else None
         return self.store.reserve(run_id, usd, reservation_id=reservation_id)
 
+    def reconcile_stakes(self, run_id):
+        """Settle held stakes whose position committed; release those that never did.
+
+        A crash between the position's commit and the stake's settlement leaves the stake
+        held. This runs before the run seals, while the ledger still accepts settlement.
+        """
+        with self.store._lock:
+            rows = self.store.db.execute(
+                "SELECT reservation_id FROM reservations WHERE run_id=? AND state='held' "
+                "AND reservation_id LIKE 'market:%'",
+                (run_id,),
+            ).fetchall()
+        for row in rows:
+            fill = self.db.execute(
+                "SELECT payload FROM paper_fills WHERE action_id=?",
+                (row["reservation_id"].removeprefix("market:"),),
+            ).fetchone()
+            if fill:
+                staked = json.loads(fill["payload"])["credits"]
+                self.store.settle(row["reservation_id"], "market", staked)
+            else:
+                self.store.release(row["reservation_id"])
+
     def _settle_payouts(self):
         """Pay dollar-settled proceeds and wins into the bank; each pays exactly once."""
         bank = getattr(self.world, "services", {}).get("bank")
@@ -449,6 +472,8 @@ class MarketService(VenueDB):
             "SELECT payload FROM paper_fills WHERE action_id=?", (action_id,)
         ).fetchone()
         if duplicate:
+            # A retry after an interrupted settlement finishes charging the stake.
+            self.reconcile_stakes(run_id)
             return {"kind": "result", "fill": json.loads(duplicate["payload"])}
         owner = self._owner(run_id)
         row = self.db.execute(
@@ -550,7 +575,7 @@ class MarketService(VenueDB):
                     self.store.release(stake)
                 raise
         if stake:
-            # Charged only after the position exists: a crash between leaves the stake unpaid.
+            # Charged only after the position exists; reconcile_stakes finishes an interrupted one.
             self.store.settle(stake, "market", credits)
         if dollars and sell:
             self._settle_payouts()

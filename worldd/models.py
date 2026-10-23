@@ -54,6 +54,7 @@ class RunConfig(StrictModel):
             "perception",
             "market",
             "objective",
+            "bounty",
         ]
     ] = Field(default_factory=list)
     stage: int = Field(default=0, ge=0, le=3)
@@ -187,6 +188,7 @@ class RunConfig(StrictModel):
             "footprint": 2,
             "perception": 2,
             "market": 2,
+            "bounty": 2,
         }
         for pack in self.packs:
             if self.stage < minimum.get(pack, 0):
@@ -416,7 +418,8 @@ class TradeDollarsParams(ToolParams):
     """The same trade where a life settles in its own dollars; the argument names the unit."""
 
     market_id: str
-    side: Literal["buy", "sell", "yes", "no"]
+    # Exactly the sides the trade handler settles; a bare buy or sell names no contract.
+    side: Literal["yes", "no", "buy_yes", "buy_no", "sell_yes", "sell_no"]
     usd: float = Field(gt=0)
     evidence_ref: str | None = None
 
@@ -517,6 +520,8 @@ PACK_TOOLS = {
     "social": ["post", "reply", "follow", "vote"],
     "footprint": ["footprint"],
     "market": ["trade", "market_status", "redeem", "bounties", "claim_bounty"],
+    # Bounty work without trading; the market pack keeps both tools for its own runs.
+    "bounty": ["bounties", "claim_bounty"],
     "perception": ["quote", "transcribe", "parse_document"],
 }
 
@@ -601,7 +606,9 @@ def manifest(
     from .util import digest
 
     names = ["search", "fetch", "fetch_many", "extract", "inbox", "ask", "wait", "status"]
-    names += [name for pack, tools in PACK_TOOLS.items() if pack in packs for name in tools]
+    for name in (name for pack, tools in PACK_TOOLS.items() if pack in packs for name in tools):
+        if name not in names:
+            names.append(name)
     names += [name for name in extra_tools if name not in names and name in TOOL_MODELS]
     if tools_disabled:
         names = []

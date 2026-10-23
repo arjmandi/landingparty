@@ -39,6 +39,7 @@ PACK_STAGE = {
     "belief": 1,
     "schedule": 1,
     "objective": 1,
+    "bounty": 2,
     "reflect": 1,
     "vault": 2,
     "browse": 2,

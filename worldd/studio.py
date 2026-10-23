@@ -285,7 +285,14 @@ class StudioService:
         objective = request.objective.strip() if request.objective else ""
         async with self._launch:
             item, model = await self._resolve(request)
-            packs = ["deliver", "schedule", *request.packs, *(["market"] if request.market else [])]
+            # Every Studio life may claim bounties; trading stays an explicit opt-in.
+            packs = [
+                "deliver",
+                "schedule",
+                "bounty",
+                *request.packs,
+                *(["market"] if request.market else []),
+            ]
             config = self._config(
                 request,
                 item,
