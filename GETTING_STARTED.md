@@ -33,15 +33,13 @@ the free smoke check below.
 ```bash
 git clone https://github.com/arjmandi/landingparty.git
 cd landingparty
-git switch codex/implement-landing-party
 export LANDING_PARTY_ROOT="$PWD"
 uv sync --frozen --extra dev
 uv lock --check
 ```
 
-Studio currently lives on the `codex/implement-landing-party` development branch;
-the checkout above selects it explicitly. Use `main` after that work is merged,
-or the appropriate tag for a published release.
+The default checkout is `main`, which includes Studio. For a published release,
+use its tag.
 
 The basic environment includes the server, CLI, MCP bridge and analysis tools;
 it does not install a native model client yet.

@@ -18,13 +18,9 @@ clients; you do not need to install Codex or Claude globally first.
 ```bash
 git clone https://github.com/arjmandi/landingparty.git
 cd landingparty
-git switch codex/implement-landing-party
 uv sync --frozen --extra dev
 uv run --no-sync worldd --data-dir data
 ```
-
-Studio is currently on `codex/implement-landing-party`; use `main` after that
-development branch is merged, or a published release tag that includes it.
 
 Open `http://127.0.0.1:7777/`. Then:
 
