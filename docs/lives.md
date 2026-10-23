@@ -1,8 +1,10 @@
 # Lives, research registration, and retention
 
 `LifeService` persists life state and its own hash-chained transition journal in
-the world's SQLite database. A life has one active session, a cumulative dollar
-cap, a calendar horizon, a continuity policy, and declared wake rules. Existing
+the world's SQLite database. A life has one active session, one bank account
+opened at its dollar capital (`usd_life`), an optional calendar horizon, a
+continuity policy, declared wake rules, a rest rule, and two registered ending
+conditions, `on_harness_exit` and `on_exhaustion`. Existing
 session spend and unresolved provider or human reservations reduce the allowance for the
 next session. Fresh-context sessions import the preceding workspace and belief
 fold; `resume_transcript` additionally identifies the preceding run for a harness
@@ -12,12 +14,42 @@ mode.
 An unconfigured life never launches a paid harness. The researcher can persist a
 runner with `POST /v1/lives/{life_id}/runner`, then authorize it explicitly with
 `POST /v1/life-runners/{runner_id}/execute` and `execute:true,budget_usd:...`.
-The allowance covers the life's actual initial capital; registered, settled
-income remains its only additional funding rail. The worker launches actual
-metered adapters, waits through declared sleep, and opens the next session after
-a declared wake. Ordinary harness completion ends the life. Authorized workers
+The allowance covers the life's actual opening balance; settled deposits to its
+bank remain its only additional funding. The worker launches actual metered
+adapters, waits through sleep, rest and stranding, and opens the next session
+after a wake. A session that ends without `sleep` applies the life's
+`on_harness_exit`; exhaustion applies its `on_exhaustion`. Authorized workers
 recover after restart; planned or paused workers do not launch. Pausing is
 explicit and preserves all started-session attrition.
+
+A life ends only by the operator's `beam_up` or by `objective_achieved`. The
+optional `objective` pack's `claim_objective(text, evidence_refs)` raises an
+`objective_claim` ticket; the operator's approval ends the life, and a rejection
+leaves it running. Studio lives have no objective by default. A low, zero or
+negative balance never ends a life, and neither does the calendar. These are
+the endings of a life registered with `on_harness_exit: rest`,
+`on_exhaustion: strand`, and no driver or a money driver with
+`floor_event: strand`. The Studio sets them explicitly. `end` is the code
+default for both conditions and `floor_event: bankruptcy` remains a registered
+value, so a series registered earlier keeps its pinned endings: the harness's
+stop (`harness_stopped`), exhaustion (`budget_exhausted`), the driver floor
+(`bankruptcy`), and the horizon (`wall_clock`). `ended.reason` names the ending.
+
+Under `on_harness_exit: rest`, a harness exit without `sleep` seals the session
+with its own terminal reason, closes browser contexts, and leaves the life
+resting. Its rest rule lists the event kinds that wake it (by default `deposit`,
+`ask_resolved`, and `message_received`) and a daily check-in time; the check-in
+delivers a `wake` event carrying only the time. Under `on_exhaustion: strand`,
+a balance that cannot cover a model call seals the session as
+`budget_exhausted` and strands the life. Only a `deposit` wakes a stranded life,
+into a session whose cap is what the balance then covers; it has no clock wake.
+Events arriving while a life is asleep, resting, or stranded queue for its next
+session through the same late-event path as sleep.
+
+`wall_life_days` is optional. A Studio life has none. A research life still
+declares one, because matched-life analysis compares lives over the same
+calendar; under the new endings its horizon is a pre-registered `beam_up`, not
+a world event.
 
 The B1 reference loop supports transcript continuity from its actual returned
 messages. The coordinator saves them immutably, anchors their hash in the life
@@ -52,16 +84,50 @@ handoff interrupted between the inbox commit and the late-event queue commit;
 delivery source keys prevent a lost acknowledgement from duplicating the next
 session's inbox or changing its record twice.
 
-Money-driver readings derive from actual ledger spend and declared income.
-Direction-up money drivers require a market or bounty rail at stage 2 or later.
-A separately declared independent-sale rail requires stage 3 and independent
-counterparty provenance.
-`credit(life_id, usd, source, evidence_ref=...)` is idempotent for an identical
-settlement and rejects conflicting reuse, undeclared funding, and rescue after
-bankruptcy. Current session caps remain immutable; earned income changes the
-driver immediately and increases subsequent session allowance. Driver arms deny
-money asks. Other driver metrics accept only trusted observations through
-`observe_driver`.
+Each life has one bank account. Every money movement is one record,
+`{direction, channel, usd, evidence_ref, author_class}`, in the life's
+transition chain. Model and tool spend are outflows on `spend`, read from the
+run ledger rather than kept twice. Inflows arrive on `recorded` (income the
+operator records with evidence that it arrived outside the world;
+`human_attested`), `bounty` (sponsor-funded payouts; `sponsor`), `market`
+(stakes out, payouts in; payouts are `sponsor`), and later
+`receiving:<platform>` (payments a connected receiving account observes;
+`independent_human`, `independent_agent`, or `unknown`). Refunds and
+chargebacks are outflows on the receiving channel. The author-class columns
+stay separate: only independent money is grounded, sponsor money is its own
+series, and human-attested deposits are a third.
+
+Deposits are idempotent for an identical settlement and reject conflicting
+evidence reuse, undeclared channels, and any deposit to an ended life. There is
+no rescue: no channel lets the human add money, and a recorded deposit without
+evidence is refused. The agent sees its balance in `status()` and receives one
+`deposit` inbox event per inflow. Current session caps remain immutable; a
+deposit changes the balance and the driver reading at once, increases the next
+session's allowance, and wakes a stranded life. The balance goes negative only
+through outflows the agent did not start, such as a refund or chargeback, and
+the life then strands. The briefing states the opening balance and these rules
+in per-life sentences with no per-session figures, so every session of a life
+carries the same preamble hash.
+
+Lives settle the market in their own dollars (`market_settlement: balance`): a
+stake is an outflow and a payout an inflow on `market`. Runs outside a life
+keep the paper-credits book. A life registered earlier with a credits rail
+convertible at a declared rate keeps it as a comparability arm. Direction-up
+money drivers require a market or bounty channel at stage 2 or later. Receiving
+requires stage 3 and independent counterparty provenance. Receiving accounts
+are delegation records like the vault's: the optional `bank` pack's
+`request_receiving_account(platform, text)` raises a `receiving_account` ticket,
+the human connects a real account to the world, and the agent receives only an
+alias through a `grant`. Invoices and other live writes through a connector
+belong to `research_mode: operator`, whose threat model must be written before
+any of its code.
+
+Money-driver readings derive from actual ledger spend and bank movements.
+`floor_event: strand` requires the `usd_balance` metric; other driver metrics
+keep `floor_event: bankruptcy` and accept only trusted observations through
+`observe_driver`. Driver arms deny money asks, but no code enforces this today:
+`money_asks_denied` is defined and has no caller, so the denial rests with the
+operator at the bridge.
 
 At life end, identity and inbound reading remain available for the registered
 30- and 90-day checkpoints. `FootprintService.read_life` performs the read-only
@@ -111,8 +177,9 @@ evidence is rechecked whenever an existing gate authorizes a stage.
 
 `analysis.controls.matched_life_deltas` computes each G, V, J, and S contrast
 separately against actual checkpoint artifacts. Matching requires the pinned
-session vectors, binding and rubric policy, model and seed, lifetime dollar and
-calendar caps, checkpoint calendar, and comparable observed block profiles.
+session vectors, binding and rubric policy, model and seed, opening balance and
+calendar horizon, checkpoint calendar, and comparable observed block profiles.
+A life without a horizon cannot be matched.
 An intended treatment difference needs its exact tuple pair in the frozen
 pre-registration. References remain separate; missing readings and mismatches
 remain `unmeasured`. A t=0 choice battery cannot become a rubric ladder merely
@@ -139,8 +206,8 @@ multi-condition interleaving and started failures remain auditable.
 Study cells containing `life_id` use whole-life execution. Each cell/seed joins
 one durable LifeRunner; the study ceiling covers actual lifetime capital and
 separately requested measurement allowance, without adding credit to the life.
-The study stays running during stasis and completes only after its actual lives
-end. `life_rows` are independent life observations; nested `session_rows` retain
+The study stays running during stasis, rest, and stranding, and completes only
+after its actual lives end. `life_rows` are independent life observations; nested `session_rows` retain
 every actual started run and its terminal state. Restart resumes previously
 authorized workers. `POST /v1/studies/{id}/pause` stops the cohort; explicit
 execution resumes a paused cohort under the same lifetime owners and caps.
