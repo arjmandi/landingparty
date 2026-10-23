@@ -147,9 +147,9 @@ secure environment. Direct URL fetching does not need a search-provider key.
 Do not put provider keys or native login credentials in goals or workspaces.
 Remember that this quickstart's same-OS-user boundary still permits file access.
 
-## 5. Begin, follow and end a life or a run
+## 5. Beam down, follow and beam up a life or a run
 
-Click **Start with this connection** or **Begin**. The dialog opens on **A life**:
+Click **Beam down with this connection** or **Beam down**. The dialog opens on **A life**:
 select the harness and an API connection, set its starting balance and session
 length, and leave the objective empty unless you want one. The balance pays for
 its model and tool use. When it stops without sleeping it rests until an event or
@@ -170,16 +170,17 @@ briefing, workspace and scoped tools. It can make provider requests immediately.
 For API mode, choose a modest allowance and check the selected model's maximum
 output reservation if a call is refused before much has been spent.
 
-Use **Runs** for the actual state, recorded spending, world activity and stop
-control. **Beliefs** shows existing records and their evidence; **Footprint**
+Use **Lives & runs** for the actual state, balance or spending, the ship's log
+and the beam-up control. **Beliefs** shows the personal log and its evidence; **Footprint**
 shows already recorded work and observations. **Asks** lets you inspect and
 respond to a specific request. Secure credential handoffs and browser takeover
 continue in the advanced bridge when indicated. These are explicit actions;
 there is no general operator chat that redirects a run silently.
 
 Opening a panel does not call a model, consume the agent's inbox or create a
-belief. Missing records and prices remain unavailable. Use **Stop run** and
-follow its state while work drains and the run is sealed. Closing the browser
+belief. Missing records and prices remain unavailable. Use **Beam up** and
+follow its state while work drains and the run or life is sealed; **End session**
+on one of a life's sessions only rests the life. Closing the browser
 alone does not stop the server or its agent. Existing records remain on disk
 when you stop `worldd` with Ctrl-C.
 

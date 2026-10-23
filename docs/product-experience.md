@@ -5,7 +5,7 @@ Start `worldd` and open its control address in a browser, normally
 same origin. The website explains the project; this application runs and observes
 your own world. The advanced console remains at `/bridge`.
 
-## Begin and follow a life or a run
+## Beam down and follow a life or a run
 
 1. Open **Settings** to check model access and provider configuration. Supply
    credentials through the protected settings flow or the server's environment;
@@ -13,7 +13,7 @@ your own world. The advanced console remains at `/bridge`.
 2. Choose a supported integration in the **Harness Library**. Its installation
    and connection controls describe what is available on this host. A configured
    integration is separate from a running agent.
-3. Begin a life with its model, harness, starting balance, and session length;
+3. Beam down a life with its model, harness, starting balance, and session length;
    an objective is optional and empty by default. A life rests between sessions,
    is stranded when its balance cannot cover a model call, and wakes on a
    deposit; it ends only when you beam it up or confirm an objective it claims.

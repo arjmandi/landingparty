@@ -376,7 +376,7 @@ async def main():
         checks["subscription_setup_without_key"] = not settings["credentials"]["anthropic"][
             "configured"
         ]
-        await page.get_by_role("button", name="Start with this connection").click()
+        await page.get_by_role("button", name="Beam down with this connection").click()
         await page.locator("#new-run-dialog[open]").wait_for()
         checks["subscription_blank_model_allowed"] = await page.locator(
             "#run-model"
@@ -389,7 +389,7 @@ async def main():
             and await page.locator("#shape-run").is_checked()
         )
         await page.get_by_text("Add an objective").click()
-        await page.get_by_label("Objective").fill(malicious)
+        await page.get_by_role("textbox", name="Objective").fill(malicious)
         await page.locator("#launch-button").click()
         await page.get_by_text("Model dollars are unavailable.", exact=False).wait_for()
         checks["subscription_real_world_cost_unmeasured_model"] = (
@@ -451,11 +451,11 @@ async def main():
             == ["claude-fixture-priced"]
             and await page.locator("#run-model").input_value() == "claude-fixture-priced"
         )
-        await page.get_by_role("button", name="Close new run", exact=True).click()
+        await page.get_by_role("button", name="Close beam-down", exact=True).click()
         await page.locator("[data-page=runs]").click()
-        await page.get_by_role("button", name="Stop run", exact=True).click()
+        await page.get_by_role("button", name="Beam up", exact=True).click()
         checks["stop_requires_explicit_confirmation"] = runs[0]["state"] == "running"
-        await page.get_by_role("button", name="Stop and seal", exact=True).click()
+        await page.get_by_role("button", name="Beam up and seal", exact=True).click()
         await page.get_by_text("Sealed", exact=True).first.wait_for()
         checks["stop_and_actual_state"] = runs[0]["state"] == "sealed"
         checks["no_browser_storage_or_secret_headers"] = await page.evaluate(

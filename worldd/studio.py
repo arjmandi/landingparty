@@ -387,6 +387,8 @@ class StudioService:
             "ended": life["ended"],
             "sessions": len(life["sessions"]),
             "active_run_id": life["active_run_id"],
+            # Its personal log and footprint carry forward into the latest session.
+            "latest_run_id": life["sessions"][-1]["run_id"] if life["sessions"] else None,
             "wake_rules": life["wake_rules"],
             "harness_id": config.get("harness_id"),
             "model": runner["cell"].get("model") if runner else None,
@@ -416,6 +418,19 @@ class StudioService:
                 for item in reversed(life["sessions"])
                 if item["run_id"] in runs
             ],
+        }
+
+    def life_asks(self, life_id):
+        """Every ticket the life raised, across its sessions, newest session first."""
+        life = self._lives().get(life_id)
+        if not self._runner(life_id):
+            raise KeyError(life_id)
+        return {
+            "tickets": [
+                ticket
+                for item in reversed(life["sessions"])
+                for ticket in self.views.asks(item["run_id"]).get("tickets", [])
+            ]
         }
 
     async def beam_up(self, life_id):
@@ -562,6 +577,10 @@ def create_studio_router(studio):
     @router.get("/api/lives/{life_id}")
     async def life(life_id: str):
         return studio.life(life_id)
+
+    @router.get("/api/lives/{life_id}/asks")
+    async def life_asks(life_id: str):
+        return studio.life_asks(life_id)
 
     @router.post("/api/lives/{life_id}/beam-up")
     async def beam_up(life_id: str):

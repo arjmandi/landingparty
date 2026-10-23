@@ -330,6 +330,9 @@ async def test_a_life_lives_on_its_balance_with_no_objective_and_holds_its_harne
     listed = (await client.get("/api/lives")).json()["lives"]
     assert [row["life_id"] for row in listed] == [life_id]
     assert listed[0]["name"] == "First life" and listed[0]["life_state"] == "awake"
+    assert listed[0]["latest_run_id"] == info["run_id"]
+    asks = await client.get(f"/api/lives/{life_id}/asks")
+    assert asks.status_code == 200 and asks.json() == {"tickets": []}
     held = await client.post("/api/runs", json=run_body())
     assert held.status_code == 400 and "living life" in held.json()["detail"]
     assert not requests
