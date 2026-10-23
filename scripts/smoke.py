@@ -12,7 +12,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:7777")
-    parser.add_argument("--agent-url", default="http://127.0.0.1:7778")
+    parser.add_argument("--agent-url", default="http://127.0.0.1:7777/agent")
     args = parser.parse_args()
     # Local control traffic must not be sent through a cloud egress proxy.
     opener = build_opener(ProxyHandler({}))

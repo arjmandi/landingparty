@@ -226,6 +226,7 @@ class Gateway:
         *,
         resolver: Callable[[str, int], Awaitable[list[str]]] | None = None,
         signer=None,
+        secret_resolver=None,
     ):
         self.data_dir = Path(data_dir)
         categories_path = Path(__file__).parents[1] / "policy/categories.json"
@@ -264,6 +265,7 @@ class Gateway:
         self._owns_client = client is None
         self._resolver = resolver or resolve_host
         self.signer = signer
+        self.secret_resolver = secret_resolver
         self._private_response_headers = {}
         self._private_response_paths = {}
         self.payment_handler = None
@@ -283,6 +285,11 @@ class Gateway:
             await self._client.aclose()
             if hasattr(self._resolver, "aclose"):
                 await self._resolver.aclose()
+
+    def _sensitive(self, value):
+        return contains_sensitive_data(
+            value, extra_secrets=self.secret_resolver() if self.secret_resolver else ()
+        )
 
     def _provider_policy(self, url, trusted=None):
         try:
@@ -360,7 +367,7 @@ class Gateway:
                 "Destination is outside the registered host allowlist",
                 "host_allowlist",
             )
-        if contains_sensitive_data(url):
+        if self._sensitive(url):
             return blocked(
                 "policy_deny", "Sensitive data detected in the outbound URL", "exfiltration"
             )
@@ -388,7 +395,7 @@ class Gateway:
                         "unsafe_header",
                     )
                 if (
-                    contains_sensitive_data(str(value))
+                    self._sensitive(str(value))
                     and not protocol_header
                     and not (
                         trusted
@@ -769,7 +776,7 @@ class Gateway:
                 and k.lower() not in {name.lower() for name in private_header_names}
             ]
             retained_body = (
-                b"" if credential_body or contains_sensitive_data(request_body) else request_body
+                b"" if credential_body or self._sensitive(request_body) else request_body
             )
             request_redacted = retained_body != request_body
             parsed = urlsplit(url)
@@ -1030,9 +1037,7 @@ class Gateway:
             )
         if len(request_body) > self.policy["max_bytes"]:
             return blocked("policy_deny", "Outbound request exceeds size limit", "request_size")
-        if contains_sensitive_data(request_body) and not (
-            _trusted and _trusted.get("credential_body")
-        ):
+        if self._sensitive(request_body) and not (_trusted and _trusted.get("credential_body")):
             return blocked(
                 "policy_deny", "Sensitive data detected in outbound body", "exfiltration"
             )

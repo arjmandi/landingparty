@@ -179,7 +179,7 @@ async def test_pack_gates_and_invalid_requests(app_fixture):
 
 async def test_search_archive_and_budget_stop(app_fixture, monkeypatch):
     app, client, _calls, _release = app_fixture
-    monkeypatch.setenv("WORLD_BRAVE_API_KEY", "test-only-key")
+    app.state.world.instance_settings.update_provider("brave", api_key="test-only-key")
     requests = []
 
     def provider(request):

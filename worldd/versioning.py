@@ -25,7 +25,7 @@ def implementation_manifest(root=None):
             if (
                 path.is_file()
                 and not path.is_symlink()
-                and path.suffix in {".py", ".json", ".html"}
+                and path.suffix in {".py", ".json", ".html", ".js", ".css"}
             ):
                 files[path.relative_to(root).as_posix()] = digest(path.read_bytes())
     if not files:

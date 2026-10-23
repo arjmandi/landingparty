@@ -10,6 +10,7 @@ import pytest
 from fastapi import FastAPI
 
 from worldd.lane import StreamUsage, UsageError, create_lane_router, normalize_usage, usage_cost
+from worldd.security import Capabilities
 from worldd.storage import Store
 
 PRICES = {
@@ -608,3 +609,66 @@ async def test_stop_barrier_finalizes_a_backpressured_stream(store):
         assert len(store.records(run_id)) == count
         assert store.records(run_id)[-1]["kind"] == "seal"
         assert capture.read_bytes() == before
+
+
+@pytest.mark.parametrize("managed,authenticated", [(False, True), (True, False), (True, True)])
+async def test_only_authenticated_managed_codex_receives_a_recorded_output_bound(
+    store, managed, authenticated
+):
+    run_id = run(store, capture_model_io=True)
+    capabilities = Capabilities(store.data_dir)
+    token = capabilities.issue(run_id)
+    seen = []
+
+    def provider(request):
+        seen.append(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "model": "fixture-openai",
+                "output": [],
+                "usage": {"input_tokens": 100, "output_tokens": 10},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as upstream:
+        app = FastAPI()
+        app.include_router(
+            create_lane_router(
+                store,
+                client=upstream,
+                prices=PRICES,
+                capabilities=capabilities,
+                managed_output_limit=lambda actual_run, model: 100 if managed else None,
+            )
+        )
+        payload = {"model": "fixture-openai", "input": "hello"}
+        raw = json.dumps(payload).encode()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app), base_url="http://world"
+        ) as client:
+            response = await client.post(
+                f"/lane/{run_id}/openai/v1/responses",
+                headers={"authorization": "Bearer " + token} if authenticated else {},
+                content=raw,
+            )
+    capabilities.close()
+    if not (managed and authenticated):
+        assert response.status_code == 400
+        assert response.json()["error"]["type"] == "invalid_token_limit"
+        assert not seen
+        assert not any(row["kind"] == "model_request_adapted" for row in store.records(run_id))
+        return
+    assert response.status_code == 200
+    assert json.loads(seen[0]) == {**payload, "max_output_tokens": 100}
+    records = store.records(run_id)
+    audit = next(row for row in records if row["kind"] == "model_request_adapted")
+    assert audit["original_request_hash"] == "sha256:" + hashlib.sha256(raw).hexdigest()
+    assert audit["forwarded_request_hash"] == "sha256:" + hashlib.sha256(seen[0]).hexdigest()
+    call = next(row for row in records if row["kind"] == "model_call")
+    assert call["request_hash"] == audit["forwarded_request_hash"]
+    capture = next(row for row in records if row["kind"] == "model_capture")
+    saved = json.loads((store.run_dir(run_id) / capture["capture_ref"]).read_bytes())
+    assert saved["original_request"] == payload
+    assert saved["request"]["max_output_tokens"] == 100
+    assert call["reservation_id"] and store.spend(run_id)["model"] == 0.00035

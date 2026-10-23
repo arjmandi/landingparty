@@ -43,7 +43,7 @@ beliefctl = "worldd.beliefctl:main"
 include = ["worldd*", "analysis*", "policy*", "faces*", "adapters*", "goals*", "prereg*", "probes*"]
 
 [tool.setuptools.package-data]
-worldd = ["console.html"]
+worldd = ["console.html", "studio.html", "studio.js", "studio.css"]
 policy = ["*.json"]
 "*" = ["*.json", "*.md"]
 

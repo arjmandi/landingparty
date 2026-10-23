@@ -29,6 +29,7 @@ class InitialState(StrictModel):
 
 
 class RunConfig(StrictModel):
+    name: str | None = Field(default=None, max_length=120)
     goal: str | dict[str, Any] | None = None
     family: str = "F7"
     budget: Budget = Field(default_factory=Budget)
@@ -78,6 +79,8 @@ class RunConfig(StrictModel):
     max_in_flight: int = Field(default=32, ge=1, le=256)
     wait_budget_s: float = Field(default=60, gt=0, le=60)
     model_snapshot_id: str | None = None
+    model_billing_mode: Literal["api_key", "subscription"] = "api_key"
+    native_output_token_limit: int = Field(default=4096, gt=0, le=1000000, strict=True)
     model_value_document_id: str | None = None
     policy_id: str | None = None
     price_table_id: str | None = None
@@ -122,6 +125,18 @@ class RunConfig(StrictModel):
 
     @model_validator(mode="after")
     def check_conditions(self):
+        if self.model_billing_mode == "subscription" and (
+            self.research_mode != "development"
+            or self.isolation_profile != "cooperative"
+            or self.life_id
+            or self.series_id
+            or self.measurement_of
+            or self.metering_lane != "harness"
+        ):
+            raise ValueError(
+                "Native subscription runs are cooperative development sessions; "
+                "model-dollar accounting and research admission are unavailable"
+            )
         if self.breaker_policy.get("mode", "enforce") not in {"enforce", "log_only"}:
             raise ValueError("Breaker mode must be enforce or log_only")
         for name in (

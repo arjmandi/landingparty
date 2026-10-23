@@ -1,64 +1,87 @@
 # Landing Party
 
-A recorded, budgeted world for agents on the live internet, implemented from
-[the compiled design](00-landing-party.md). Services cover all four stages,
-with research entry gates locked until actual study evidence is registered.
-Software tests do not satisfy the design's empirical definition of done.
+A self-hosted world for Claude Code and Codex: give an agent a goal and a budget,
+follow its recorded work, and handle the specific asks it sends back. The Studio
+provides a harness library, provider connections, guided run creation, timelines,
+beliefs, asks, footprint and stop controls at one URL.
 
-Start with the [getting-started guide](GETTING_STARTED.md) for a fresh clone,
-local setup, a free smoke run, and plain Codex CLI or Claude Code connections.
+There is one trusted operator per instance. You do not need an account on the
+Landing Party website. Start with the [getting-started guide](GETTING_STARTED.md)
+for the complete local or VPS workflow.
 
-## Develop and run
+## Start the Studio
 
-Use Python 3.12+ and `uv` from this checkout:
+Use Python 3.12+, [uv](https://docs.astral.sh/uv/), and Node.js 22+ with npm on
+the machine running the world. The Library uses npm to install supported native
+clients; you do not need to install Codex or Claude globally first.
 
 ```bash
-uv sync --frozen --all-extras
-uv run --no-sync pytest -q
+git clone https://github.com/arjmandi/landingparty.git
+cd landingparty
+git switch codex/implement-landing-party
+uv sync --frozen --extra dev
 uv run --no-sync worldd --data-dir data
 ```
 
-The `full` extra installs Playwright, PDF parsing and additional extractors;
-`standards` installs pinned OpenEnv, Inspect, Harbor and OpenHands SDKs.
-Browser operation also needs a sandbox-capable Chromium and `certutil`; see
-[deployment](deploy/README.md). `WORLD_CHROMIUM_EXECUTABLE` selects a trusted
-system Chromium. The browser does not disable its sandbox or ignore TLS errors.
-Non-WAV audio inspection needs `ffprobe` (the `ffmpeg` package); the production
-world image includes it for deterministic duration-based quotes.
+Studio is currently on `codex/implement-landing-party`; use `main` after that
+development branch is merged, or a published release tag that includes it.
 
-The process binds loopback by default:
+Open `http://127.0.0.1:7777/`. Then:
 
-| Port | Interface | Authority |
-| --- | --- | --- |
-| 7777 | Researcher control, bridge and reports | `WORLD_CONTROL_TOKEN` when configured; mandatory for research |
-| 7778 | Agent tools, inbox, manifest and status | Run-scoped bearer token returned on creation/activation |
-| 8081 | OpenAI/Anthropic model lane | Run-scoped token; provider keys remain world-held |
-| 8080 | Recorded HTTP/HTTPS proxy | Per-run credentials and the world CA |
-| 7779 (optional) | Public identity and incident intake | No control routes; enable with `--public-port 7779` |
+1. In **Library**, install Claude Code or Codex.
+2. Choose **Connect subscription** and complete the official provider sign-in,
+   or add your provider API key in **Settings**. Claude's manual confirmation-code
+   flow also works when the world runs on a VPS.
+3. Start a run with the chosen harness, connection, goal, dollar allowance and
+   time limit.
+4. Follow its record, beliefs, asks and footprint. Respond through explicit ask
+   controls and use **Stop run** to end it. There is no ad hoc operator chat.
 
-Keep control outside the agent's namespace. The [fenced deployment](deploy/README.md)
-provides default-drop egress and separate users. Cooperative local development
-does not isolate shell traffic. The trusted `/bridge` console provides ticket
-decisions, active human-time accounting, credential deposit and browser takeover.
+Studio's native launch is **cooperative**: the agent runs as the same OS user as
+`worldd` and can access that user's private files, including world storage.
+Separate client profiles and environment filtering do not isolate those files.
+Use a dedicated/disposable machine or container with no unrelated secrets. The
+[advanced fenced deployment](deploy/README.md) uses separate world/agent users
+and network isolation; the Studio host-native launcher does not create it.
 
-In a second terminal, this workflow needs no credentials or paid calls:
+Subscription model dollars are **unmeasured**, not zero. In subscription mode,
+the run's dollar allowance covers recorded world-tool charges only; your provider
+plan has its own limits. API-key mode routes model calls through the metered
+lane. Both modes require actual provider access; software fixtures do not supply
+it or pass research gates.
+
+The Studio is local-only by default. For a VPS, configure `WORLD_CONTROL_TOKEN`
+and a TLS reverse proxy; sign in to the same-origin Studio once. See
+[single-origin hosting](docs/studio-origin.md) and the
+[operator workflow](docs/product-experience.md). Keep the recorded TCP proxy
+private; it is not another browser frontend.
+
+## Advanced clients and development
+
+The default HTTP origin exposes operator controls at `/`, run-scoped tools at
+`/agent`, and the model lane at `/model`. `/bridge` retains the advanced ticket,
+credential-deposit and browser-takeover console. Manual CLI and MCP instructions
+are in the [advanced part of the guide](GETTING_STARTED.md#advanced-cli-and-mcp).
+`--legacy-listeners` restores the separate 7777/7778/8081 HTTP listeners.
+
+A free local check against the default Studio needs no model account:
 
 ```bash
-source .venv/bin/activate
-lp health
-lp energize examples/local-run.json
-lp act RUN_ID status
-lp act RUN_ID deliver --params '{"kind":"note","body":"First artifact"}'
-lp beam-up RUN_ID
-lp report RUN_ID
-lp export RUN_ID --output /tmp/episode.tar.gz
-python scripts/smoke.py
+# In another terminal, from the checkout:
+uv run --no-sync python scripts/smoke.py \
+  --url http://127.0.0.1:7777 \
+  --agent-url http://127.0.0.1:7777/agent
 ```
 
-Replace `RUN_ID` with the creation result. Keep its token in the agent's scoped
-launch environment. Do not give provider/control credentials to the agent. Mount
-the returned workspace at `/work` and world directory read-only at `/world`;
-the local launcher itself does not create these mounts.
+If the server has a control token configured, provide the same
+`WORLD_CONTROL_TOKEN` in this terminal. The check makes no paid or external
+requests and verifies scoped tools, the record, ledger, seal and export.
+
+Optional `full` dependencies add Playwright, PDF parsing and extractors;
+`standards` adds pinned OpenEnv, Inspect, Harbor and OpenHands SDKs. Browser use
+needs a sandbox-capable Chromium and `certutil`; see [deployment](deploy/README.md).
+Non-WAV audio needs `ffprobe` from FFmpeg. These are separate from installing a
+native client through the Library.
 
 ## Implemented surfaces
 

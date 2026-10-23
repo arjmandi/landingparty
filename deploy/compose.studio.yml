@@ -1,0 +1,40 @@
+# Cooperative single-operator Studio; native clients share the world's OS user.
+# This is not the fenced research deployment. No Docker socket is mounted.
+name: landing-party-studio
+services:
+  world:
+    image: landing-party-world:0.1
+    build:
+      context: ..
+      target: world
+    command: ["--host", "0.0.0.0", "--port", "7777"]
+    init: true
+    environment:
+      WORLD_DATA_DIR: /data
+      WORLD_CONTROL_TOKEN: ${WORLD_CONTROL_TOKEN:?Set the instance operator token securely}
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: 127.0.0.1,localhost,world
+    extra_hosts:
+      - "proxy:${WORLD_PLATFORM_PROXY_IP:-127.0.0.1}"
+    volumes:
+      - studio-data:/data
+    ports:
+      - "127.0.0.1:7777:7777"
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+      - seccomp:./seccomp-browser.json
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import os,urllib.request; r=urllib.request.Request('http://127.0.0.1:7777/healthz',headers={'X-World-Control-Token':os.environ['WORLD_CONTROL_TOKEN']}); urllib.request.urlopen(r,timeout=2).read()"
+      interval: 10s
+      timeout: 3s
+      start_period: 30s
+      retries: 6
+volumes:
+  studio-data:

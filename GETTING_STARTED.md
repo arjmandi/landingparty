@@ -1,133 +1,244 @@
 # Getting started with Landing Party
 
-Landing Party runs a recorded, budgeted environment around an agent. You start
-the world process, create a run, and connect a client such as plain **Codex CLI**
-or **Claude Code**. The agent gets that run's tools and capability; you retain
-the controls, provider credentials, ledger and reports.
+The Studio is the main way to use Landing Party. Start one world process, open
+one URL, install a native harness through the Library, connect a provider, and
+start a run. Follow its timeline, beliefs, asks and footprint from the same app.
+There is one trusted operator per instance; no Landing Party website account or
+hosted service is required.
 
-This guide covers self-hosting from a clone when the repository becomes public.
-The website is not required for local use. Start with the free local smoke check,
-then choose **one** client below. The examples use development mode; the final
-section explains the additional requirements for live research.
+## Before you start
 
-## 1. Install the prerequisites
+Use a **dedicated/disposable machine or container** for this quickstart. Studio's
+host-native agents run cooperatively as the **same OS user as `worldd`**. They
+can read that user's private files, including world storage and native login
+profiles. Separate profiles and filtered environment variables do not provide
+filesystem or network isolation. Keep unrelated secrets off that environment.
+The [fenced deployment](deploy/README.md) is a separate advanced setup with
+world/agent user separation, controlled mounts and restricted egress.
 
-Use Linux or macOS with Bash, Git, Python 3.12 or newer, and
-[uv](https://docs.astral.sh/uv/getting-started/installation/). On Windows, use
-WSL2 with a Linux shell. Linux with Docker is the validated path for fenced
-deployment and sandboxed browser operation.
+Install these on the machine that will run `worldd`:
 
-For the native clients, install Node.js 22 or newer and the CLI you want:
+- Python 3.12+, Git, Bash and [uv](https://docs.astral.sh/uv/getting-started/installation/).
+- Node.js 22+ and npm for the Library's native-client installer.
+- A browser on your own computer to use Studio and complete provider sign-in.
 
-```bash
-npm install -g @openai/codex
-# Or:
-npm install -g @anthropic-ai/claude-code
-```
+Linux is the validated host-native path. Use WSL2 on Windows. Docker is needed
+for the fenced deployment and some optional browser/skill features; it is not
+required just to start Studio. A provider API account or a supported Claude/
+Codex subscription is needed to run a model, but not to open the app or execute
+the free smoke check below.
 
-The [Codex installation guide](https://developers.openai.com/codex/cli) and
-[Claude Code setup guide](https://code.claude.com/docs/en/setup) describe their
-other supported installers. Native command syntax in this guide was checked
-with Codex CLI 0.163.0 and Claude Code 2.1.308. Check your installed version with
-`codex --version` or `claude --version`.
-
-You do **not** need Docker, a browser, an account on the website, or an API key
-for the first smoke check. You need provider API access for model calls through
-the metered lane. An ordinary Codex/Claude subscription is a separate billing
-path and does not supply the world server with an API key.
-
-## 2. Clone and install
-
-Until the implementation is merged into `main`, use its development branch:
+## 1. Clone and install
 
 ```bash
-git clone --branch codex/implement-landing-party \
-  https://github.com/arjmandi/landingparty.git
+git clone https://github.com/arjmandi/landingparty.git
 cd landingparty
+git switch codex/implement-landing-party
 export LANDING_PARTY_ROOT="$PWD"
-
 uv sync --frozen --extra dev
-source .venv/bin/activate
 uv lock --check
 ```
 
-For a published release, use its announced tag or branch instead. Commands in
-this guide assume the virtual environment is active. Reopen it with
-`source .venv/bin/activate` in each new terminal.
+Studio currently lives on the `codex/implement-landing-party` development branch;
+the checkout above selects it explicitly. Use `main` after that work is merged,
+or the appropriate tag for a published release.
 
-The basic install includes the server, CLI, MCP bridge and analysis tools.
-Optional dependencies are available when needed:
+The basic environment includes the server, CLI, MCP bridge and analysis tools;
+it does not install a native model client yet.
+
+Optional dependencies are separate:
 
 | Installation | Adds |
 | --- | --- |
-| `uv sync --frozen --extra dev --extra full` | Playwright, local PDF parsing and additional extractors |
-| `uv sync --frozen --all-extras` | All of the above plus the pinned OpenEnv, Inspect, Harbor and OpenHands SDKs |
+| `uv sync --frozen --extra dev --extra full` | Playwright, PDF parsing and extractors |
+| `uv sync --frozen --all-extras` | Those packages plus pinned OpenEnv, Inspect, Harbor and OpenHands SDKs |
 
-The `full` extra alone does not configure a working Chromium sandbox. For
-browser use, follow [fenced deployment](deploy/README.md). Non-WAV audio also
-needs `ffprobe` from FFmpeg; the world container includes it.
+A Python Playwright package alone does not configure a sandbox-capable browser.
+See [deployment](deploy/README.md) for browser prerequisites. Non-WAV audio
+inspection also requires `ffprobe` from FFmpeg.
 
-## 3. Start the world and run the free check
+## 2. Open Studio
 
-In **terminal A**, from the checkout, create a private control token and start
-the server:
+From the checkout:
 
 ```bash
-umask 077
-mkdir -p data
-python - <<'PY'
-import secrets
-from pathlib import Path
-
-path = Path("data/control-token")
-if not path.exists():
-    with path.open("x") as target:
-        target.write(secrets.token_urlsafe(32))
-    path.chmod(0o600)
-PY
-
-export WORLD_CONTROL_TOKEN="$(cat data/control-token)"
-worldd --data-dir "$LANDING_PARTY_ROOT/data"
+uv run --no-sync worldd --data-dir "$LANDING_PARTY_ROOT/data"
 ```
 
-Leave this terminal running. `data/` is private runtime storage and is ignored
-by Git. Keep this directory and the control token outside the agent's accessible
-filesystem when deploying with isolation.
+Leave it running and open `http://127.0.0.1:7777/`. Local loopback development
+without `WORLD_CONTROL_TOKEN` opens directly. If a control token is already
+configured on the server, enter it in Studio's connection screen. This is a
+single-operator instance, not a multi-user account system.
 
-In **terminal B**, open the same checkout and run:
+`data/` is private persistent runtime storage, ignored by Git. Keep it between
+restarts to retain runs, settings and managed native profiles. The app's default
+HTTP layout is:
+
+| Address/path | Purpose |
+| --- | --- |
+| `http://127.0.0.1:7777/` | Studio and trusted operator API |
+| `/agent/v1/*` | Tools, manifest, inbox and status using a run capability |
+| `/model/*` | Metered OpenAI/Anthropic model endpoints using a run capability |
+| `/bridge` | Advanced asks, credential deposits and browser takeover |
+| `/public/*` (when `--public` is enabled) | Optional identity/incident boundary |
+
+The recorded proxy remains a private TCP service, normally on loopback port
+8080. It is not another browser frontend. See [single-origin hosting](docs/studio-origin.md)
+for deployment details and [the operator workflow](docs/product-experience.md)
+for how the panels behave.
+
+## 3. Install a harness in Library
+
+Open **Library** and choose Claude Code or Codex. Click **Install client** if it
+is not installed. Installation uses the supported pinned npm package in this
+instance's private tools directory; it does not need a global npm installation
+or `sudo`. Wait for installation to finish and readiness to refresh.
+
+Node.js and npm must be available to the **server process**, including on a VPS
+or in a container. If you installed them after starting `worldd`, restart the
+server so its PATH contains them, then retry. An existing supported CLI found
+by the server can also be used. The code-owned library currently pins Claude
+Code 2.1.308 and Codex CLI 0.163.0.
+
+## 4. Choose how to connect
+
+### Use your provider subscription
+
+In the harness card, choose **Connect subscription**. This invokes the official
+native client's sign-in flow; it does not turn an API key into a subscription.
+
+- **Codex:** open the official provider device sign-in URL, enter the displayed
+  device code when requested, and authorize your ChatGPT account.
+- **Claude Code:** open the official Claude sign-in URL and authorize your
+  subscription. If the provider displays a confirmation code, paste it into
+  **Provider confirmation code** in Studio and submit it. This manual-code path
+  works when the native client is on a VPS and a browser callback cannot reach
+  that server.
+
+Return to the Library and click **Check connection** if needed. Wait for the
+state to become connected before starting a run. The app checks the official
+CLI's local login status; a URL being displayed is not successful authentication.
+Use **Cancel sign-in** for an interrupted flow, or **Disconnect** to remove that
+instance's connection. Studio manages its own native profiles; a login in your
+ordinary terminal profile does not automatically connect this instance.
+
+Subscription model dollars are **unmeasured**, not zero. In this mode, the dollar
+allowance covers recorded **world-tool charges only**. Provider plan limits and
+quotas remain separate, and model work can continue without consuming that world
+allowance. Subscription runs are cooperative development runs and cannot be
+used as metered research cells.
+
+### Use an API key
+
+Open **Settings**, add the corresponding OpenAI or Anthropic API key, and save.
+Keys are write-only in the interface; a configured state does not reveal the
+saved value. Use **Check API access** when available to check provider access.
+Then return to the harness card's API-key connection.
+
+Select an exact priced model offered by the instance. API mode routes native
+client model requests through Landing Party's metered lane; model and tool
+charges count against the run's dollar cap. A subscription login does not supply
+an API key or API credit. Review the active [price table](policy/prices.json)
+against provider pricing before paid research; an unpriced model is refused.
+
+Optional Brave/Exa search keys also belong in Settings or the world process's
+secure environment. Direct URL fetching does not need a search-provider key.
+Do not put provider keys or native login credentials in goals or workspaces.
+Remember that this quickstart's same-OS-user boundary still permits file access.
+
+## 5. Start, follow and stop a run
+
+Click **Start with this connection** or **Start run**. Select the harness and
+connection, optionally name the run, give it a goal or leave room for exploration,
+and set its dollar allowance and time limit. A first goal can be:
+
+> Inspect the world tools, call status, and deliver a short note. Do not contact
+> anyone or publish anything.
+
+Starting the run launches the selected native client with its actual world
+briefing, workspace and scoped tools. It can make provider requests immediately.
+For API mode, choose a modest allowance and check the selected model's maximum
+output reservation if a call is refused before much has been spent.
+
+Use **Runs** for the actual state, recorded spending, world activity and stop
+control. **Beliefs** shows existing records and their evidence; **Footprint**
+shows already recorded work and observations. **Asks** lets you inspect and
+respond to a specific request. Secure credential handoffs and browser takeover
+continue in the advanced bridge when indicated. These are explicit actions;
+there is no general operator chat that redirects a run silently.
+
+Opening a panel does not call a model, consume the agent's inbox or create a
+belief. Missing records and prices remain unavailable. Use **Stop run** and
+follow its state while work drains and the run is sealed. Closing the browser
+alone does not stop the server or its agent. Existing records remain on disk
+when you stop `worldd` with Ctrl-C.
+
+## 6. Use a VPS or cloud host
+
+Keep the same one-origin layout. Configure `WORLD_CONTROL_TOKEN` in the server's
+secure environment before starting it and put a TLS reverse proxy in front of
+the loopback HTTP listener. Open the resulting HTTPS URL and enter the token
+once; Studio uses an HttpOnly, SameSite Strict session cookie. There is no
+separate website signup.
+
+A non-loopback `worldd` bind is refused without a control token. Do not publish
+the proxy TCP port or expose unrelated server files to a native agent. Use a
+dedicated/disposable environment here too. See [single-origin hosting](docs/studio-origin.md)
+for authentication, session expiry, routing and legacy-listener behavior.
+
+## Advanced CLI and MCP
+
+Studio does this wiring for ordinary runs. The following paths are for scripted
+checks, manual native clients and integrations. Below, **terminal A** is the
+terminal running `worldd`; **terminal B** is a second terminal for these commands.
+Open terminal B in the checkout and activate the Python environment:
 
 ```bash
 export LANDING_PARTY_ROOT="$PWD"
 source .venv/bin/activate
-export WORLD_CONTROL_TOKEN="$(cat data/control-token)"
-
-lp health
-python scripts/smoke.py
 ```
 
-The smoke script should print `"status": "passed"`. It creates and seals its
-own run, checks the scoped agent capability, delivers an artifact, records an
-ask, checks private-address denial, and verifies the ledger, snapshot and
-export. It makes no paid or external requests.
+A free check against the default Studio makes no model or external requests:
 
-The default listeners are:
+```bash
+# Export the same WORLD_CONTROL_TOKEN here if the server has one configured.
+lp health
+python scripts/smoke.py \
+  --url http://127.0.0.1:7777 \
+  --agent-url http://127.0.0.1:7777/agent
+```
 
-| Address | Used by |
-| --- | --- |
-| `http://127.0.0.1:7777` | You: `lp`, reports and the `/bridge` console |
-| `http://127.0.0.1:7778` | Agents: scoped tools, inbox, manifest and status |
-| `http://127.0.0.1:8081` | Clients: metered OpenAI/Anthropic model requests |
-| `http://127.0.0.1:8080` | Recorded HTTP/HTTPS proxy, when configured for a run |
+It should print `"status": "passed"`, after verifying a run capability, tools,
+private-destination denial, seal, ledger, snapshot and export. To use older
+clients that expect separate listeners, start the server with:
 
-Open `http://127.0.0.1:7777/bridge` for the researcher console; enter the control
-token locally when prompted. Keep these listeners on loopback for this setup.
-The optional public identity/incident listener is separate; it is not needed
-to connect a client.
+```bash
+worldd --data-dir "$LANDING_PARTY_ROOT/data" --legacy-listeners
+```
 
-## 4. Configure a provider before calling a model
+That explicitly restores control port 7777, agent port 7778 and model port 8081.
+The manual examples below use the default Studio's `/agent` and `/model` paths
+instead. Do not mix those layouts accidentally.
 
-Stop the server in terminal A with Ctrl-C. Put provider keys in **terminal A
-only**, or supply them through your deployment's secret manager.
+For a manual client, install the corresponding official CLI yourself if it is
+not on PATH (the Library's private installation need not be on your shell PATH):
+
+```bash
+npm install -g @openai/codex@0.163.0
+# Or:
+npm install -g @anthropic-ai/claude-code@2.1.308
+```
+
+The [Codex CLI guide](https://developers.openai.com/codex/cli) and
+[Claude Code setup guide](https://code.claude.com/docs/en/setup) describe the
+official installers. Keep manual clients in the same disposable environment.
+
+### Configure a provider manually (API mode)
+
+These manual examples use API metering. Skip the environment-key steps if you
+already configured this provider in Studio Settings. Otherwise stop the server
+in terminal A with Ctrl-C and put provider keys in **terminal A only**, or use
+your deployment's secret manager.
 
 For Codex, enter an OpenAI API key without putting its value in shell history:
 
@@ -170,7 +281,7 @@ aliases such as `sonnet` or `latest`: an unpriced model is refused.
 Restart the server in terminal A with the same command:
 
 ```bash
-worldd --data-dir "$LANDING_PARTY_ROOT/data"
+uv run --no-sync worldd --data-dir "$LANDING_PARTY_ROOT/data"
 ```
 
 The model lane reads provider roots and keys from this process. Default upstream
@@ -178,7 +289,7 @@ roots are `https://api.openai.com` and `https://api.anthropic.com`. If you use
 `WORLD_OPENAI_UPSTREAM` or `WORLD_ANTHROPIC_UPSTREAM`, supply the root **without
 `/v1`**. Review compatibility and prices for that upstream too.
 
-## 5. Create a fresh client run
+### Create a fresh manual client run
 
 Continue in terminal B. Choose the exact model ID you reviewed above, and label
 the client/version you will use:
@@ -241,7 +352,7 @@ client verbatim. Use a **fresh run** for each client or retry after a sealed run
 These local examples use the returned workspace directory directly; they do
 not create the `/work` and read-only `/world` mounts of the fenced deployment.
 
-## 6A. Connect plain Claude Code
+### Connect plain Claude Code manually
 
 No custom Claude SDK is required. Generate the repository's existing MCP and
 settings files in terminal B:
@@ -249,6 +360,8 @@ settings files in terminal B:
 ```bash
 python adapters/claude-code/configure.py \
   --run-id "$WORLD_RUN_ID" \
+  --world-url http://127.0.0.1:7777/agent \
+  --lane-url http://127.0.0.1:7777/model/anthropic \
   --output "$SESSION_DIR/claude"
 ```
 
@@ -257,8 +370,8 @@ Then launch the ordinary CLI in the run workspace:
 ```bash
 (
   unset WORLD_CONTROL_TOKEN OPENAI_API_KEY ANTHROPIC_API_KEY
-  export WORLD_BASE_URL=http://127.0.0.1:7778
-  export ANTHROPIC_BASE_URL=http://127.0.0.1:8081/anthropic
+  export WORLD_BASE_URL=http://127.0.0.1:7777/agent
+  export ANTHROPIC_BASE_URL=http://127.0.0.1:7777/model/anthropic
   export ANTHROPIC_AUTH_TOKEN="$WORLD_RUN_TOKEN"
   export ANTHROPIC_CUSTOM_HEADERS="X-World-Run-Id: $WORLD_RUN_ID"
   export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
@@ -282,7 +395,7 @@ For a noninteractive transcript-producing invocation, the existing
 [Claude launcher](adapters/claude-code/README.md) is also available. Both paths
 use the same native Claude Code executable and MCP bridge.
 
-## 6B. Connect plain Codex CLI
+### Connect plain Codex CLI manually
 
 Codex uses the same stdio MCP bridge and the world's OpenAI Responses endpoint.
 This command sets the provider and MCP configuration for this invocation,
@@ -291,14 +404,14 @@ without writing the capability into `~/.codex/config.toml`:
 ```bash
 (
   unset WORLD_CONTROL_TOKEN OPENAI_API_KEY ANTHROPIC_API_KEY
-  export WORLD_BASE_URL=http://127.0.0.1:7778
+  export WORLD_BASE_URL=http://127.0.0.1:7777/agent
 
   codex --no-daemon --cd "$WORLD_WORKSPACE" --model "$WORLD_MODEL" \
     --sandbox workspace-write \
     -c 'web_search="disabled"' \
     -c 'model_provider="landing_party"' \
     -c 'model_providers.landing_party.name="Landing Party"' \
-    -c 'model_providers.landing_party.base_url="http://127.0.0.1:8081/openai/v1"' \
+    -c 'model_providers.landing_party.base_url="http://127.0.0.1:7777/model/openai/v1"' \
     -c 'model_providers.landing_party.wire_api="responses"' \
     -c 'model_providers.landing_party.env_key="WORLD_RUN_TOKEN"' \
     -c 'model_providers.landing_party.requires_openai_auth=false' \
@@ -323,7 +436,7 @@ normal billing path and are **outside Landing Party's ledger and dollar cap**.
 The custom provider above is the path to use when checking model metering.
 The same distinction applies to Claude Code with its ordinary login.
 
-## 7. Inspect, stop and export
+### Inspect, stop and export from the CLI
 
 Exit the client, then use terminal B with its control token still set. Plain
 interactive clients do not automatically seal the world run when you quit:
@@ -348,14 +461,15 @@ An ordinary report is passive. Optional model-based grading, interviews and
 probes need a separate explicit measurement budget; see
 [research analysis](docs/research.md).
 
-## 8. Move from local setup to live research
+## Move from local setup to live research
 
 The host commands above are **cooperative development**. The client shares your
 machine, shell tools can bypass the gateway, and ordinary client sandboxing does
-not establish Landing Party's fenced isolation or complete accounting. Keep
-provider secrets in terminal A only; if terminal B already contains other
-credentials, start a clean client environment. A shared OS user can still read
-its own files regardless of environment-variable cleanup.
+not establish Landing Party's fenced isolation or complete accounting. Filtering
+terminal B's environment does not isolate the filesystem: a native
+agent running as the world's OS user can still read world storage and that user's
+other private files. Use the dedicated/disposable development environment
+described above, and use separate users and mounts for fenced deployment.
 
 Before a scientific live run:
 
@@ -385,19 +499,21 @@ from completed experiments.
 
 | Symptom | Check |
 | --- | --- |
-| `worldd` or `world-mcp` not found | Activate `.venv`; the client MCP command uses its absolute Python path. |
-| Port already in use | Stop your own previous world process or use another host. The authenticated `lp` CLI currently expects the control listener on loopback port 7777. |
-| Control request returns 401 | Terminal B must have the same `WORLD_CONTROL_TOKEN` as terminal A. |
-| MCP fails or returns 401 | Use port 7778, the current run ID and its token. Restart the client after changing its environment; sealed capabilities are revoked. |
-| `unpriced_model` | The actual requested model must exactly match an entry for its provider in the server's active price table. Restart after changing the table. |
+| Library cannot install a client | Node.js 22+ and npm must be on the server's PATH; restart after installing them. Inspect the actual installation result and retry. |
+| Subscription is not connected | Complete the official provider flow and use Check connection; an API-key login is not a subscription login. |
+| Claude sign-in on a VPS waits for a code | Complete provider authorization, then submit its confirmation code in the Library. |
+| A connection is busy | One native profile can have only one active run; stop its current run first. |
+| Studio asks for a token / returns 401 | Use the instance's configured control token; an agent capability or provider key does not grant operator access. |
+| MCP returns 401 | Use `/agent`, the current run ID and capability. In explicit legacy mode use port 7778. Sealed capabilities are revoked. |
+| `unpriced_model` | API mode requires the exact model ID in the instance's active price table. |
+| Model dollars are unavailable | Expected in subscription mode; only world-tool dollars are metered there. For manual API clients verify `/model` routing. |
 | `budget_exhausted` before much is spent | The lane reserves the call's maximum possible cost; check output limits and unresolved holds. |
-| `server_side_web_tool` | Disable the client's built-in hosted search/fetch and use the world MCP tools. |
-| Tools work but model dollars stay zero | Check the client's custom model endpoint; an ordinary subscription/provider connection bypasses the model lane. |
-| Fetch is blocked | Inspect the typed reason: robots/terms, private destination, missing search key or egress failure. A blocked observation is not permission to bypass policy. |
-| Chromium cannot start | Use the documented sandbox-capable container; the basic install does not supply it. |
-| Run is already sealed | The deadline, budget or a stop ended it. Create a new run and reconnect with its new capability. |
+| `server_side_web_tool` | Disable native hosted search/fetch in a manual client and use world MCP tools. |
+| Fetch is blocked | Inspect the typed robots/terms, private-destination or egress reason; use an allowed alternative. |
+| Chromium cannot start | The base install does not supply the documented sandbox-capable browser setup. |
+| Run is sealed | A deadline, budget or stop ended it. Create a fresh run with a new capability. |
 
-For development checks, run `ruff check .`, `ruff format --check .` and
-`pytest -q`. The normal suite needs no provider keys; eight optional real-Docker
-skill cases are skipped unless explicitly configured as described in
-[skill checks](docs/skill-tests.md).
+Development checks are `uv lock --check`, `ruff check .`, `ruff format --check .`
+and `pytest -q`. The ordinary suite uses deterministic provider fixtures;
+optional Docker, native-client and browser checks have separate prerequisites.
+See the [verification record](docs/verification.md) and [skill checks](docs/skill-tests.md).

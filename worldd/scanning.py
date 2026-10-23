@@ -74,7 +74,7 @@ INJECTION_RULES = [
 ]
 
 
-def contains_sensitive_data(value: str | bytes) -> bool:
+def _content_variants(value):
     text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
     variants = {text, html.unescape(text)}
     for _ in range(2):
@@ -101,33 +101,53 @@ def contains_sensitive_data(value: str | bytes) -> bool:
                 variants.add(decoded)
         except (ValueError, UnicodeError):
             pass
-    if any(
-        SENSITIVE.search(view)
-        or re.search(r"(?<!\w)(?:\+\d{8,15}|\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4})(?!\w)", view)
-        for view in variants
-    ):
-        return True
+    return variants
+
+
+def _configured_secrets(extra_secrets):
+    if isinstance(extra_secrets, (str, bytes)):
+        extra_secrets = (extra_secrets,)
+    values = list(extra_secrets)
     for name, secret in os.environ.items():
         if (
-            (
-                name in SECRET_NAMES
-                or name.startswith("WORLD_CANARY_SECRET")
-                or (name.startswith("WORLD_") and name.endswith(("_KEY", "_TOKEN", "_SECRET")))
-            )
-            and len(secret) >= 8
-            and any(
-                encoded in view
-                for view in variants
-                for encoded in (
-                    secret,
-                    secret.encode().hex(),
-                    base64.b64encode(secret.encode()).decode(),
-                    base64.urlsafe_b64encode(secret.encode()).decode(),
-                )
+            name in SECRET_NAMES
+            or name.startswith("WORLD_CANARY_SECRET")
+            or (name.startswith("WORLD_") and name.endswith(("_KEY", "_TOKEN", "_SECRET")))
+        ):
+            values.append(secret)
+    return {value for value in values if isinstance(value, str) and len(value) >= 8}
+
+
+def _matches_secret(variants, extra_secrets):
+    for secret in _configured_secrets(extra_secrets):
+        if any(
+            encoded in view
+            for view in variants
+            for encoded in (
+                secret,
+                secret.encode().hex(),
+                secret.encode().hex().upper(),
+                base64.b64encode(secret.encode()).decode(),
+                base64.urlsafe_b64encode(secret.encode()).decode(),
             )
         ):
             return True
     return False
+
+
+def contains_configured_secret(value: str | bytes, *, extra_secrets=()) -> bool:
+    """Match world-owned secrets without classifying approved envelope addresses."""
+    return _matches_secret(_content_variants(value), extra_secrets)
+
+
+def contains_sensitive_data(value: str | bytes, *, extra_secrets=()) -> bool:
+    """Stateless scan; extra secrets belong only to the calling world instance."""
+    variants = _content_variants(value)
+    return any(
+        SENSITIVE.search(view)
+        or re.search(r"(?<!\w)(?:\+\d{8,15}|\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4})(?!\w)", view)
+        for view in variants
+    ) or _matches_secret(variants, extra_secrets)
 
 
 def classify_injection(body: bytes) -> dict:

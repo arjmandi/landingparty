@@ -1,0 +1,286 @@
+"""Operator routes join real world state, credential storage and scoped model billing."""
+
+import httpx
+import pytest
+
+from worldd.app import create_app
+from worldd.models import RunConfig
+from worldd.studio_gateway import create_studio_gateway
+
+
+class Gateway:
+    async def aclose(self):
+        pass
+
+
+def price(rate="1"):
+    return {
+        "provider": "openai",
+        "input": rate,
+        "output": rate,
+        "cache_read": "0.1",
+        "cache_write": rate,
+        "context_window": 4096,
+        "max_output_tokens": 256,
+        "source": "https://platform.openai.com/docs/pricing",
+    }
+
+
+@pytest.fixture
+async def product(tmp_path, monkeypatch):
+    monkeypatch.setenv("WORLD_CONTROL_TOKEN", "operator-test-only")
+    requests, launches = [], []
+
+    def provider(request):
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "model": "studio-model",
+                "choices": [{"message": {"role": "assistant", "content": "local fixture"}}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 100},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as upstream:
+        control = create_app(
+            tmp_path,
+            gateway=Gateway(),
+            lane_client=upstream,
+            prices={"models": {"studio-model": price()}},
+        )
+        world, studio = control.state.world, control.state.studio
+        connection = {"state": "auth_required", "auth_method": "unknown"}
+
+        async def library(refresh=False, instance_id="default"):
+            return {
+                "items": [
+                    {
+                        "id": name,
+                        "name": name,
+                        "installed": True,
+                        "version": "1.0.0",
+                        "api_ready": bool(world.credential(binding)),
+                        "auth_modes": ["api_key", "subscription"],
+                        "subscription_auth": dict(connection),
+                        "requirements": {"node": True, "npm": True},
+                    }
+                    for name, binding in (
+                        ("codex", "WORLD_OPENAI_API_KEY"),
+                        ("claude-code", "WORLD_ANTHROPIC_API_KEY"),
+                    )
+                ]
+            }
+
+        async def launch(info, harness_id, *, auth_mode, model):
+            launches.append((info, harness_id, auth_mode, model))
+            return {"run_id": info["run_id"], "state": "running", "session_id": "fixture-native"}
+
+        monkeypatch.setattr(studio.harnesses, "library", library)
+        monkeypatch.setattr(studio.harnesses, "launch", launch)
+        app = create_studio_gateway(control)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app),
+            base_url="http://127.0.0.1:7777",
+            headers={"X-World-Control-Token": "operator-test-only"},
+        ) as client:
+            yield world, studio, client, requests, launches, connection
+        await world.aclose()
+
+
+def run_body(**changes):
+    return {
+        "harness_id": "codex",
+        "auth_mode": "api_key",
+        "model": "studio-model",
+        "budget_usd": 1,
+        "wall_minutes": 10,
+        **changes,
+    }
+
+
+async def test_settings_are_atomic_private_and_never_echo_submitted_secrets(product):
+    world, _studio, client, requests, _launches, _connection = product
+    key = "fixture-provider-key-not-for-production"
+    saved = await client.post("/api/settings", json={"credentials": {"openai_api_key": key}})
+    assert saved.status_code == 200 and saved.json()["credentials"]["openai"]["configured"]
+    assert key not in saved.text
+    assert not requests
+    encrypted = world.store.data_dir / "instance-settings/state.enc"
+    assert key.encode() not in encrypted.read_bytes()
+    revision = saved.json()["revision"]
+    rejected = await client.post(
+        "/api/settings",
+        json={
+            "credentials": {"openai_api_key": "secret-must-not-echo"},
+            "settings": {"arbitrary": key},
+        },
+    )
+    assert rejected.status_code == 400 and key not in rejected.text
+    assert world.instance_settings.status()["revision"] == revision
+    assert world.credential("WORLD_OPENAI_API_KEY") == key
+    assert (await client.delete("/api/settings/providers/openai/key")).status_code == 200
+    assert world.credential("WORLD_OPENAI_API_KEY") is None
+
+
+async def test_library_can_finish_setup_with_subscription_and_no_api_key(product):
+    _world, _studio, client, requests, _launches, connection = product
+    before = (await client.get("/api/settings")).json()
+    assert before["setup_complete"] is False
+    connection.update(state="connected", auth_method="subscription")
+    after = (await client.get("/api/settings")).json()
+    assert after["setup_complete"] is True
+    assert not after["credentials"]["openai"]["configured"]
+    item = next(
+        row
+        for row in (await client.get("/api/harnesses")).json()["harnesses"]
+        if row["id"] == "codex"
+    )
+    assert {row["id"]: row["ready"] for row in item["modes"]} == {
+        "api_key": False,
+        "subscription": True,
+    }
+    assert any(row["id"] == "" and row["auth_modes"] == ["subscription"] for row in item["models"])
+    assert not requests
+
+
+async def test_one_click_api_run_registers_actual_conditions_and_hides_capability(product):
+    world, _studio, client, requests, launches, _connection = product
+    world.instance_settings.update_provider("openai", api_key="fixture-openai-key")
+    response = await client.post("/api/runs", json=run_body(name="First expedition", goal=None))
+    assert response.status_code == 201, response.text
+    info, harness, auth_mode, model = launches[0]
+    config = world.run_config(info["run_id"])
+    assert config["name"] == "First expedition" and config["goal"] is None
+    assert config["stage"] == 2 and config["research_mode"] == "development"
+    assert config["operator_messages_allowed"] is False
+    assert config["model_billing_mode"] == "api_key"
+    assert (harness, auth_mode, model) == ("codex", "api_key", "studio-model")
+    assert info["run_token"] not in response.text and "run_token" not in response.text
+    assert not requests
+
+
+async def test_subscription_run_has_truthful_briefing_and_unmeasured_model_cost(product):
+    world, _studio, client, requests, launches, connection = product
+    connection.update(state="connected", auth_method="subscription")
+    response = await client.post("/api/runs", json=run_body(auth_mode="subscription", model=None))
+    assert response.status_code == 201, response.text
+    info = launches[0][0]
+    run_id = info["run_id"]
+    assert "model-dollar accounting are unavailable" in info["preamble"]
+    assert "world-tool spend" in info["preamble"]
+    assert world.store.get_run(run_id)["tainted"]
+    billing = response.json()["billing"]
+    assert billing["model_cost_usd"] is None and billing["cap_scope"] == "world_tools"
+    rejected = await client.post(
+        "/model/openai/v1/chat/completions",
+        json={"model": "studio-model", "messages": []},
+        headers={"Authorization": "Bearer " + info["run_token"], "X-World-Run-Id": run_id},
+    )
+    assert rejected.status_code == 403 and not requests
+    await client.post(f"/api/runs/{run_id}/stop", json={})
+    report = world.report(run_id)
+    assert report["billing"]["model_usd"] is None
+    assert report["billing"]["scientific_eligible"] is False
+    from analysis.report import render_report
+
+    assert "Subscription model dollars are unmeasured" in render_report(report)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"harness_id": "arbitrary"},
+        {"model": "unpriced"},
+        {"reply_policy": "blockers_plus_checkins"},
+        {"packs": ["browse"]},
+        {"command": "arbitrary"},
+    ],
+)
+async def test_invalid_or_unready_launches_do_not_create_world_runs(product, changes):
+    world, _studio, client, requests, launches, _connection = product
+    count = len(world.store.list_runs())
+    response = await client.post("/api/runs", json=run_body(**changes))
+    assert response.status_code == 400
+    assert len(world.store.list_runs()) == count and not launches and not requests
+
+
+async def test_launcher_failure_seals_created_run_as_attrition(product, monkeypatch):
+    world, studio, client, _requests, _launches, _connection = product
+    world.instance_settings.update_provider("openai", api_key="fixture-openai-key")
+
+    async def fail(*args, **kwargs):
+        raise ValueError("Native fixture launch failed")
+
+    monkeypatch.setattr(studio.harnesses, "launch", fail)
+    response = await client.post("/api/runs", json=run_body())
+    assert response.status_code == 400
+    row = world.store.list_runs()[0]
+    assert row["state"] == "sealed" and row["end"]["reason"] == "harness_launch_failed"
+    assert world.store.verify_record(row["run_id"])["valid"]
+
+
+async def test_stop_drains_native_process_before_seal_and_panels_are_passive(product, monkeypatch):
+    world, studio, client, _requests, launches, _connection = product
+    world.instance_settings.update_provider("openai", api_key="fixture-openai-key")
+    response = await client.post("/api/runs", json=run_body())
+    assert response.status_code == 201
+    run_id = launches[0][0]["run_id"]
+    before = world.store.records(run_id)
+    for suffix in ("", "/beliefs", "/footprint", "/asks", "/events", "/ledger"):
+        viewed = await client.get(f"/api/runs/{run_id}{suffix}")
+        assert viewed.status_code == 200, viewed.text
+    assert world.store.records(run_id) == before
+
+    async def drained(selected):
+        world.store.append_record(selected, "native_fixture_drained")
+
+    monkeypatch.setattr(studio.harnesses, "stop_for_run", drained)
+    stopped = await client.post(f"/api/runs/{run_id}/stop", json={})
+    assert stopped.status_code == 200
+    records = world.store.records(run_id)
+    assert (
+        next(row["seq"] for row in records if row["kind"] == "native_fixture_drained")
+        < records[-1]["seq"]
+    )
+    assert records[-1]["kind"] == "seal" and world.store.verify_record(run_id)["valid"]
+
+
+async def test_live_key_updates_do_not_reprice_an_existing_run(product):
+    world, _studio, client, requests, _launches, _connection = product
+    first_key, second_key = "fixture-initial-api-key", "fixture-replacement-api-key"
+    world.instance_settings.update_provider("openai", api_key=first_key)
+    first = world.create_run(RunConfig())
+    world.instance_settings.update_provider(
+        "openai", api_key=second_key, prices={"studio-model": price("2")}
+    )
+    second = world.create_run(RunConfig())
+    assert first["tuple"]["price_table_id"] != second["tuple"]["price_table_id"]
+    for info in (first, second):
+        result = await client.post(
+            "/model/openai/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer " + info["run_token"],
+                "X-World-Run-Id": info["run_id"],
+            },
+            json={"model": "studio-model", "messages": [], "max_tokens": 10},
+        )
+        assert result.status_code == 200, result.text
+    assert all(row.headers["authorization"] == "Bearer " + second_key for row in requests)
+    assert world.store.spend(first["run_id"])["model"] == pytest.approx(0.0002)
+    assert world.store.spend(second["run_id"])["model"] == pytest.approx(0.0004)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"research_mode": "research"},
+        {"isolation_profile": "fenced"},
+        {"life_id": "life_fake"},
+        {"series_id": "series_fake"},
+        {"measurement_of": "r_fake"},
+    ],
+)
+def test_subscription_cannot_claim_research_or_measurement_conditions(change):
+    with pytest.raises(ValueError, match="subscription"):
+        RunConfig(model_billing_mode="subscription", **change)

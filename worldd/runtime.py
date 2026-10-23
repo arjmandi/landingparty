@@ -68,6 +68,16 @@ class World:
 
         return ask_provenance(self, run_id, params)
 
+    def credential(self, name, default=None):
+        settings = getattr(self, "instance_settings", None)
+        return settings.resolve(name, default) if settings else os.environ.get(name, default)
+
+    def contains_sensitive_data(self, value):
+        settings = getattr(self, "instance_settings", None)
+        return contains_sensitive_data(
+            value, extra_secrets=settings.secret_values() if settings else ()
+        )
+
     def _in_flight(self, run_id):
         return sum(
             action_id not in self.internal_network_actions
@@ -261,12 +271,21 @@ class World:
         from .kernel import KERNEL_ID
 
         has_beliefs = "belief" in config.packs or config.iota.beliefs != "fresh"
+        model_pricing = None
+        current_price_id = self.price_table_id
+        if getattr(self, "instance_settings", None) is not None:
+            from .lane import price_table_id
+
+            model_pricing = self.instance_settings.model_prices(self.model_pricing_base)
+            current_price_id = price_table_id(
+                model_pricing, perception_prices=self.perception_pricing
+            )
         tuple_ = {
             "world_id": self.world_id,
             "archive_id": config.corpus_id if config.mode == "frozen" else config.archive_in,
             "tool_set_id": tool_manifest["tool_set_id"],
             "policy_id": digest(getattr(self.gateway, "policy", {})),
-            "price_table_id": self.price_table_id,
+            "price_table_id": current_price_id,
             "breaker_policy_id": digest(config.breaker_policy),
             "search_provider_id": PROVIDERS[config.search_provider]["id"]
             if config.mode == "live"
@@ -287,6 +306,7 @@ class World:
                     "workspace_policy_id": WORKSPACE_POLICY_ID,
                     "workspace_checkpoint_policy_id": "workspace-spend-checkpoints@1",
                     "budget_visible": config.budget_visible,
+                    "model_billing_mode": config.model_billing_mode,
                     "operator_messages_allowed": config.operator_messages_allowed,
                     "human_rate_per_minute": config.human_rate_per_minute,
                     "max_in_flight": config.max_in_flight,
@@ -388,8 +408,19 @@ class World:
             settings["execution_binding"] = execution_binding
         if self.perception_pricing is not None:
             settings["perception_pricing"] = self.perception_pricing
+        if model_pricing is not None:
+            settings["model_pricing"] = model_pricing
         run = self.store.create_run(settings)
         run_id = run["run_id"]
+        if config.model_billing_mode == "subscription":
+            self.store.update_run(run_id, tainted=True)
+            self.store.append_record(
+                run_id,
+                "model_cost_unmeasured",
+                billing_mode="native_subscription",
+                dollar_cap_scope="world_tools_only",
+                reason="Native subscription model requests are outside the metered API lane",
+            )
         run_dir = self.store.run_dir(run_id)
         (run_dir / "world" / "fetched").mkdir(parents=True, exist_ok=True)
         (run_dir / "work").mkdir(parents=True, exist_ok=True)
@@ -687,6 +718,17 @@ class World:
                 "Model usage and request hashes are recorded; model input and output are not captured."
             )
         )
+        if config.model_billing_mode == "subscription":
+            capture = (
+                "The native client transcript is retained. Complete provider I/O capture "
+                "and model-dollar accounting are unavailable for this subscription session."
+            )
+        budget_scope = (
+            "world-tool spend; model requests use a native subscription and their dollar cost "
+            "is unmeasured. The world cannot enforce the provider's subscription quota. Your wall limit is "
+            if config.model_billing_mode == "subscription"
+            else "model and search spend and "
+        )
         names = ", ".join(
             tool["name"]
             for tool in manifest(config.packs, tools_disabled=config.tools_disabled)["tools"]
@@ -740,7 +782,7 @@ class World:
                 if names
                 else "You have no world tools in this baseline. "
             )
-            + f"Your budget is ${config.budget.usd:g} of model and search spend and "
+            + f"Your budget is ${config.budget.usd:g} of {budget_scope}"
             f"{config.budget.wall_s / 3600:g} hours. "
             + ("Status shows what you have spent by category. " if config.budget_visible else "")
             + f"{internet} {capabilities} {human} "
@@ -792,6 +834,13 @@ class World:
                 cap=config["budget"]["usd"],
                 reserved=self.store.reserved(run_id),
             )
+        if config.get("model_billing_mode") == "subscription":
+            state["billing"] = {
+                "mode": "subscription",
+                "model_usd": None,
+                "world_tools_usd": self.store.total_spent(run_id),
+                "dollar_cap_scope": "world_tools_only",
+            }
         if config.get("life_id") and "lives" in self.services:
             life_status = self.services["lives"].status(config["life_id"])
             state.update(
@@ -868,7 +917,7 @@ class World:
                 if admission.get("kind") == "blocked":
                     return admission
             recorded_params = parsed
-            if contains_sensitive_data(canonical(parsed)) or parsed.get("headers"):
+            if self.contains_sensitive_data(canonical(parsed)) or parsed.get("headers"):
                 # Keep identity auditable without persisting rejected credentials or personal data.
                 recorded_params = {"redacted": True, "reason": "sensitive_argument_or_headers"}
             self.store.append_record(
@@ -1174,7 +1223,8 @@ class World:
                     {
                         "type": "job_done",
                         "action_id": action_id,
-                        "url": url,
+                        "url": "[redacted]" if self.contains_sensitive_data(url) else url,
+                        "url_hash": digest(url),
                         "index": index,
                         "reply": reply,
                     },
@@ -1239,7 +1289,7 @@ class World:
         raise ValueError("Unknown tool")
 
     async def _search(self, run_id, action_id, query, k=10, freshness=None, site=None, wait=True):
-        if contains_sensitive_data(query) or (site and contains_sensitive_data(site)):
+        if self.contains_sensitive_data(query) or (site and self.contains_sensitive_data(site)):
             return blocked("policy_deny", "Sensitive data detected in search", "exfiltration")
         config = self.store.get_run(run_id)["config"]
         if config["mode"] == "frozen":
@@ -1264,7 +1314,7 @@ class World:
             target.write_text(canonical(reply), encoding="utf-8")
             return reply
         provider = config.get("search_provider", "brave")
-        api_key = os.environ.get(PROVIDERS[provider]["key_env"])
+        api_key = self.credential(PROVIDERS[provider]["key_env"])
         if not api_key:
             return blocked(
                 "policy_deny", f"{provider.title()} search is not configured", "search_credentials"
@@ -1357,7 +1407,8 @@ class World:
                         run_id,
                         {
                             "type": "page_changed",
-                            "url": url,
+                            "url": "[redacted]" if self.contains_sensitive_data(url) else url,
+                            "url_hash": digest(url),
                             "previous_hash": previous,
                             "hash": current,
                             "watch_action_id": action_id,
@@ -1425,7 +1476,8 @@ class World:
                                 "type": "job_done",
                                 "action_id": action_id,
                                 "index": index,
-                                "url": url,
+                                "url": "[redacted]" if self.contains_sensitive_data(url) else url,
+                                "url_hash": digest(url),
                                 "reply": reply,
                             },
                         )
@@ -1444,6 +1496,8 @@ class World:
             self._ending.add(run_id)
             self.store.update_run(run_id, state="stopping")
         try:
+            if "harnesses" in self.services:
+                await self.services["harnesses"].stop_for_run(run_id)
             open_tickets = (
                 sum(
                     ticket["state"] in {"open", "pending", "accepted"}
@@ -1590,6 +1644,15 @@ class World:
             verification={"record": self.store.verify_record(run_id), "ledger": reconciliation},
             measurements=load_measurements(self.store, run_id),
         )
+        if self.store.get_run(run_id)["config"].get("model_billing_mode") == "subscription":
+            report["billing"] = {
+                "mode": "subscription",
+                "model_usd": None,
+                "total_usd": None,
+                "world_tools_usd": self.store.total_spent(run_id),
+                "dollar_cap_scope": "world_tools_only",
+                "scientific_eligible": False,
+            }
         if "judge_canaries" in self.services:
             checks = self.services["judge_canaries"].reports_for_run(run_id)
             report["judge_canary_checks"] = checks

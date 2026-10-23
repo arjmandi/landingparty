@@ -125,6 +125,7 @@ async def test_unconfigured_exa_does_not_reserve_or_fall_back(search_world, monk
     world, calls = search_world
     monkeypatch.delenv("WORLD_EXA_API_KEY")
     monkeypatch.setenv("WORLD_BRAVE_API_KEY", "unrelated-provider-key")
+    world.instance_settings.delete_api_key("exa")
     run_id = world.create_run(RunConfig(search_provider="exa"))["run_id"]
     result = await world.act(run_id, "search", {"query": "event"})
     assert result["rule_id"] == "search_credentials"

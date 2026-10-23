@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'">
+  <meta name="theme-color" content="#070C22">
+  <title>Landing Party</title>
+  <link rel="stylesheet" href="/assets/studio.css">
+  <script src="/assets/studio.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Workspace navigation">
+      <a class="brand" href="#runs" aria-label="Landing Party home"><span class="pixel-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span><span>LANDING<br>PARTY<span class="brand-period">.</span></span></a>
+      <p class="sidebar-label">OPERATOR WORKSPACE</p>
+      <nav class="navigation" aria-label="Main">
+        <button class="nav-item selected" data-page="runs" aria-current="page"><span class="nav-symbol" aria-hidden="true">↗</span>Runs<span class="nav-count" id="run-count" hidden></span></button>
+        <button class="nav-item" data-page="harnesses"><span class="nav-symbol" aria-hidden="true">⌘</span>Harnesses</button>
+        <button class="nav-item" data-page="beliefs"><span class="nav-symbol" aria-hidden="true">◇</span>Beliefs</button>
+        <button class="nav-item" data-page="asks"><span class="nav-symbol" aria-hidden="true">↳</span>Asks<span class="nav-count attention" id="ask-count" hidden></span></button>
+        <button class="nav-item" data-page="footprint"><span class="nav-symbol" aria-hidden="true">◎</span>Footprint</button>
+        <button class="nav-item" data-page="settings"><span class="nav-symbol" aria-hidden="true">☷</span>Settings</button>
+      </nav>
+      <div class="sidebar-bottom"><p class="sidebar-note">Give an agent a little room.<br>See what it makes of the world.</p><a class="quiet-link" href="/bridge">Advanced bridge <span aria-hidden="true">↗</span></a><button class="connection-button" id="session-button"><span class="connection-dot" aria-hidden="true"></span><span id="session-label">Connecting…</span></button></div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar"><span class="breadcrumb">WORKSPACE <span aria-hidden="true">/</span> <span id="page-crumb">Runs</span></span><div class="topbar-actions"><span class="sync-state" id="sync-state" role="status">Connecting to your world</span><button class="icon-button" id="refresh-button" aria-label="Refresh workspace" title="Refresh workspace">↻</button><button class="button primary compact" id="new-run-top">New run <span aria-hidden="true">↗</span></button></div></header>
+      <main id="main" tabindex="-1">
+        <div id="notice" class="notice" role="status" hidden></div>
+        <div id="error" class="error-banner" role="alert" hidden></div>
+        <div id="page-content" aria-live="polite" aria-busy="true"><div class="loading-state"><span class="spinner" aria-hidden="true"></span><p>Opening your workspace…</p></div></div>
+      </main>
+      <footer class="workspace-footer"><span>LANDING PARTY</span><span>The agent drives. You clear the way.</span></footer>
+    </div>
+  </div>
+  <dialog id="login-dialog" class="modal login-modal" aria-labelledby="login-title">
+    <form id="login-form"><span class="eyebrow">YOUR OPERATOR WORKSPACE</span><h1 id="login-title">Welcome aboard.</h1><p class="muted">Connect to this instance with your operator token. It stays out of browser storage.</p><label for="operator-token">Operator token</label><input id="operator-token" name="token" type="password" autocomplete="off" required><p id="login-error" class="field-error" role="alert"></p><button class="button primary full-width" type="submit">Open workspace <span aria-hidden="true">↗</span></button></form>
+  </dialog>
+  <dialog id="new-run-dialog" class="modal run-modal" aria-labelledby="new-run-title">
+    <form id="new-run-form"><div class="modal-heading"><div><span class="eyebrow">A NEW EXPEDITION</span><h1 id="new-run-title">Make a little room.</h1></div><button class="icon-button close-dialog" type="button" data-close="new-run-dialog" aria-label="Close new run">×</button></div><p class="muted">Choose how your agent runs, give it limits, and let it work. You’ll hear from it through asks.</p>
+      <div class="form-grid"><div><label for="run-harness">Harness</label><select id="run-harness" name="harness_id" required></select></div><div><label for="run-mode">Connection</label><select id="run-mode" name="auth_mode" required></select></div></div><p id="run-readiness" class="field-help" role="status"></p><button id="run-setup" type="button" class="button subtle compact" hidden>Open harness library ↗</button>
+      <label for="run-model">Model</label><input id="run-model" name="model" list="run-models" autocomplete="off" required placeholder="Choose a pinned model"><datalist id="run-models"></datalist>
+      <label for="run-goal">What should it work on? <span class="optional">Optional</span></label><textarea id="run-goal" name="goal" rows="3" placeholder="Give it an objective, or leave this open for exploration."></textarea>
+      <div class="form-grid"><div><label for="run-budget" id="run-budget-label">World budget (USD)</label><input id="run-budget" name="budget_usd" type="number" min="0.01" max="10000" step="0.01" required></div><div><label for="run-wall">Time limit (minutes)</label><input id="run-wall" name="wall_minutes" type="number" min="1" max="10080" step="1" required></div></div><p id="run-billing-note" class="billing-note"></p>
+      <label for="run-replies">When can the agent ask you?</label><select id="run-replies" name="reply_policy"><option value="blockers_only">When it needs help or approval</option><option value="silent">Silent run — no operator replies</option></select>
+      <details class="advanced-options"><summary>Memory & capabilities</summary><p class="field-help">These are available from the start. The agent chooses when to use them. Runs start in local development; external writes remain blocked.</p><label class="check-label"><input type="checkbox" name="belief" checked>Persistent beliefs</label><label class="check-label"><input type="checkbox" name="forecast">Forecasts</label><label class="check-label"><input type="checkbox" name="watch">Watch for changes</label></details>
+      <p id="run-form-error" class="field-error" role="alert"></p><div class="modal-footer"><button class="button subtle" type="button" data-close="new-run-dialog">Cancel</button><button class="button primary" type="submit" id="launch-button">Start run <span aria-hidden="true">↗</span></button></div>
+    </form>
+  </dialog>
+  <dialog id="ask-dialog" class="modal ask-modal" aria-labelledby="ask-dialog-title"><div id="ask-dialog-content"></div></dialog>
+  <dialog id="stop-dialog" class="modal small-modal" aria-labelledby="stop-title"><form id="stop-form"><span class="eyebrow">END THIS RUN</span><h1 id="stop-title">Bring it home?</h1><p class="muted">The world will stop ongoing work, reconcile recorded spending, and seal the run. Its record stays available.</p><p id="stop-error" class="field-error" role="alert"></p><div class="modal-footer"><button class="button subtle" type="button" data-close="stop-dialog">Keep running</button><button class="button danger" type="submit">Stop and seal</button></div></form></dialog>
+</body>
+</html>

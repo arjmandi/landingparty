@@ -12,7 +12,7 @@ evidence. Availability in development mode does not authorize research use.
 | §3.9 perception | perception, provider boundary | Actual decoded audio duration, PDF and priced Mistral OCR, three transcription vendors, bound quotes and reservations; live vendors require credentials |
 | §3.10–3.11 lives/scarcity | lives, events, market | Cumulative budgets, driver, sleep/wake, continuity, income and afterlife; scientific lives unrun |
 | §3.12 footprint/response | footprint, communications, public identity | Registered fixed-origin measurement probes, provenance, incidents/revocation/rollback, public disclosure and private human-triaged incident reports; independent uptake needs actual counterparties |
-| §4.1–4.6 process/lane/services | app, main, lane, extensions | Separate control/agent/model/proxy listeners, optional public identity listener, capabilities, streaming metering and cancellation |
+| §4.1–4.6 process/lane/services | app, main, lane, extensions | One browser origin with separate control/agent/model capability scopes, private TCP proxy, optional public identity mount, legacy listeners, streaming metering and cancellation |
 | §4.3 isolation/§6.10 preflight | deploy, preflight, host observer | Real fenced container denies direct curl/Python/DNS/control; signed one-use host observations bind exact containers/configuration/mounts; actual source probes and verified preflight precede research activation |
 | §4.5 gateway | gateway, proxy, DNS, signing, scanning | Real HTTP/TLS sockets, CONNECT/CA, pinning, robots/rates, WARC/HAR and private API child archives; cloud public egress restricted |
 | §4.7 modes | replay, canaries, gateway | Verified replay, FTS/new queries, overlap@10, frozen cutoffs/hashes; no live fallback; canary archives excluded from shared index |
@@ -30,6 +30,7 @@ evidence. Availability in development mode does not authorize research use.
 | §9 goals/bindings | goals and bindings | Fifteen goals and six bindings; real event/question/trap/held-out banks must be frozen |
 | §10 programme | prereg, experiments, studies | Real-evidence shakedown/R1 evaluators, frozen scientific cells, actual donor/archive graph resolution, whole-life continuation, power/calibration/reset helpers and study budgets; experimental programme unrun |
 | §11 gates/done | registry | Shakedown/R1/R5/L4/IRB gates; none passed by this task |
+| Operator workflow extension | Studio, instance settings, harness library, native authentication, passive run views | Guided setup/start/monitor/query/asks/stop; Claude Code and Codex API-key and official subscription paths; native launch is cooperative, subscription model dollars unmeasured |
 
 ## Operating contracts
 

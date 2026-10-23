@@ -68,7 +68,15 @@ class ProviderBoundaryDenied(Exception):
 
 class PerceptionProvider:
     def __init__(
-        self, name, *, operation, unit_price, invoke, test_only=False, credential_env=None
+        self,
+        name,
+        *,
+        operation,
+        unit_price,
+        invoke,
+        test_only=False,
+        credential_env=None,
+        credential_resolver=None,
     ):
         self.name, self.operation = name, operation
         self.unit_price = Decimal(str(unit_price))
@@ -76,10 +84,11 @@ class PerceptionProvider:
             raise ValueError("Provider unit price must be finite and nonnegative")
         self.invoke, self.test_only = invoke, test_only
         self.credential_env = credential_env
+        self.credential_resolver = credential_resolver or os.environ.get
 
     @property
     def available(self):
-        return not self.credential_env or bool(os.environ.get(self.credential_env))
+        return not self.credential_env or bool(self.credential_resolver(self.credential_env))
 
 
 def audio_seconds(raw):
@@ -151,6 +160,10 @@ def _extract_pdf(raw, options):
 
 
 class PerceptionService(VenueDB):
+    def _credential(self, name):
+        resolver = getattr(self.world, "credential", os.environ.get)
+        return resolver(name)
+
     def __init__(self, world, *, providers=None, client=None):
         super().__init__(world, "perception")
         self.client = client or httpx.AsyncClient(timeout=120, follow_redirects=False)
@@ -178,6 +191,7 @@ class PerceptionService(VenueDB):
                 unit_price=os.environ.get("WORLD_MISTRAL_OCR_USD_PER_PAGE", "0.002"),
                 invoke=self._mistral_ocr,
                 credential_env="WORLD_MISTRAL_API_KEY",
+                credential_resolver=self._credential,
             ),
         )
 
@@ -207,7 +221,7 @@ class PerceptionService(VenueDB):
         if vendor not in self.providers:
 
             async def invoke(raw, options):
-                key = os.environ.get(env_key)
+                key = self._credential(env_key)
                 if not key:
                     raise ValueError("The configured vendor credential is no longer available")
                 return await self._transcribe(vendor, key, raw, options)
@@ -218,6 +232,7 @@ class PerceptionService(VenueDB):
                 unit_price=os.environ.get(f"WORLD_{vendor.upper()}_USD_PER_MINUTE", rate),
                 invoke=invoke,
                 credential_env=env_key,
+                credential_resolver=self._credential,
             )
 
     async def _mistral_ocr(self, raw, options):
@@ -235,7 +250,7 @@ class PerceptionService(VenueDB):
             "POST",
             "https://api.mistral.ai/v1/ocr",
             json=payload,
-            headers={"Authorization": "Bearer " + os.environ["WORLD_MISTRAL_API_KEY"]},
+            headers={"Authorization": "Bearer " + self._credential("WORLD_MISTRAL_API_KEY")},
         )
         response.raise_for_status()
         result = response.json()

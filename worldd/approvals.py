@@ -346,7 +346,8 @@ class PaymentMandateLedger:
         self.world, self.store = world, world.store
         self.database = capabilities(world)
         self.clock = clock or (lambda: datetime.now(UTC))
-        endpoint = os.environ.get("WORLD_PAYMENT_API_URL")
+        resolve = getattr(world, "credential", os.environ.get)
+        endpoint = resolve("WORLD_PAYMENT_API_URL")
         self.adapter = adapter or (HTTPPaymentAdapter(endpoint) if endpoint else None)
         self._active = {}
         self._stopping = set()
@@ -800,7 +801,12 @@ class HTTPPaymentAdapter:
         world = context.get("world")
         if world is None or not hasattr(world, "submit_payment"):
             raise PaymentNotSubmitted("payment_boundary_missing")
-        key = os.getenv(self.key_env)
+        resolve = (
+            getattr(world, "credential", os.getenv)
+            if self.key_env == "WORLD_PAYMENT_API_KEY"
+            else os.getenv
+        )
+        key = resolve(self.key_env)
         if not key:
             raise PaymentNotSubmitted("payment_credential_missing")
         request = self.client.build_request(

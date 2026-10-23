@@ -20,8 +20,18 @@ FROM base AS build
 COPY . .
 RUN chmod -R a+rX /opt/landingparty && uv sync --frozen --extra full --no-dev
 
+# Only the world target needs Node for explicitly requested native CLI installs.
+# Keep this stage outside the agent target's dependency tree.
+FROM node:22-bookworm-slim AS node-runtime
+
 FROM base AS world
 RUN apt-get update && apt-get install -y --no-install-recommends chromium ffmpeg && rm -rf /var/lib/apt/lists/*
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-runtime /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && node -e 'if (Number(process.versions.node.split(".")[0]) < 22) process.exit(1)' \
+    && npm --version
 COPY --from=build /opt/landingparty /opt/landingparty
 RUN groupadd --gid 10002 harness && useradd --uid 10001 --gid 10002 --create-home world \
     && mkdir -p /data && chown world:harness /data

@@ -1,4 +1,64 @@
-# Fenced deployment
+# Deployment
+
+## Cooperative Studio
+
+`compose.studio.yml` runs the browser Studio and its scoped agent/model APIs on
+one HTTP origin. It publishes only host loopback port 7777, uses a separate
+`studio-data` volume, drops capabilities and mounts no Docker socket. The
+recorded proxy remains private inside the container. There are no user accounts:
+this deployment assumes one trusted instance operator.
+
+**Native clients are cooperative, not filesystem-fenced.** They run as the same
+OS user as the world and can read that user's private files, including world
+configuration, encryption keys, provider credentials and other native profiles.
+Container isolation separates this instance from the host; it does not separate
+the agent from the world inside this container. Use a disposable dedicated
+instance with only the credentials and data you intend to trust to native tools.
+Use the separate fenced deployment below when the agent must not access
+world-private files. The Studio launcher does not claim research isolation.
+
+Set `WORLD_CONTROL_TOKEN` through trusted environment/secret settings before
+starting; non-loopback binding requires it. Do not put its value in Compose,
+images, run configuration or saved startup commands. From the repository root:
+
+```bash
+docker build --target world --tag landing-party-world:0.1 .
+docker compose -f deploy/compose.studio.yml up -d
+docker compose -f deploy/compose.studio.yml ps
+```
+
+Open `http://127.0.0.1:7777`, sign in with the instance operator token, then use
+Settings and Harnesses. The world image includes Node 22 and npm. Native CLI
+packages are installed into private persistent storage only after an explicit
+Install action, at the versions pinned by the harness registry. No install,
+provider validation, login or paid run occurs automatically. API keys are
+write-only through the UI and encrypted on disk; this does not protect them
+from a native process with the same OS authority. Subscription profiles stay in
+the persistent instance volume and subscription model dollars are unmeasured.
+
+For remote access, use an authenticated port forward or a trusted HTTPS reverse
+proxy to this one loopback port. Trust forwarded scheme/address headers only
+from that proxy; the operator session uses Secure cookies when served over
+HTTPS. If that proxy reaches the container through a bridge address, set
+`FORWARDED_ALLOW_IPS` to its exact trusted address before launching Compose;
+the default is `127.0.0.1`. Do not use `*` for untrusted ingress. Never publish
+the internal proxy or a Docker socket. The existing
+`--legacy-listeners` mode remains available for the separate research layout.
+
+This managed cloud's build may require the CA/proxy options in the Build section
+below. Its runtime also needs existing HTTP(S)\_PROXY settings and the resolved
+`WORLD_PLATFORM_PROXY_IP` when the platform uses the `proxy` hostname. Compose
+passes those outbound settings only into this trusted cooperative instance.
+
+To stop without deleting persistent settings and profiles:
+
+```bash
+docker compose -f deploy/compose.studio.yml down
+```
+
+Do not add `--volumes` unless intentionally discarding that private state.
+
+## Fenced research deployment
 
 The world has internet access; the agent shares an internal default-drop network
 namespace with a firewall sidecar. Only agent tools (7778), recorded proxy (8080)
@@ -17,6 +77,8 @@ docker build --target agent --tag landing-party-agent:0.1 .
 ```
 
 Images use Python 3.12.14, uv 0.12.23 and `uv sync --frozen --extra full --no-dev`.
+The world target also copies Node 22/npm from the official `node:22-bookworm-slim`
+image for opt-in Studio installs; the agent target does not include that stage.
 Debian Chromium, sandbox helper and NSS tools come from signed apt repositories
 over HTTPS. Downloads retain TLS verification. Source files are readable by the
 unprivileged users; newly created private runtime storage stays private. The
@@ -27,7 +89,7 @@ absent. Assigned instructions arrive through the run preamble, not a goal catalo
 Rebuild after source or lock changes.
 
 This managed cloud needs its public platform trust bundle and existing outbound
-HTTP(S)_PROXY values. The verified build uses a BuildKit secret for the public CA
+HTTP(S)\_PROXY values. The verified build uses a BuildKit secret for the public CA
 (no private key):
 
 ```bash
@@ -101,9 +163,9 @@ world CA into its NSS database.
 
 Upstream profile sources fetched with verified HTTPS:
 
-| Source | Download SHA-256 before local edits |
-| --- | --- |
-| [Moby default](https://raw.githubusercontent.com/moby/profiles/main/seccomp/default.json) | `6416b47770785a41ac59073cdc77d9fe98517df2799dc83ef207e622de3053f6` |
+| Source                                                                                                                                  | Download SHA-256 before local edits                                |
+| --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| [Moby default](https://raw.githubusercontent.com/moby/profiles/main/seccomp/default.json)                                               | `6416b47770785a41ac59073cdc77d9fe98517df2799dc83ef207e622de3053f6` |
 | [Playwright v1.64 namespace guidance](https://raw.githubusercontent.com/microsoft/playwright/v1.64.0/utils/docker/seccomp_profile.json) | `cc3e61cabda6bbc1e53e54d27ba4d55a9d3be829b6dd1a596f4a7b31b1cc7849` |
 
 The vendored file is authoritative; verification records its hash and image ID.
@@ -128,7 +190,7 @@ external writes. Research mode begins in preflight, withholds agent capability,
 and starts the episode clock only after activation.
 
 This cloud also needs `WORLD_PLATFORM_PROXY_IP` resolved as above and its existing
-HTTP(S)_PROXY environment when launching Compose. Those upstream proxy settings
+HTTP(S)\_PROXY environment when launching Compose. Those upstream proxy settings
 go only to the trusted world service; they are separate from the agent's scoped
 world proxy. Other environments may use direct world egress or their own reviewed
 outbound proxy. The optional `proxy` host alias defaults to loopback when unused.

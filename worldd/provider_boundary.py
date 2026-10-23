@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import os
 import re
 from decimal import Decimal, InvalidOperation
 from email import policy
@@ -27,7 +26,10 @@ from .util import blocked, digest, identifier
 
 def _mail_body_authorized(world, run_id, request, approved):
     """Mask only exact approved envelope addresses; scan every content field."""
-    from .scanning import contains_sensitive_data
+    from .scanning import contains_configured_secret, contains_sensitive_data
+
+    settings = getattr(world, "instance_settings", None)
+    extra_secrets = settings.secret_values() if settings else ()
 
     recipient, sender = approved.get("recipient"), approved.get("sender")
     if not recipient or not sender:
@@ -64,14 +66,8 @@ def _mail_body_authorized(world, run_id, request, approved):
         sanitized["to"] = "[approved recipient]"
     else:
         return False
-    for name, secret in os.environ.items():
-        if (
-            name.startswith("WORLD_")
-            and name.endswith(("_KEY", "_TOKEN", "_SECRET"))
-            and len(secret) >= 8
-            and secret in scan_text
-        ):
-            return False
+    if contains_configured_secret(scan_text, extra_secrets=extra_secrets):
+        return False
     for header in ("authorization", "x-api-key"):
         credential = request.headers.get(header, "").split(" ", 1)[-1]
         if len(credential) >= 8 and credential in scan_text:
@@ -82,7 +78,13 @@ def _mail_body_authorized(world, run_id, request, approved):
         for candidate in re.findall(r"[A-Za-z0-9_-]{40,}", scan_text)
     ):
         return False
-    return not contains_sensitive_data(json.dumps(sanitized, ensure_ascii=False))
+    scanner = getattr(world, "contains_sensitive_data", None)
+    serialized = json.dumps(sanitized, ensure_ascii=False)
+    return not (
+        scanner(serialized)
+        if scanner
+        else contains_sensitive_data(serialized, extra_secrets=extra_secrets)
+    )
 
 
 VENDOR_ENDPOINTS = {

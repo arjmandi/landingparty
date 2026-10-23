@@ -54,10 +54,17 @@ def create_app(
             signer=signer,
         )
     world = World(store, gateway, search_client=search_client)
+    from .instance_settings import InstanceSettings
+
+    world.instance_settings = InstanceSettings(store.data_dir)
+    if hasattr(gateway, "secret_resolver"):
+        gateway.secret_resolver = world.instance_settings.secret_values
+    world.model_pricing_base = prices if prices is not None else load_prices()
     from .breakers import BreakerService
     from .extensions import initialize
 
     initialize(world)
+    world.services["settings"] = world.instance_settings
     if "workspace_checkpoints" in world.services:
         store.ledger_observer = world.services["workspace_checkpoints"].observe_debit
     if "payments" in world.services:
@@ -95,6 +102,10 @@ def create_app(
         capabilities=world.capabilities,
         usage_observer=observe_usage,
         admission_guard=world.admission_guard,
+        credential_resolver=world.credential,
+        managed_output_limit=lambda run_id, model: world.services["harnesses"].output_limit(
+            run_id, model
+        ),
     )
     world.internal_model_token = internal_token
     world.lane = lane_router.lane_manager
@@ -103,6 +114,14 @@ def create_app(
     )
     app.state.lane_router = lane_router
     app.include_router(lane_router)
+    from .harnesses import HarnessService
+    from .studio import StudioService, create_studio_router
+
+    harnesses = HarnessService(world, settings=world.instance_settings)
+    auth = harnesses.auth
+    world.services.update(harness_auth=auth, harnesses=harnesses)
+    app.state.studio = StudioService(world, world.instance_settings, harnesses)
+    app.include_router(create_studio_router(app.state.studio))
     from .model_callbacks import configure_models
 
     configure_models(app, world, prices=prices)

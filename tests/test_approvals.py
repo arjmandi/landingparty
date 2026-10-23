@@ -238,10 +238,18 @@ async def test_payment_cancel_retains_unknown_spend_for_reconciliation(world):
     assert ledger.list_for_run(run_id)[0]["state"] == "uncertain"
 
 
+@pytest.mark.parametrize("saved_key", [False, True])
 async def test_https_broker_adapter_sends_idempotent_scoped_request_without_logging_key(
-    monkeypatch,
+    monkeypatch, tmp_path, saved_key
 ):
-    monkeypatch.setenv("WORLD_PAYMENT_API_KEY", "fixture-broker-secret")
+    from worldd.instance_settings import InstanceSettings
+
+    monkeypatch.delenv("WORLD_PAYMENT_API_KEY", raising=False)
+    settings = InstanceSettings(tmp_path)
+    if saved_key:
+        settings.update_provider("payment", api_key="fixture-broker-secret")
+    else:
+        monkeypatch.setenv("WORLD_PAYMENT_API_KEY", "fixture-broker-secret")
 
     def handler(request):
         assert str(request.url) == "https://broker.test/pay"
@@ -269,6 +277,10 @@ async def test_https_broker_adapter_sends_idempotent_scoped_request_without_logg
                 }
                 return await client.send(request, follow_redirects=False)
 
+        boundary = RecordedBoundary()
+        if saved_key:
+            boundary.credential = settings.resolve
+
         adapter = HTTPPaymentAdapter("https://broker.test/pay", client=client)
         receipt = await adapter.pay(
             merchant="https://merchant.test",
@@ -277,7 +289,7 @@ async def test_https_broker_adapter_sends_idempotent_scoped_request_without_logg
             action={"url": "https://merchant.test/article"},
             payment_id="mandate_fixture",
             context={
-                "world": RecordedBoundary(),
+                "world": boundary,
                 "run_id": "r_fixture",
                 "action_id": "a_payment",
                 "mandate_id": "mandate_fixture",
@@ -285,6 +297,7 @@ async def test_https_broker_adapter_sends_idempotent_scoped_request_without_logg
             },
         )
         assert receipt["receipt_ref"] == "actual_fixture_receipt"
+    settings.close()
     with pytest.raises(ValueError, match="HTTPS"):
         HTTPPaymentAdapter("http://insecure.test/pay")
 

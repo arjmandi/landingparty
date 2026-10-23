@@ -337,14 +337,14 @@ def create_lane_router(
     capabilities=None,
     usage_observer=None,
     admission_guard=None,
+    credential_resolver=None,
+    managed_output_limit=None,
 ) -> APIRouter:
     """Create a lane sharing the control plane's durable ledger."""
     router = APIRouter()
     manager = LaneManager()
     router.lane_manager = manager
     price_table = prices if prices is not None else load_prices()
-    models = price_table.get("models", price_table)
-    table_id = price_table_id(price_table, perception_prices=perception_prices)
 
     async def forward(request: Request, provider: str, endpoint: str, run_id: str | None = None):
         run_id = (
@@ -383,6 +383,22 @@ def create_lane_router(
             return _error(404, "unknown_run", "No such run")
         if run.get("state") != "running":
             return _error(409, "run_not_running", "This run cannot make model calls")
+        if run.get("config", {}).get("model_billing_mode") == "subscription":
+            return _error(
+                403,
+                "subscription_transport",
+                "Native subscription sessions do not use the API model lane",
+            )
+        active_prices = run.get("config", {}).get("model_pricing")
+        if active_prices is None:
+            # Existing runs predate editable settings and retain the base table.
+            # New runs carry the exact reviewed table frozen at creation.
+            active_prices = price_table
+        models = active_prices.get("models", active_prices)
+        table_id = price_table_id(
+            active_prices,
+            perception_prices=run.get("config", {}).get("perception_pricing", perception_prices),
+        )
         if admission_guard is not None:
             denial = admission_guard(run_id)
             if denial:
@@ -484,6 +500,36 @@ def create_lane_router(
             return _error(
                 400, "unpriced_context_tier", "Extended-context pricing is not in this price table"
             )
+        original_raw = raw
+        original_body = None
+        # Codex's Responses client omits an output bound. Only an authenticated,
+        # currently owned native session can use this declared compatibility
+        # envelope; arbitrary API clients still have to supply their own limit.
+        if (
+            managed_output_limit is not None
+            and valid_run_token
+            and provider == "openai"
+            and endpoint == "/v1/responses"
+            and not any(
+                name in body
+                for name in ("max_output_tokens", "max_completion_tokens", "max_tokens")
+            )
+        ):
+            limit = managed_output_limit(run_id, model)
+            if type(limit) is int and 0 < limit <= int(price["max_output_tokens"]):
+                original_body = body
+                body = {**body, "max_output_tokens": limit}
+                raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                store.append_record(
+                    run_id,
+                    "model_request_adapted",
+                    rule_id="managed_codex_output_limit",
+                    provider=provider,
+                    model=model,
+                    max_output_tokens=limit,
+                    original_request_hash=_hash(original_raw),
+                    forwarded_request_hash=_hash(raw),
+                )
         try:
             maximum = _maximum_cost(body, price)
         except (UsageError, KeyError, InvalidOperation) as exc:
@@ -504,12 +550,13 @@ def create_lane_router(
                 "Remaining budget cannot cover this call's maximum possible spend",
             )
 
-        root = os.getenv(
+        resolve = credential_resolver or os.getenv
+        root = resolve(
             f"WORLD_{provider.upper()}_UPSTREAM",
             "https://api.openai.com" if provider == "openai" else "https://api.anthropic.com",
         ).rstrip("/")
         url = root + endpoint
-        secret = os.getenv(f"WORLD_{provider.upper()}_API_KEY")
+        secret = resolve(f"WORLD_{provider.upper()}_API_KEY")
         outgoing_headers = {"content-type": "application/json"}
         if provider == "openai":
             auth = (None if frontend_auth else request.headers.get("authorization")) or (
@@ -674,6 +721,8 @@ def create_lane_router(
                 "request": _redact(body, secrets),
                 "response": _redact(captured.decode("utf-8", errors="replace"), secrets),
             }
+            if original_body is not None:
+                output["original_request"] = _redact(original_body, secrets)
             serialized = json.dumps(output, ensure_ascii=False).encode("utf-8")
             target.write_bytes(serialized)
             target.chmod(0o600)

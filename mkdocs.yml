@@ -19,6 +19,7 @@ exclude_docs: |
   integrations-audit.md
   runtime-audit.md
   verification.md
+  studio-ui-verification.md
 
 validation:
   nav:
@@ -33,6 +34,9 @@ hooks:
 nav:
   - Home: index.md
   - Getting started: getting-started.md
+  - Using the app: product-experience.md
+  - Harness library: native-harnesses.md
+  - Single-origin hosting: studio-origin.md
   - Fenced deployment: deployment.md
   - Design: design.md
   - World services:

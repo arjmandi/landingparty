@@ -594,9 +594,18 @@ def render_report(report: dict) -> str:
             f"world actions: {activity.get('world_actions', 0)}; model calls: {activity.get('model_calls', 0)}."
         ),
         "",
-        "| Category | USD |",
-        "|---|---:|",
     ]
+    if report.get("billing", {}).get("mode") == "subscription":
+        lines.extend(
+            [
+                (
+                    "Subscription model dollars are unmeasured. Recorded spend and the dollar cap "
+                    "cover World tools only; provider plan limits remain separate."
+                ),
+                "",
+            ]
+        )
+    lines.extend(["| Category | USD |", "|---|---:|"])
     lines.extend(f"| {key} | {value:.9f} |" for key, value in costs.get("by_category", {}).items())
     if not costs.get("by_category"):
         lines.append("| No recorded debits | 0.000000000 |")
