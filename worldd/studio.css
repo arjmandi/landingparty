@@ -26,3 +26,4 @@ h1,h2,h3,.tag{overflow-wrap:anywhere}.tag{max-width:100%}#run-setup{margin-botto
 .deposit-form{display:grid;grid-template-columns:120px minmax(0,1fr);gap:10px 12px;align-items:end}.deposit-form .wide{grid-column:1/-1}.deposit-form label{font-size:11px}
 @media(max-width:600px){.shape-choice,.deposit-form{grid-template-columns:1fr}}
 @media(max-width:780px){.list-label{display:none}}
+.model-list{list-style:none;margin:4px 0 12px;padding:0;display:grid;gap:3px;font-family:var(--mono);font-size:12px;color:var(--soft)}.model-list .muted{color:var(--muted)}.harness-card h4{margin:12px 0 2px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}.harness-card .detail-tags{margin:2px 0 8px}

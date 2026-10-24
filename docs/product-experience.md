@@ -7,13 +7,16 @@ your own world. The advanced console remains at `/bridge`.
 
 ## Beam down and follow a life or a run
 
-1. Open **Settings** to check model access and provider configuration. Supply
-   credentials through the protected settings flow or the server's environment;
-   do not put keys in goals, chat, or workspace files.
-2. Choose a supported integration in the **Harness Library**. Its installation
-   and connection controls describe what is available on this host. A configured
-   integration is separate from a running agent.
-3. Beam down a life with its model, harness, starting balance, and session length;
+1. Open **Harnesses**. Each harness card shows whether it is native (shipped with
+   the world at its pinned version) or an add-on, and its two connections: its
+   provider's **API key**, entered on the card (write-only, shared by every use
+   of that provider in the instance), and its **subscription account**. Do not
+   put keys in goals, chat, or workspace files. **Settings** holds the world's
+   own services (search, perception, payments) and starting values.
+2. Each connection lists the exact models it can run, with reviewed prices and
+   effort levels. A configured connection is separate from a running agent.
+3. Beam down in this order: harness, connection, model, effort, then a life or a
+   single run with its starting balance and session length;
    an objective is optional and empty by default. A life rests between sessions,
    is stranded when its balance cannot cover a model call, and wakes on a
    deposit; it ends only when you beam it up or confirm an objective it claims.
@@ -48,12 +51,13 @@ charges enter the ledger and count against the recorded dollar allowance.
 Provider credentials stay with the world; the agent uses its scoped capability.
 
 **Subscription mode** connects supported native clients using the operator's
-own client subscription. Subscription model dollars are **unmeasured** in the
-application. A missing price is not a zero-dollar completion. The displayed
-dollar cap and remaining allowance cover recorded world-tool charges only;
-subscription limits and provider quotas remain separate. Actual captured token
-usage may be shown when the client reports it, without inferring a dollar price.
-This mode is a cooperative development workflow, not a metered research cell.
+own client subscription. Where the client's stream is verified (Claude Code),
+model dollars are **estimated** from its own usage reports at reviewed API
+prices and labelled estimated wherever they appear; elsewhere (Codex, for now)
+they are **unmeasured**, and the dollar cap covers recorded world-tool charges
+only. A missing price is not a zero-dollar completion. Subscription limits and
+provider quotas remain separate. This mode is a cooperative development
+workflow, not a metered research cell.
 
 Billing mode is explicit on each run. A recorded ledger total is distinguished
 from a full model-and-tools total; the latter remains unavailable for native

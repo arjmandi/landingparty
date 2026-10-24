@@ -59,44 +59,75 @@ async def main():
     connect_attempts, check_attempts = 0, 0
     started = []
 
+    def model_rows(estimated):
+        return [
+            {
+                "id": "claude-fixture-priced",
+                "label": "Priced fixture",
+                "group": "current",
+                "input_usd": "3",
+                "output_usd": "15",
+                "priced": True,
+                "served": None,
+                "selectable": True,
+                "efforts": ["low", "medium", "high"],
+                "default_effort": "medium",
+            },
+            {
+                "id": "claude-unpriced-fixture",
+                "label": "claude-unpriced-fixture",
+                "group": "earlier",
+                "input_usd": None,
+                "output_usd": None,
+                "priced": False,
+                "served": None,
+                "selectable": False,
+                "efforts": [],
+                "default_effort": None,
+            },
+        ]
+
     def catalog():
+        key_ready = installed and settings["credentials"]["anthropic"]["configured"]
         return {
             "harnesses": [
                 {
                     "id": "claude-code",
                     "name": "Claude Code",
                     "description": "Native coding agent.",
+                    "kind": "native",
+                    "provider": "anthropic",
+                    "pinned_version": "fixture-1",
+                    "transcript": "claude-stream-json",
+                    "efforts": ["low", "medium", "high", "xhigh", "max"],
                     "installed": installed,
                     "version": "fixture-1" if installed else None,
                     "install_status": {"state": "installed" if installed else "not_started"},
                     "requirements": {"node": True, "npm": True},
                     "connection": connection,
-                    "models": [
-                        {
-                            "id": "claude-fixture-priced",
-                            "label": "Priced fixture",
-                            "auth_modes": ["api_key"],
-                        },
-                        {"id": "", "label": "Account default", "auth_modes": ["subscription"]},
-                        {"id": "sonnet", "label": "Sonnet", "auth_modes": ["subscription"]},
-                    ],
-                    "modes": [
+                    "connections": [
                         {
                             "id": "api_key",
-                            "label": "API key",
-                            "ready": installed
-                            and settings["credentials"]["anthropic"]["configured"],
-                            "reason": "Configure the provider API key in Settings.",
-                            "billing": {"label": "Metered API usage"},
+                            "label": "Anthropic API key",
+                            "configured": settings["credentials"]["anthropic"]["configured"],
+                            "ready": key_ready,
+                            "reason": None
+                            if key_ready
+                            else "Add your Anthropic API key on this harness.",
+                            "billing": {"kind": "metered", "label": "Metered API"},
+                            "models": model_rows(False),
                         },
                         {
                             "id": "subscription",
                             "label": "Subscription account",
+                            "configured": connected,
                             "ready": installed and connected,
                             "reason": None if connected else "Connect your subscription account.",
                             "billing": {
-                                "label": "Provider subscription · model dollars unmeasured"
+                                "kind": "estimated",
+                                "label": "Provider subscription · model dollars estimated",
                             },
+                            "models": model_rows(True),
                         },
                     ],
                 }
@@ -167,14 +198,15 @@ async def main():
             elif path == "/api/settings":
                 if request.method == "POST":
                     assert body["revision"] == settings["revision"]
-                    if body["credentials"]:
+                    if body.get("credentials"):
                         assert body["credentials"] == {"anthropic_api_key": secret}
                     if fail_save:
                         fail_save = False
                         await route.fulfill(status=400, json={"detail": "Do not display " + secret})
                         return
-                    settings["settings"].update(body["settings"])
-                    settings["credentials"]["anthropic"]["configured"] = True
+                    settings["settings"].update(body.get("settings", {}))
+                    if body.get("credentials"):
+                        settings["credentials"]["anthropic"]["configured"] = True
                     settings["revision"] += 1
                     settings["setup_complete"] = True
                 result = settings
@@ -217,7 +249,8 @@ async def main():
                 result = connection
             elif path == "/api/runs":
                 if request.method == "POST":
-                    assert body["auth_mode"] == "subscription" and body["model"] == ""
+                    assert body["auth_mode"] == "subscription"
+                    assert body["model"] == "claude-fixture-priced" and body["effort"] == "high"
                     assert set(body["packs"]) == {"deliver", "belief", "footprint"}
                     assert body["goal"] == malicious
                     assert body["reply_policy"] == "blockers_only"
@@ -228,7 +261,7 @@ async def main():
                             "goal": body["goal"],
                             "state": "running",
                             "harness_id": "claude-code",
-                            "model": None,
+                            "model": body["model"],
                             "budget_usd": 20,
                             "pending_asks": 1,
                             "spent_usd": None,
@@ -378,35 +411,42 @@ async def main():
         ]
         await page.get_by_role("button", name="Beam down with this connection").click()
         await page.locator("#new-run-dialog[open]").wait_for()
+        order = await page.evaluate(
+            "['#run-harness','#run-mode','#run-model','#run-effort','#shape-life','#run-budget']"
+            ".map(id=>document.querySelector(id)).every((item,index,all)=>index===0||"
+            "Boolean(all[index-1].compareDocumentPosition(item)&Node.DOCUMENT_POSITION_FOLLOWING))"
+        )
+        checks["dialog_order_harness_connection_model_effort_then_rest"] = order
         checks["subscription_life_is_estimated_on_priced_models"] = (
             await page.locator("#shape-life").is_checked()
             and not await page.locator("#shape-life").is_disabled()
             and "estimated" in await page.locator("#shape-note").inner_text()
-            and await page.locator("#run-models option").evaluate_all(
-                "(items)=>items.map(item=>item.value)"
+            and await page.locator("#run-model option").evaluate_all(
+                "(items)=>items.map(item=>[item.value,item.disabled])"
             )
-            == ["claude-fixture-priced"]
+            == [["claude-fixture-priced", False], ["claude-unpriced-fixture", True]]
             and await page.locator("#run-model").input_value() == "claude-fixture-priced"
+            and await page.locator("#run-model optgroup").evaluate_all(
+                "(items)=>items.map(item=>item.label)"
+            )
+            == ["Current", "Earlier"]
         )
-        await page.locator("#run-model").fill("claude-unpriced-fixture")
-        unpriced_life_blocked = await page.locator("#launch-button").is_disabled()
+        checks["effort_offers_the_models_levels"] = await page.locator(
+            "#run-effort option"
+        ).evaluate_all("(items)=>items.map(item=>item.value)") == ["", "low", "medium", "high"]
+        await page.locator("#run-effort").select_option("high")
         await page.locator("#shape-run").check()
-        checks["switching_to_a_run_restores_launch"] = (
-            unpriced_life_blocked and not await page.locator("#launch-button").is_disabled()
+        checks["subscription_single_run_still_available"] = (
+            await page.locator("#shape-run").is_checked()
+            and not await page.locator("#launch-button").is_disabled()
         )
-        checks["subscription_blank_model_allowed"] = await page.locator(
-            "#run-model"
-        ).input_value() == "" and not await page.locator("#run-model").get_attribute("required")
-        checks["model_lists_match_billing_mode"] = await page.locator(
-            "#run-models option"
-        ).evaluate_all("(items)=>items.map(item=>item.value)") == ["", "sonnet"]
-        checks["subscription_single_run_still_available"] = await page.locator(
-            "#shape-run"
-        ).is_checked()
         await page.get_by_text("Add an objective").click()
         await page.get_by_role("textbox", name="Objective").fill(malicious)
         await page.locator("#launch-button").click()
         await page.get_by_text("Model dollars are unavailable.", exact=False).wait_for()
+        checks["launch_sends_exact_model_and_effort"] = (
+            started[-1]["model"] == "claude-fixture-priced" and started[-1]["effort"] == "high"
+        )
         checks["subscription_real_world_cost_unmeasured_model"] = (
             "$0.025" in await page.locator(".metric-value").first.inner_text()
             or "$0.03" in await page.locator(".metric-value").first.inner_text()
@@ -441,40 +481,41 @@ async def main():
         checks["active_human_ticket_released"] = [
             body["active"] for _, path, body in calls if path.endswith("/touch")
         ][-1] is False
-        await page.locator("[data-page=settings]").click()
-        await page.get_by_label("Anthropic API key", exact=True).fill(secret)
+        await page.locator("[data-page=harnesses]").click()
+        key = page.locator("#key-claude-code")
+        await key.fill(secret)
+        await page.wait_for_timeout(5200)
+        checks["key_draft_survives_harness_polls"] = await key.input_value() == secret
         fail_save = True
-        await page.get_by_role("button", name="Save workspace settings", exact=True).click()
-        await page.get_by_text("Settings could not be saved.", exact=False).wait_for()
+        await page.get_by_role("button", name="Save key", exact=True).click()
+        await page.get_by_text("could not be saved", exact=False).wait_for()
         checks["secret_cleared_on_failure_never_echoed"] = (
-            await page.get_by_label("Anthropic API key", exact=True).input_value() == ""
+            await page.locator("#key-claude-code").input_value() == ""
             and secret not in await page.locator("body").inner_text()
         )
-        await page.get_by_label("Anthropic API key", exact=True).fill(secret)
-        await page.get_by_role("button", name="Save workspace settings", exact=True).click()
-        await page.get_by_text("Settings saved.", exact=False).wait_for()
-        checks["write_only_key_settings"] = (
-            await page.get_by_label("Anthropic API key", exact=True).input_value() == ""
+        await page.locator("#key-claude-code").fill(secret)
+        await page.get_by_role("button", name="Save key", exact=True).click()
+        await page.get_by_text("API key saved.", exact=False).wait_for()
+        checks["write_only_key_on_its_harness"] = (
+            await page.locator("#key-claude-code").input_value() == ""
             and secret not in await page.locator("body").inner_text()
+            and settings["credentials"]["anthropic"]["configured"]
         )
+        await page.locator("[data-page=settings]").click()
+        await page.locator("#setting-default_model").wait_for()
+        checks["settings_hold_no_model_keys"] = await page.get_by_label(
+            "Anthropic API key", exact=True
+        ).count() == 0 and await page.locator("#setting-default_model option").evaluate_all(
+            "(items)=>items.map(item=>item.value)"
+        ) == ["claude-fixture-priced"]
         await page.locator("#new-run-top").click()
         await page.locator("#run-mode").select_option("api_key")
         checks["api_model_exact_priced"] = (
-            await page.locator("#run-models option").evaluate_all(
-                "(items)=>items.map(item=>item.value)"
-            )
-            == ["claude-fixture-priced"]
-            and await page.locator("#run-model").input_value() == "claude-fixture-priced"
+            await page.locator("#run-model").input_value() == "claude-fixture-priced"
+            and await page.locator("#run-model option[value=claude-unpriced-fixture]").is_disabled()
+            and "$3 in · $15 out per MTok" in await page.locator("#model-note").inner_text()
+            and not await page.locator("#launch-button").is_disabled()
         )
-        await page.locator("#run-model").fill("claude-unpriced-fixture")
-        checks["unpriced_model_flagged_at_field"] = (
-            "no reviewed price" in await page.locator("#model-note").inner_text()
-            and await page.locator("#launch-button").is_disabled()
-        )
-        await page.locator("#run-model").fill("claude-fixture-priced")
-        checks["priced_model_restores_launch"] = not await page.locator(
-            "#launch-button"
-        ).is_disabled()
         await page.get_by_role("button", name="Close beam-down", exact=True).click()
         await page.locator("[data-page=runs]").click()
         await page.get_by_role("button", name="Beam up", exact=True).click()
