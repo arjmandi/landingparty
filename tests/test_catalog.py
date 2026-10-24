@@ -38,3 +38,10 @@ def test_catalog_labels_do_not_change_the_price_table_identity(monkeypatch, tmp_
     monkeypatch.setenv("WORLD_MODEL_CATALOG", str(edited))
     assert load_catalog() == {"models": {}, "effort_levels": []}
     assert price_table_id(load_prices(), perception_prices={}) == before
+
+
+def test_each_recommended_model_is_a_current_priced_model_of_its_provider():
+    catalog, prices = load_catalog(), load_prices()["models"]
+    for provider, model in catalog["recommended"].items():
+        assert prices[model]["provider"] == provider
+        assert catalog["models"][model]["group"] == "current"

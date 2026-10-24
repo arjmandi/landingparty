@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "note": "Catalog metadata for people choosing a model: labels, groups and effort levels. Prices live in prices.json; this file is outside price_table_id. Groups: current, earlier, retired (never offered for new work).",
+  "note": "Catalog metadata for people choosing a model: labels, groups and effort levels. Prices live in prices.json; this file is outside price_table_id. Groups: current, earlier, retired (never offered for new work). recommended names each provider's model a new life or run starts on when no default is saved.",
   "reviewed_at": "2026-10-24",
   "sources": {
     "anthropic": "https://platform.claude.com/docs/en/about-claude/models/overview"
@@ -13,6 +13,9 @@
     "max",
     "ultra"
   ],
+  "recommended": {
+    "anthropic": "claude-sonnet-5-5"
+  },
   "models": {
     "claude-fable-5-1": {
       "label": "Claude Fable 5.1",

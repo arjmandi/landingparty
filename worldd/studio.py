@@ -225,6 +225,7 @@ class StudioService:
             ]
             item.update(
                 provider=item["provider"],
+                recommended_model=self.model_catalog.get("recommended", {}).get(item["provider"]),
                 kind=item.get("kind", "add-on"),
                 description=item.get("description")
                 or f"{provider_name}'s native coding agent with your world tools.",
