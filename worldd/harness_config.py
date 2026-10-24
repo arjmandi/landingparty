@@ -28,7 +28,23 @@ class HarnessManifest:
     version_args: tuple[str, ...] = ("--version",)
     launcher: Callable | None = None
     auth_modes: tuple[str, ...] = ("api_key", "subscription")
+    # Native harnesses ship with the world at their pins; an add-on is a trusted
+    # developer's registry entry. Neither can be supplied over HTTP or the UI.
+    kind: str = "add-on"
+    # Whose models and API key the harness uses; an API key belongs to its provider.
+    provider: str | None = None
+    # Effort levels the client accepts; a model's own levels narrow them.
+    efforts: tuple[str, ...] = ()
+    # The client stream a transcript meter reads, once a real one has been verified.
+    transcript: str | None = None
+    description: str = ""
+    # Harnesses this one plays through: its connections, models and account are theirs.
+    hosts: tuple[str, ...] = ()
+    # Trusted server variables the client itself needs (ASSAY's interpreter).
+    passthrough: tuple[str, ...] = ()
 
+
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 BUILTINS = (
     HarnessManifest(
@@ -38,9 +54,51 @@ BUILTINS = (
         "@anthropic-ai/claude-code",
         "2.1.308",
         "WORLD_CLAUDE_CLI",
+        kind="native",
+        provider="anthropic",
+        efforts=EFFORTS,
+        transcript="claude-stream-json",
+        description="Anthropic's native coding agent with your world tools.",
     ),
-    HarnessManifest("codex", "Codex", "codex", "@openai/codex", "0.163.0", "WORLD_CODEX_CLI"),
+    HarnessManifest(
+        "codex",
+        "Codex",
+        "codex",
+        "@openai/codex",
+        "0.163.0",
+        "WORLD_CODEX_CLI",
+        kind="native",
+        provider="openai",
+        efforts=(*EFFORTS, "ultra"),
+        description="OpenAI's native coding agent with your world tools.",
+    ),
+    HarnessManifest(
+        "assay",
+        "ASSAY",
+        "assay",
+        None,
+        "1.5.1",
+        "WORLD_ASSAY_CLI",
+        version_args=("version",),
+        auth_modes=(),
+        kind="native",
+        description="Prediction-gated play: every world action carries the player's "
+        "prediction, which ASSAY grades against the world's reply and journals.",
+        hosts=("claude-code",),
+        passthrough=("ASSAY_PYTHON",),
+    ),
 )
+
+
+def harness_account(harness_id: str) -> str:
+    """Whose signed-in account a configured harness uses: its host's, when it plays on one.
+
+    A configured id is `name@version/connection`, or `name@version+host@version/connection`
+    for a harness that plays through another (ASSAY on Claude Code).
+    """
+    name, _, version = harness_id.split("/", 1)[0].partition("@")
+    host = version.partition("+")[2]
+    return host.partition("@")[0] if host else name
 
 
 def identifier(value, name="identifier"):
@@ -173,8 +231,21 @@ def launch_configuration(
     agent_url,
     lane_url,
     environment,
+    stream_usage=False,
+    effort=None,
+    player=None,
 ):
-    """Return argv/env/stdin; only the constructor's trusted registry can add launchers."""
+    """Return argv/env/stdin; only the constructor's trusted registry can add launchers.
+
+    ``stream_usage`` asks the client for each message's final usage as it streams,
+    which a transcript-metered session needs to price every message exactly.
+    ``effort`` is passed to the client as chosen; None leaves the client's default.
+    ``player`` makes the session a player for a harness that plays through this one
+    (ASSAY): no world tool server and no run capability, that harness's hooks and
+    permissions in the settings, its environment and its briefing.
+    """
+    if effort is not None and effort not in manifest.efforts:
+        raise ValueError("This harness does not accept that effort level")
     home = root / "home"
     home.mkdir(mode=0o700)
     env = base_environment(environment, home)
@@ -183,6 +254,8 @@ def launch_configuration(
         WORLD_RUN_TOKEN=run_info["run_token"],
         WORLD_BASE_URL=agent_url,
     )
+    if run_info.get("lane_token"):
+        env["WORLD_LANE_TOKEN"] = run_info["lane_token"]
     proxy = run_info.get("proxy", {})
     if proxy.get("server") and proxy.get("ca_path"):
         address = urlsplit(proxy["server"])
@@ -238,6 +311,15 @@ def launch_configuration(
             env["CLAUDE_CONFIG_DIR"] = str(profile)
         else:
             env["CLAUDE_CONFIG_DIR"] = str(home / ".claude")
+        if player:
+            # The player reaches the world only through the harness it plays for.
+            binding["world.mcp.json"] = {"mcpServers": {}}
+            binding["world.settings.json"]["permissions"] = {
+                "deny": ["WebSearch", "WebFetch"],
+                "allow": list(player["allow"]),
+            }
+            binding["world.settings.json"]["hooks"] = player["hooks"]
+            prompt = player["prompt"]
         configure.write_binding(root, binding)
         argv = runner.command(root, "")
         argv[0] = binary
@@ -245,7 +327,14 @@ def launch_configuration(
         del argv[2]
         if auth_mode == "api_key":
             env = runner.runtime_environment(root, env)
+        if player:
+            env.pop("WORLD_RUN_TOKEN", None)
+            env.update(player["env"])
         argv += ["--setting-sources", "", "--no-session-persistence"]
+        if stream_usage:
+            argv.append("--include-partial-messages")
+        if effort:
+            argv += ["--effort", effort]
         if model:
             argv += ["--model", model]
         return argv, env, prompt.encode()
@@ -276,6 +365,7 @@ def launch_configuration(
         "shell_environment_policy.inherit": "none",
     }
     if auth_mode == "api_key":
+        lane_variable = "WORLD_LANE_TOKEN" if run_info.get("lane_token") else "WORLD_RUN_TOKEN"
         codex_home = home / ".codex"
         codex_home.mkdir(mode=0o700)
         env["CODEX_HOME"] = str(codex_home)
@@ -284,16 +374,18 @@ def launch_configuration(
                 "model_provider": "landingparty",
                 "model_providers.landingparty.name": "LandingParty",
                 "model_providers.landingparty.base_url": lane_url.rstrip("/") + "/openai/v1",
-                "model_providers.landingparty.env_key": "WORLD_RUN_TOKEN",
+                "model_providers.landingparty.env_key": lane_variable,
                 "model_providers.landingparty.wire_api": "responses",
                 "model_providers.landingparty.env_http_headers": {
-                    "X-World-Run-Token": "WORLD_RUN_TOKEN",
+                    "X-World-Run-Token": lane_variable,
                     "X-World-Run-Id": "WORLD_RUN_ID",
                 },
             }
         )
     else:
         env["CODEX_HOME"] = str(profile)
+    if effort:
+        config["model_reasoning_effort"] = effort
 
     # JSON scalar/array syntax is also TOML syntax for these fixed values.
     def toml(value):

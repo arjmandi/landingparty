@@ -85,6 +85,10 @@ class RunConfig(StrictModel):
     # How model spend reaches the ledger: priced at the lane, or estimated from the
     # native client's own transcript when a subscription bypasses the lane.
     model_metering: Literal["lane", "transcript"] = "lane"
+    # The reasoning effort passed to a native client; None leaves the client's default.
+    effort: Literal["low", "medium", "high", "xhigh", "max", "ultra"] | None = None
+    # A harness's own registered settings (ASSAY's paid-action cap); empty for most.
+    harness_options: dict[str, int] = Field(default_factory=dict)
     native_output_token_limit: int = Field(default=4096, gt=0, le=1000000, strict=True)
     model_value_document_id: str | None = None
     policy_id: str | None = None

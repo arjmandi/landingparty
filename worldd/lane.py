@@ -6,8 +6,9 @@ they are never recorded. Requests identify their run with X-World-Run-Id,
 X-Run-Id, the run_id query parameter, or a /lane/{run_id}/... URL.
 
 Streaming Chat calls must request stream_options.include_usage. All calls
-must supply a maximum output token count. A conservative full-context input
-reservation bounds cost even when the provider fetches remote images. Holds
+must supply a maximum output token count. An Anthropic call's input is bounded
+by the provider's own token count plus a margin; otherwise, and whenever the
+provider loads remote media itself, the full context window is reserved. Holds
 are released only after complete, validated usage; interrupted/ambiguous calls
 taint and freeze the run and retain their hold for operator reconciliation.
 """
@@ -112,6 +113,13 @@ def load_prices() -> dict:
     return json.loads(source.read_text())
 
 
+def load_catalog() -> dict:
+    """Labels, groups and effort levels; kept outside the price table's identity."""
+    configured = os.getenv("WORLD_MODEL_CATALOG")
+    source = Path(configured) if configured else Path(__file__).parents[1] / "policy/models.json"
+    return json.loads(source.read_text())
+
+
 WORLD_TOOL_PRICES = {
     "search_usd_per_call": "0.005",
     "exa_search_usd_per_call": "0.005",
@@ -188,7 +196,28 @@ def normalize_usage(provider: str, usage: dict) -> dict[str, int]:
     }
 
 
+PROMPT_CLASSES = ("input", "cache_read", "cache_write", "cache_write_1h")
+
+
+def tier_rates(price: dict, prompt_tokens: int | None) -> dict:
+    """The rates for one call: a long prompt pays the row's long-context tier.
+
+    ``prompt_tokens=None`` asks for the highest tier, which bounds a reservation.
+    """
+    tier = price.get("long_context")
+    if not tier:
+        return price
+    if not isinstance(tier, dict):
+        raise UsageError("Invalid pinned long-context tier")
+    threshold = _count(tier.get("above_prompt_tokens"), "long_context.above_prompt_tokens")
+    if prompt_tokens is not None and prompt_tokens <= threshold:
+        return price
+    return {**price, **{key: value for key, value in tier.items() if key != "above_prompt_tokens"}}
+
+
 def usage_cost(usage: dict[str, int], price: dict) -> Decimal:
+    """Price one call's usage; a tiered row is priced by this call's own prompt."""
+    price = tier_rates(price, sum(_count(usage.get(name, 0), name) for name in PROMPT_CLASSES))
     total = Decimal(0)
     for token_class, count in usage.items():
         count = _count(count, token_class)
@@ -204,15 +233,50 @@ def usage_cost(usage: dict[str, int], price: dict) -> Decimal:
     return total
 
 
-def _maximum_cost(body: dict, price: dict) -> Decimal:
+# The provider's count is an estimate; the reservation keeps a margin above it.
+COUNT_MARGIN_TOKENS = 2048
+COUNTABLE_FIELDS = ("model", "messages", "system", "tools", "tool_choice", "thinking")
+
+
+def _remote_media(body: Any) -> bool:
+    """Content the provider loads itself (a URL or an uploaded file) is not countable here."""
+    if isinstance(body, dict):
+        source = body.get("source")
+        if isinstance(source, dict) and source.get("type") in {"url", "file"}:
+            return True
+        return any(_remote_media(value) for value in body.values())
+    return isinstance(body, list) and any(_remote_media(value) for value in body)
+
+
+async def _count_input_tokens(http, root: str, headers: dict, body: dict) -> int | None:
+    """Anthropic's own count of a request's input, or None to reserve the whole window."""
+    if any(key in body for key in ("mcp_servers", "container")) or _remote_media(body):
+        return None
+    try:
+        response = await http.post(
+            root + "/v1/messages/count_tokens",
+            headers=headers,
+            json={key: body[key] for key in COUNTABLE_FIELDS if key in body},
+        )
+        counted = response.json().get("input_tokens") if response.status_code == 200 else None
+    except (httpx.HTTPError, ValueError, AttributeError):
+        return None
+    return counted if type(counted) is int and counted >= 0 else None
+
+
+def _maximum_cost(body: dict, price: dict, *, input_tokens: int | None = None) -> Decimal:
     maximum = body.get(
         "max_completion_tokens", body.get("max_output_tokens", body.get("max_tokens"))
     )
     maximum = _count(maximum, "max_tokens/max_completion_tokens/max_output_tokens")
     if maximum == 0 or maximum > int(price["max_output_tokens"]):
         raise UsageError("Requested output token limit is outside the pinned model limits")
+    price = tier_rates(price, None)
     # Reserving the full declared input window also bounds server-loaded media.
     input_limit = _count(price.get("context_window"), "price.context_window")
+    if input_tokens is not None:
+        bound = input_tokens + max(COUNT_MARGIN_TOKENS, input_tokens // 10)
+        input_limit = min(input_limit, bound)
     rates = [
         Decimal(str(price.get(key, 0)))
         for key in ("input", "cache_read", "cache_write", "cache_write_1h")
@@ -362,14 +426,24 @@ def create_lane_router(
                 request.headers.get("x-world-internal-token", ""), internal_token
             )
         )
-        front_bearer = request.headers.get("authorization", "").removeprefix("Bearer ")
-        frontend_auth = bool(capabilities and capabilities.verify(run_id, front_bearer))
-        valid_run_token = bool(
-            frontend_auth
-            or (
+
+        def capability(token):
+            # The run's capability, or its lane-only one; the agent boundary takes only the first.
+            return bool(
                 capabilities
-                and capabilities.verify(run_id, request.headers.get("x-world-run-token", ""))
+                and (
+                    capabilities.verify(run_id, token)
+                    or (
+                        hasattr(capabilities, "verify_lane")
+                        and capabilities.verify_lane(run_id, token)
+                    )
+                )
             )
+
+        front_bearer = request.headers.get("authorization", "").removeprefix("Bearer ")
+        frontend_auth = capability(front_bearer)
+        valid_run_token = bool(
+            frontend_auth or capability(request.headers.get("x-world-run-token", ""))
         )
         if (
             getattr(request.app.state, "require_run_token", False)
@@ -534,22 +608,6 @@ def create_lane_router(
             maximum = _maximum_cost(body, price)
         except (UsageError, KeyError, InvalidOperation) as exc:
             return _error(400, "invalid_token_limit", str(exc))
-        reservation = store.reserve(run_id, maximum)
-        if reservation is None:
-            store.append_record(
-                run_id,
-                "model_refused",
-                rule_id="budget_exhausted",
-                provider=provider,
-                model=model,
-                reservation_usd=float(maximum),
-            )
-            return _error(
-                402,
-                "budget_exhausted",
-                "Remaining budget cannot cover this call's maximum possible spend",
-            )
-
         resolve = credential_resolver or os.getenv
         root = resolve(
             f"WORLD_{provider.upper()}_UPSTREAM",
@@ -575,6 +633,36 @@ def create_lane_router(
             )
             if request.headers.get("anthropic-beta"):
                 outgoing_headers["anthropic-beta"] = request.headers["anthropic-beta"]
+        # A million-token window reserved whole would strand a balance far above what
+        # one call can cost; the provider's own count bounds this call's input instead.
+        counted = None
+        if provider == "anthropic" and endpoint == "/v1/messages":
+            counter = client or httpx.AsyncClient(
+                timeout=httpx.Timeout(15, connect=5), follow_redirects=False
+            )
+            try:
+                counted = await _count_input_tokens(counter, root, outgoing_headers, body)
+            finally:
+                if client is None:
+                    await counter.aclose()
+            if counted is not None:
+                maximum = _maximum_cost(body, price, input_tokens=counted)
+        reservation = store.reserve(run_id, maximum)
+        if reservation is None:
+            store.append_record(
+                run_id,
+                "model_refused",
+                rule_id="budget_exhausted",
+                provider=provider,
+                model=model,
+                reservation_usd=float(maximum),
+            )
+            return _error(
+                402,
+                "budget_exhausted",
+                "Remaining budget cannot cover this call's maximum possible spend",
+            )
+
         secrets = [
             str(secret or ""),
             str(auth or "").removeprefix("Bearer "),
@@ -683,6 +771,7 @@ def create_lane_router(
                 usage=normal,
                 **upstream_provenance,
                 reservation_id=reservation,
+                reservation_input_tokens=counted,
                 usd=float(cost),
                 request_hash=_hash(raw),
                 price_table_id=table_id,

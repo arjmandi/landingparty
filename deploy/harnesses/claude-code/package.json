@@ -1,0 +1,8 @@
+{
+  "name": "landingparty-native-claude-code",
+  "private": true,
+  "description": "The pinned Claude Code client built into the world image.",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.308"
+  }
+}

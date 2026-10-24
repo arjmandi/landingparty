@@ -599,8 +599,12 @@ def render_report(report: dict) -> str:
         lines.extend(
             [
                 (
-                    "Subscription model dollars are unmeasured. Recorded spend and the dollar cap "
-                    "cover World tools only; provider plan limits remain separate."
+                    "Subscription model dollars are estimated from the session's own usage "
+                    "reports at pinned API prices. Recorded spend and the dollar cap cover the "
+                    "estimate and World tools; provider plan limits remain separate."
+                    if report["billing"].get("model_estimated_usd") is not None
+                    else "Subscription model dollars are unmeasured. Recorded spend and the "
+                    "dollar cap cover World tools only; provider plan limits remain separate."
                 ),
                 "",
             ]

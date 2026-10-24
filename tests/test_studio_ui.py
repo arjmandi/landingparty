@@ -48,8 +48,9 @@ def test_studio_secret_and_untrusted_content_boundaries():
     assert "api('/v1/acts'" not in source
     assert "Model dollars are unavailable" in source
     assert "Use a dedicated host or OS user" in source
-    assert "item.auth_modes.includes(mode?.id)" in source
-    assert "$('#run-model').required=!subscription" in source
+    # A model a connection cannot run (unpriced or not served) is listed but never chosen.
+    assert "option.disabled=!row.selectable" in source
+    assert "effort:String(data.get('effort')||'')||null" in source
     assert "packs.push('schedule')" not in source
 
 

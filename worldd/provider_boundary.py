@@ -75,6 +75,7 @@ def _mail_body_authorized(world, run_id, request, approved):
     capabilities = getattr(world, "capabilities", None)
     if capabilities and any(
         capabilities.verify(run_id, candidate)
+        or (hasattr(capabilities, "verify_lane") and capabilities.verify_lane(run_id, candidate))
         for candidate in re.findall(r"[A-Za-z0-9_-]{40,}", scan_text)
     ):
         return False

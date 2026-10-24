@@ -162,7 +162,7 @@ async def test_capture_caps_suppression_and_subscription_research_guard(native):
     assert service.logs(suppressed["session_id"])["suppressed"]
     assert not service.logs(suppressed["session_id"])["events"]
     info = create(research_mode="research", model_billing_mode="subscription")
-    with pytest.raises(ValueError, match="unmeasured"):
+    with pytest.raises(ValueError, match="not measured"):
         await service.launch(info, "fixture", auth_mode="subscription")
     mode[0] = "success"
     info = create(stage=1, model_billing_mode="subscription")
@@ -257,6 +257,98 @@ def test_builtin_binding_keeps_credentials_runtime_only(tmp_path, harness_id, au
         assert "X-World-Run-Token" in env["ANTHROPIC_CUSTOM_HEADERS"]
     else:
         assert "ANTHROPIC_CUSTOM_HEADERS" not in env and "ANTHROPIC_BASE_URL" not in env
+
+
+@pytest.mark.parametrize("stream_usage", [False, True])
+def test_an_estimated_claude_session_streams_each_messages_final_usage(tmp_path, stream_usage):
+    root = tmp_path / "binding"
+    root.mkdir()
+    definition = next(item for item in BUILTINS if item.id == "claude-code")
+    argv, _env, _prompt = launch_configuration(
+        definition,
+        "/trusted/native-cli",
+        root=root,
+        work=tmp_path,
+        run_info={"run_id": "r_fixture", "run_token": "capability", "preamble": "Briefing"},
+        model="known-model",
+        auth_mode="subscription",
+        profile=tmp_path / "official-profile",
+        agent_url="http://127.0.0.1:7777/agent",
+        lane_url="http://127.0.0.1:7777/model",
+        environment={"PATH": os.environ["PATH"]},
+        stream_usage=stream_usage,
+    )
+    assert ("--include-partial-messages" in argv) is stream_usage
+    assert argv[argv.index("--output-format") + 1] == "stream-json"
+
+
+@pytest.mark.parametrize(
+    ("harness_id", "expected"),
+    [
+        ("claude-code", ["--effort", "high"]),
+        ("codex", ["-c", 'model_reasoning_effort="high"']),
+    ],
+)
+def test_effort_reaches_each_client_in_its_own_form(tmp_path, harness_id, expected):
+    root = tmp_path / "binding"
+    root.mkdir()
+    definition = next(item for item in BUILTINS if item.id == harness_id)
+    options = {
+        "root": root,
+        "work": tmp_path,
+        "run_info": {"run_id": "r_fixture", "run_token": "capability", "preamble": "Briefing"},
+        "model": "known-model",
+        "auth_mode": "subscription",
+        "profile": tmp_path / "official-profile",
+        "agent_url": "http://127.0.0.1:7777/agent",
+        "lane_url": "http://127.0.0.1:7777/model",
+        "environment": {"PATH": os.environ["PATH"]},
+    }
+    argv, _env, _prompt = launch_configuration(
+        definition, "/trusted/native-cli", effort="high", **options
+    )
+    position = argv.index(expected[1])
+    assert argv[position - 1] == expected[0]
+    with pytest.raises(ValueError, match="effort"):
+        launch_configuration(definition, "/trusted/native-cli", effort="extreme", **options)
+
+
+async def test_a_run_launches_only_with_an_effort_its_harness_takes(native):
+    service, _world, create, _mode, _script = native
+    info = create(effort="high")
+    with pytest.raises(ValueError, match="effort"):
+        await service.launch(info, "fixture", model="fixture-model")
+
+
+@pytest.mark.parametrize("harness_id", ["claude-code", "codex"])
+def test_an_api_key_session_pays_for_models_with_the_lane_only_capability(tmp_path, harness_id):
+    root = tmp_path / "binding"
+    root.mkdir()
+    definition = next(item for item in BUILTINS if item.id == harness_id)
+    argv, env, _prompt = launch_configuration(
+        definition,
+        "/trusted/native-cli",
+        root=root,
+        work=tmp_path,
+        run_info={
+            "run_id": "r_fixture",
+            "run_token": "run-capability",
+            "lane_token": "lane-capability",
+            "preamble": "Briefing",
+        },
+        model="known-model",
+        auth_mode="api_key",
+        profile=tmp_path / "official-profile",
+        agent_url="http://127.0.0.1:7777/agent",
+        lane_url="http://127.0.0.1:7777/model",
+        environment={"PATH": os.environ["PATH"]},
+    )
+    assert env["WORLD_LANE_TOKEN"] == "lane-capability"
+    if harness_id == "claude-code":
+        assert env["ANTHROPIC_AUTH_TOKEN"] == "lane-capability"
+        assert "X-World-Run-Token: lane-capability" in env["ANTHROPIC_CUSTOM_HEADERS"]
+    else:
+        assert 'model_providers.landingparty.env_key="WORLD_LANE_TOKEN"' in argv
 
 
 async def test_explicit_pinned_installer_is_not_triggered_by_discovery(native, tmp_path):

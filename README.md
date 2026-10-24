@@ -13,8 +13,9 @@ for the complete local or VPS workflow.
 ## Start the Studio
 
 Use Python 3.12+, [uv](https://docs.astral.sh/uv/), and Node.js 22+ with npm on
-the machine running the world. The Library uses npm to install supported native
-clients; you do not need to install Codex or Claude globally first.
+the machine running the world. Outside Docker, the Harnesses page uses npm to
+install the supported native clients; you do not need to install Codex or Claude
+globally first. The Docker image builds them in at their pins.
 
 ```bash
 git clone https://github.com/arjmandi/landingparty.git
@@ -25,10 +26,11 @@ uv run --no-sync worldd --data-dir data
 
 Open `http://127.0.0.1:7777/`. Then:
 
-1. In **Library**, install Claude Code or Codex.
-2. Choose **Connect subscription** and complete the official provider sign-in,
-   or add your provider API key in **Settings**. Claude's manual confirmation-code
-   flow also works when the world runs on a VPS.
+1. In **Harnesses**, install Claude Code or Codex if the card asks (the Docker
+   image has both built in).
+2. On the harness's card, choose **Connect subscription** and complete the
+   official provider sign-in, or add the provider's API key. Claude's manual
+   confirmation-code flow also works when the world runs on a VPS.
 3. Beam down a life with the chosen harness, API connection, starting balance and
    session length, and no objective unless you add one. A life rests between
    sessions, is stranded (not ended) when its balance runs out, and wakes on a

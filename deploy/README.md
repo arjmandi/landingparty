@@ -28,13 +28,14 @@ docker compose -f deploy/compose.studio.yml ps
 ```
 
 Open `http://127.0.0.1:7777`, sign in with the instance operator token, then use
-Settings and Harnesses. The world image includes Node 22 and npm. Native CLI
-packages are installed into private persistent storage only after an explicit
-Install action, at the versions pinned by the harness registry. No install,
-provider validation, login or paid run occurs automatically. API keys are
-write-only through the UI and encrypted on disk; this does not protect them
-from a native process with the same OS authority. Subscription profiles stay in
-the persistent instance volume and subscription model dollars are unmeasured.
+Harnesses. The world image builds in the native harnesses at their pins, from
+the lockfiles in `deploy/harnesses/` (Claude Code 2.1.308, Codex 0.163.0), so
+they need no install step; Node 22 and npm remain for add-on installs into
+private persistent storage. No provider validation, login or paid run occurs
+automatically. API keys are entered on each harness's card, write-only and
+encrypted on disk; this does not protect them from a native process with the
+same OS authority. Subscription profiles stay in the persistent instance volume;
+Claude Code's subscription model dollars are estimated, Codex's unmeasured.
 
 For remote access, use an authenticated port forward or a trusted HTTPS reverse
 proxy to this one loopback port. Trust forwarded scheme/address headers only
@@ -78,7 +79,10 @@ docker build --target agent --tag landing-party-agent:0.1 .
 
 Images use Python 3.12.14, uv 0.12.23 and `uv sync --frozen --extra full --no-dev`.
 The world target also copies Node 22/npm from the official `node:22-bookworm-slim`
-image for opt-in Studio installs; the agent target does not include that stage.
+image, installs the native harnesses with `npm ci --ignore-scripts` from the
+committed lockfiles in `deploy/harnesses/`, verifies their pinned versions, and
+points `WORLD_CLAUDE_CLI` and `WORLD_CODEX_CLI` at them; the agent target does
+not include that stage.
 Debian Chromium, sandbox helper and NSS tools come from signed apt repositories
 over HTTPS. Downloads retain TLS verification. Source files are readable by the
 unprivileged users; newly created private runtime storage stays private. The

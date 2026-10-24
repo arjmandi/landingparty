@@ -317,6 +317,13 @@ class World:
                         if config.model_metering != "lane"
                         else {}
                     ),
+                    # Effort shapes the model's work; runs without one keep their id.
+                    **({"effort": config.effort} if config.effort else {}),
+                    **(
+                        {"harness_options": config.harness_options}
+                        if config.harness_options
+                        else {}
+                    ),
                     "operator_messages_allowed": config.operator_messages_allowed,
                     "human_rate_per_minute": config.human_rate_per_minute,
                     "max_in_flight": config.max_in_flight,
@@ -900,12 +907,7 @@ class World:
                 reserved=self.store.reserved(run_id),
             )
         if config.get("model_billing_mode") == "subscription":
-            state["billing"] = {
-                "mode": "subscription",
-                "model_usd": None,
-                "world_tools_usd": self.store.total_spent(run_id),
-                "dollar_cap_scope": "world_tools_only",
-            }
+            state["billing"] = self._subscription_billing(run_id, config)
         if config.get("life_id") and "lives" in self.services:
             life_status = self.services["lives"].status(config["life_id"])
             state.update(
@@ -1556,6 +1558,20 @@ class World:
             self.pending.discard(action_id)
             self.jobs.get(run_id, {}).pop(action_id, None)
 
+    def _subscription_billing(self, run_id, config):
+        """Subscription model dollars are never measured; a transcript run estimates them."""
+        estimated = config.get("model_metering") == "transcript"
+        model_estimate = self.store.spend(run_id).get("model.estimated", 0) if estimated else None
+        return {
+            "mode": "subscription",
+            "model_usd": None,
+            "model_estimated_usd": model_estimate,
+            "world_tools_usd": round(self.store.total_spent(run_id) - (model_estimate or 0), 9),
+            "dollar_cap_scope": "model_estimate_and_world_tools"
+            if estimated
+            else "world_tools_only",
+        }
+
     async def end_run(self, run_id, *, reason="agent_finished", truncated=False):
         async with self._lock(run_id):
             run = self.store.get_run(run_id)
@@ -1727,13 +1743,11 @@ class World:
             verification={"record": self.store.verify_record(run_id), "ledger": reconciliation},
             measurements=load_measurements(self.store, run_id),
         )
-        if self.store.get_run(run_id)["config"].get("model_billing_mode") == "subscription":
+        config = self.store.get_run(run_id)["config"]
+        if config.get("model_billing_mode") == "subscription":
             report["billing"] = {
-                "mode": "subscription",
-                "model_usd": None,
+                **self._subscription_billing(run_id, config),
                 "total_usd": None,
-                "world_tools_usd": self.store.total_spent(run_id),
-                "dollar_cap_scope": "world_tools_only",
                 "scientific_eligible": False,
             }
         if "judge_canaries" in self.services:

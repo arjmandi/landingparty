@@ -13,17 +13,21 @@ import re
 import shutil
 import signal
 from pathlib import Path
+from urllib.parse import urlsplit
 
+from .assay import AssayRun, assay_budget, player_prompt
 from .harness_config import (
     BUILTINS,
     base_environment,
     binary_path,
+    harness_account,
     identifier,
     launch_configuration,
     layout_context,
     model_name,
 )
 from .identity import VenueDB
+from .mcp import manifest_tools
 from .util import canonical, digest, now
 from .util import identifier as new_id
 
@@ -32,9 +36,27 @@ MAX_LOG = 2 * 1024 * 1024
 # A metered line is read whole, apart from the log's limits, so its usage is never cut off.
 METER_LINE = 8 * 1024 * 1024
 TERMINAL = {"completed", "failed", "stopped", "interrupted"}
+# How often an ASSAY run hears the world's running spend, and how much of its
+# notes is carried to the life's next session (ASSAY's own default cap).
+ASSAY_SPEND_INTERVAL_S = 60
+ASSAY_NOTES_CHARS = 16000
+# A partial-message stream keeps only what prices a message: its start and final usage.
+KEPT_STREAM_EVENTS = {"message_start", "message_delta"}
 SECRET_FIELD = re.compile(
     r"""(?i)(["']?(?:access_token|refresh_token|api_key|authorization|password|secret|WORLD_RUN_TOKEN)["']?\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s,}\n]+)"""
 )
+
+
+def _token_chunk(line: bytes) -> bool:
+    """A Claude partial-message chunk other than a message's start or final usage."""
+    if not line.startswith(b'{"type":"stream_event"'):
+        return False
+    try:
+        event = json.loads(line)
+    except ValueError:
+        return False
+    inner = event.get("event") if isinstance(event, dict) else None
+    return isinstance(inner, dict) and inner.get("type") not in KEPT_STREAM_EVENTS
 
 
 def _birth(pid):
@@ -94,6 +116,8 @@ class HarnessService(VenueDB):
         self._launch_lock = asyncio.Lock()
         self._stop_from_world = set()
         self._secrets = {}
+        # ASSAY runs the world operates for sessions whose harness plays through another.
+        self.assay_runs, self._spend_reporters = {}, {}
         self._closed = False
         if self.auth is None:
             from .harness_auth import HarnessAuthService
@@ -169,6 +193,8 @@ class HarnessService(VenueDB):
                 "session_id",
                 "run_id",
                 "harness_id",
+                "account",
+                "host",
                 "instance_id",
                 "auth_mode",
                 "version",
@@ -199,9 +225,14 @@ class HarnessService(VenueDB):
             if (value := json.loads(row[0])) and (not run_id or value["run_id"] == run_id)
         ]
 
-    def is_busy(self, harness_id, instance_id="default"):
+    def is_busy(self, harness_id, instance_id="default", host=None):
+        """Whether the account this harness would sign in with already runs a session.
+
+        A harness that plays on a host (ASSAY on Claude Code) uses the host's account.
+        """
+        account = host or harness_id
         return any(
-            value["harness_id"] == harness_id
+            value.get("account", value["harness_id"]) == account
             and value["instance_id"] == instance_id
             and value["state"] not in TERMINAL
             for value in self.list()
@@ -261,6 +292,13 @@ class HarnessService(VenueDB):
         home = self.root / "discovery-home"
         home.mkdir(mode=0o700, exist_ok=True)
         env = base_environment(self.environment, home)
+        env.update(
+            {
+                name: self.environment[name]
+                for name in manifest.passthrough
+                if name in self.environment
+            }
+        )
         result = await self._bounded_command(
             [binary, *manifest.version_args], environment=env, timeout=10
         )
@@ -268,8 +306,11 @@ class HarnessService(VenueDB):
         match = re.search(r"\b\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?\b", text)
         return match[0] if result["exit_code"] == 0 and match else None
 
-    def _api_ready(self, harness_id):
-        key = "WORLD_ANTHROPIC_API_KEY" if harness_id == "claude-code" else "WORLD_OPENAI_API_KEY"
+    def _api_ready(self, definition):
+        """Whether the key of the provider whose models this harness uses is set."""
+        if not definition.provider:
+            return False
+        key = f"WORLD_{definition.provider.upper()}_API_KEY"
         settings = self.settings or getattr(self.world, "services", {}).get("settings")
         if settings and hasattr(settings, "resolve"):
             try:
@@ -305,7 +346,7 @@ class HarnessService(VenueDB):
                     "version": version,
                     "version_supported": supported,
                     "auth_modes": list(definition.auth_modes),
-                    "api_ready": self._api_ready(definition.id),
+                    "api_ready": self._api_ready(definition),
                     "subscription_auth": connection,
                     "install_status": {
                         key: value
@@ -321,7 +362,15 @@ class HarnessService(VenueDB):
                         "npm": bool(shutil.which("npm", path=self.environment.get("PATH"))),
                     },
                     "isolation": "cooperative",
-                    "subscription_model_cost": "unmeasured",
+                    "subscription_model_cost": "estimated"
+                    if definition.transcript
+                    else "unmeasured",
+                    "kind": definition.kind,
+                    "provider": definition.provider,
+                    "efforts": list(definition.efforts),
+                    "transcript": definition.transcript,
+                    "description": definition.description,
+                    "hosts": list(definition.hosts),
                 }
             )
         return {"items": items}
@@ -501,9 +550,20 @@ class HarnessService(VenueDB):
         definition = self._definition(harness_id)
         identifier(instance_id, "instance identifier")
         model = model_name(model)
-        if auth_mode not in definition.auth_modes:
-            raise ValueError("Unsupported authentication mode")
         run_id = run_info.get("run_id")
+        configured = self.store.get_run(run_id)["config"].get("harness_id", "")
+        # A harness that plays through another (ASSAY) launches its host's client as the
+        # player: the host's connection, models, effort and account are the session's.
+        hosted = bool(definition.hosts)
+        if hosted:
+            host_id = harness_account(configured)
+            if configured.split("@", 1)[0] != harness_id or host_id not in definition.hosts:
+                raise ValueError("The run does not name a host this harness plays through")
+            client = self._definition(host_id)
+        else:
+            client = definition
+        if auth_mode not in client.auth_modes:
+            raise ValueError("Unsupported authentication mode")
         run = self.store.get_run(run_id)
         config = run["config"]
         if run["state"] != "running" or not self.world.capabilities.verify(
@@ -520,29 +580,42 @@ class HarnessService(VenueDB):
             or config.get("measurement_of")
         ):
             raise ValueError(
-                "Native subscription model costs are unmeasured; research runs are not supported"
+                "Native subscription model costs are estimated, not measured; research runs are not supported"
             )
         if auth_mode == "api_key" and (not model or model != config.get("model_snapshot_id")):
             raise ValueError("API mode requires the run's explicitly selected model snapshot")
-        binary = binary_path(definition, self.tools, self.environment)
-        version = await self._version(definition, binary) if binary else None
-        if not version:
-            raise ValueError("The selected native CLI is not installed or usable")
-        if definition.pinned_version and version != definition.pinned_version:
-            raise ValueError("Install the supported pinned native CLI version before launching")
+        # A transcript-metered session prices each message from the client's own reports.
+        estimated = config.get("model_metering") == "transcript"
+        # The effort is the run's registered condition, never a launch-time choice.
+        effort = config.get("effort")
+        if effort is not None and effort not in client.efforts:
+            raise ValueError("This harness does not accept the run's effort level")
+        versions = {}
+        for item in {definition, client}:
+            item_binary = binary_path(item, self.tools, self.environment)
+            item_version = await self._version(item, item_binary) if item_binary else None
+            if not item_version:
+                raise ValueError("The selected native CLI is not installed or usable")
+            if item.pinned_version and item_version != item.pinned_version:
+                raise ValueError("Install the supported pinned native CLI version before launching")
+            versions[item.id] = (item_binary, item_version)
+        binary, version = versions[client.id]
         profile = None
         if auth_mode == "subscription":
             auth = self._auth()
-            connection = await auth.status(harness_id, instance_id) if auth else {}
+            connection = await auth.status(client.id, instance_id) if auth else {}
             if (
                 connection.get("state") != "connected"
                 or connection.get("auth_method") != "subscription"
             ):
                 raise ValueError("Connect a legitimate native subscription account first")
-            profile = auth.profile_path(harness_id, instance_id)
+            profile = auth.profile_path(client.id, instance_id)
+        account = (
+            harness_account(configured) if configured.split("@", 1)[0] == harness_id else harness_id
+        )
         async with self._launch_lock:
             if (
-                self.is_busy(harness_id, instance_id)
+                self.is_busy(account, instance_id)
                 or self.db.execute(
                     "SELECT 1 FROM native_sessions WHERE run_id=?", (run_id,)
                 ).fetchone()
@@ -553,8 +626,15 @@ class HarnessService(VenueDB):
             root.mkdir(mode=0o700)
             goal = config.get("goal")
             goal = goal.get("text", "") if isinstance(goal, dict) else goal or ""
+            # An API-key session's model calls carry a lane-only capability.
+            lane_token = (
+                self.world.capabilities.issue_lane(run_id)
+                if auth_mode == "api_key" and hasattr(self.world.capabilities, "issue_lane")
+                else None
+            )
             actual_info = {
                 **run_info,
+                "lane_token": lane_token,
                 "preamble": self.world.run_config(run_id).get(
                     "preamble", run_info.get("preamble", "")
                 ),
@@ -562,8 +642,13 @@ class HarnessService(VenueDB):
             }
             if not actual_info["preamble"]:
                 raise ValueError("The actual World briefing is required")
+            player, assay = None, None
+            if hosted:
+                assay, player = await self._prepare_assay(
+                    root, run_id, config, actual_info, versions[definition.id][0]
+                )
             argv, environment, stdin = launch_configuration(
-                definition,
+                client,
                 binary,
                 root=root,
                 work=self.store.run_dir(run_id) / "work",
@@ -574,21 +659,32 @@ class HarnessService(VenueDB):
                 agent_url=self.agent_url,
                 lane_url=self.lane_url,
                 environment=self.environment,
+                stream_usage=estimated,
+                effort=effort,
+                player=player,
             )
             value = {
                 "session_id": session_id,
                 "run_id": run_id,
                 "harness_id": harness_id,
+                "account": account,
                 "instance_id": instance_id,
                 "auth_mode": auth_mode,
                 "model": model,
+                "effort": effort,
                 "output_token_limit": self._configured_output_limit(config, model),
                 "state": "starting",
                 "started_at": now(),
                 "version": version,
                 "billing": {
-                    "model": "unmeasured" if auth_mode == "subscription" else "world_lane",
-                    "dollar_cap_scope": "world_tools_only"
+                    "model": "estimated"
+                    if estimated
+                    else "unmeasured"
+                    if auth_mode == "subscription"
+                    else "world_lane",
+                    "dollar_cap_scope": "model_estimate_and_world_tools"
+                    if estimated
+                    else "world_tools_only"
                     if auth_mode == "subscription"
                     else "model_and_world_tools",
                 },
@@ -600,17 +696,25 @@ class HarnessService(VenueDB):
                 "pid": None,
                 "birth": None,
             }
+            if hosted:
+                value.update(
+                    host=client.id,
+                    host_version=version,
+                    version=versions[definition.id][1],
+                    assay={"run_dir": player["cwd"], "registry_hash": player["registry_hash"]},
+                )
             self._save(value)
             self.drained[session_id] = asyncio.Event()
             proxy = run_info.get("proxy", {})
             self._secrets[session_id] = [
                 run_info["run_token"],
+                lane_token,
                 proxy.get("password"),
             ]
             try:
                 process = await asyncio.create_subprocess_exec(
                     *argv,
-                    cwd=self.store.run_dir(run_id) / "work",
+                    cwd=player["cwd"] if player else self.store.run_dir(run_id) / "work",
                     env=environment,
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
@@ -621,7 +725,14 @@ class HarnessService(VenueDB):
                 value.update(state="failed", error="process_start_failed", finished_at=now())
                 self._save(value)
                 self.drained[session_id].set()
+                if assay:
+                    await assay.stop()
                 raise ValueError("The native process could not be started") from None
+            if assay:
+                self.assay_runs[session_id] = assay
+                self._spend_reporters[session_id] = asyncio.create_task(
+                    self._report_assay_spend(run_id, assay)
+                )
             self.processes[session_id] = process
             value.update(state="running", pid=process.pid, birth=_birth(process.pid))
             self._save(value)
@@ -632,9 +743,19 @@ class HarnessService(VenueDB):
                 "harness_started",
                 session_id=session_id,
                 harness_id=harness_id,
-                version=version,
+                version=value["version"],
                 auth_mode=auth_mode,
                 model=model,
+                effort=effort,
+                **(
+                    {
+                        "host": client.id,
+                        "host_version": version,
+                        "assay_registry_hash": player["registry_hash"],
+                    }
+                    if hosted
+                    else {}
+                ),
                 billing=value["billing"],
                 argv_hash=digest(argv),
                 prompt_hash=digest(stdin),
@@ -650,16 +771,80 @@ class HarnessService(VenueDB):
             )
             return self._public(value)
 
+    async def _prepare_assay(self, root, run_id, config, info, launcher):
+        """Operate an ASSAY run for this session; return it and its player's launch."""
+        python = self.environment.get("ASSAY_PYTHON")
+        if not python:
+            raise ValueError("ASSAY's interpreter is not configured on this instance")
+        assay = AssayRun(
+            launcher, python, root, base_environment(self.environment, root / "operator")
+        )
+        objective = info["goal"] or "No objective: you decide what to pursue."
+        player = await assay.prepare(
+            tools=manifest_tools(self.world.manifest(run_id)),
+            goal=objective,
+            actions=int((config.get("harness_options") or {}).get("actions", 1000)),
+            usd=assay_budget(self.store.reconcile(run_id)["cap_usd"]),
+            notes=self._previous_assay_notes(config),
+            world={
+                "WORLD_BASE_URL": self.agent_url,
+                "WORLD_RUN_ID": run_id,
+                "WORLD_RUN_TOKEN": info["run_token"],
+            },
+            deny=[re.escape(urlsplit(self.agent_url).netloc)],
+        )
+        player["prompt"] = player_prompt(info["preamble"], info["goal"])
+        return assay, player
+
+    def _previous_assay_notes(self, config):
+        """The notes an ASSAY player left in this life's previous session, if any."""
+        life_id = config.get("life_id")
+        lives = getattr(self.world, "services", {}).get("lives")
+        if not life_id or lives is None:
+            return ""
+        for session in reversed(lives.get(life_id)["sessions"]):
+            for record in reversed(self.store.records(session["run_id"])):
+                if record["kind"] == "assay_journal":
+                    return record.get("notes") or ""
+        return ""
+
+    async def _report_assay_spend(self, run_id, assay):
+        while True:
+            await asyncio.sleep(ASSAY_SPEND_INTERVAL_S)
+            try:
+                await assay.report_spend(self.store.total_spent(run_id))
+            except (ValueError, OSError):
+                continue
+
+    async def _finish_assay(self, session_id, run_id):
+        """Close the session's ASSAY run and record its journal in the world's record."""
+        assay = self.assay_runs.pop(session_id, None)
+        if assay is None:
+            return
+        reporter = self._spend_reporters.pop(session_id, None)
+        if reporter:
+            reporter.cancel()
+            await asyncio.gather(reporter, return_exceptions=True)
+        try:
+            await assay.report_spend(self.store.total_spent(run_id))
+            summary = await assay.finish()
+        except Exception as error:  # noqa: BLE001 - a failed close is recorded; it never blocks the seal
+            await assay.stop()
+            summary = {"error": f"{type(error).__name__}: {str(error)[:300]}"}
+        summary["notes"] = assay.notes()[:ASSAY_NOTES_CHARS]
+        if self.store.get_run(run_id)["state"] not in {"sealed", "ended", "killed"}:
+            self.store.append_record(run_id, "assay_journal", session_id=session_id, **summary)
+
     async def _capture(self, session_id, stream, channel):
         value = self._load(session_id)
         root = Path(value["root"])
         pending, total, stored = bytearray(), 0, 0
         discard = False
         path = root / ("stdout.jsonl" if channel == "stdout" else "stderr.log")
+        # Every native stdout line reaches the meter: it prices metered sessions and
+        # records provider errors for all of them.
         meter = self.world.services.get("transcript_meter") if channel == "stdout" else None
-        if meter is not None and not meter.metered(value["run_id"]):
-            meter = None
-        metered, overflowed = bytearray(), False
+        metered, overflowed, filtered = bytearray(), False, False
         with path.open("xb") as transcript:
             path.chmod(0o600)
 
@@ -717,7 +902,15 @@ class HarnessService(VenueDB):
                             current["output_truncated"] = True
                             self._save(current)
                     if part.endswith(b"\n"):
-                        if pending:
+                        if pending and channel == "stdout" and _token_chunk(pending):
+                            # Partial-message chunks were metered above; storing every
+                            # token delta would fill the transcript cap.
+                            if not filtered:
+                                filtered = True
+                                current = self._load(session_id)
+                                current["stdout_filtered"] = True
+                                self._save(current)
+                        elif pending:
                             await emit(bytes(pending).rstrip(b"\r\n"))
                         pending.clear()
                         discard = False
@@ -762,7 +955,12 @@ class HarnessService(VenueDB):
         finally:
             monitor.cancel()
             await asyncio.gather(monitor, return_exceptions=True)
-            self.drained[session_id].set()
+            try:
+                # The player has stopped; its ASSAY run is audited and closed before the seal.
+                await self._finish_assay(session_id, self._load(session_id)["run_id"])
+            finally:
+                # Whatever closing ASSAY did, the session drains, so the run can seal.
+                self.drained[session_id].set()
         value = self._load(session_id)
         value.update(
             state="failed"
@@ -795,6 +993,7 @@ class HarnessService(VenueDB):
                 else None,
                 capture_truncated=value["output_truncated"],
                 capture_suppressed=value["output_suppressed"],
+                stdout_filtered=value.get("stdout_filtered", False),
             )
             if capture_error:
                 self.store.update_run(value["run_id"], tainted=True)
@@ -907,6 +1106,21 @@ class HarnessService(VenueDB):
                 continue
             pid, birth = value.get("pid"), value.get("birth")
             killed = await self._recover_group(pid, birth)
+            if value.get("assay"):
+                # Its daemon outlived the world; a run without a live daemon cannot resume.
+                definition = self.registry.get(value["harness_id"])
+                launcher = (
+                    binary_path(definition, self.tools, self.environment) if definition else None
+                )
+                python = self.environment.get("ASSAY_PYTHON")
+                if launcher and python:
+                    root = Path(value["root"])
+                    await AssayRun(
+                        launcher,
+                        python,
+                        root,
+                        base_environment(self.environment, root / "operator"),
+                    ).stop()
             value.update(
                 state="interrupted",
                 stop_reason="server_restarted",

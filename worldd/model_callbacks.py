@@ -1,5 +1,6 @@
 """Trusted internal model calls through the same reservation and metering lane."""
 
+import json
 import os
 from decimal import Decimal
 
@@ -51,7 +52,9 @@ def configure_models(app, world, *, prices=None):
         price = models[chosen]
         provider = price["provider"]
         body = {"model": chosen, "messages": messages, "max_tokens": max_output_tokens}
-        if _maximum_cost(body, price) > Decimal(str(max_usd)):
+        # Plain text: no token is shorter than a byte, so the request's size bounds its input.
+        size = len(json.dumps(body, ensure_ascii=False).encode())
+        if _maximum_cost(body, price, input_tokens=size) > Decimal(str(max_usd)):
             raise BeliefValidationError(
                 "Reflection maximum reservation exceeds its remaining share"
             )

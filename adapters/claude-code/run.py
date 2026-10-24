@@ -36,7 +36,8 @@ def runtime_environment(binding_dir: Path, source=None):
     environment = agent_environment(os.environ if source is None else source)
     settings = json.loads((binding_dir / "world.settings.json").read_text())
     run_id = settings["env"]["WORLD_RUN_ID"]
-    token = environment.get("WORLD_RUN_TOKEN")
+    # Model calls carry the lane-only capability when the session has one.
+    token = environment.get("WORLD_LANE_TOKEN") or environment.get("WORLD_RUN_TOKEN")
     headers = f"X-World-Run-Id: {run_id}"
     if token:
         headers += "\nX-World-Run-Token: " + token

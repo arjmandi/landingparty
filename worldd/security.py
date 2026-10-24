@@ -24,6 +24,12 @@ class Capabilities:
             "CREATE TABLE IF NOT EXISTS capabilities "
             "(run_id TEXT PRIMARY KEY, digest TEXT NOT NULL, revoked INTEGER DEFAULT 0)"
         )
+        # A lane capability authorizes model calls only: the lane accepts it, the
+        # agent boundary never does, so a model client can hold it without the run's.
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS lane_capabilities "
+            "(run_id TEXT PRIMARY KEY, digest TEXT NOT NULL, revoked INTEGER DEFAULT 0)"
+        )
         (data_dir / "capabilities.sqlite3").chmod(0o600)
 
     def issue(self, run_id: str) -> str:
@@ -44,8 +50,27 @@ class Capabilities:
             and hmac.compare_digest(row[0], hashlib.sha256(token.encode()).hexdigest())
         )
 
+    def issue_lane(self, run_id: str) -> str:
+        token = secrets.token_urlsafe(32)
+        self.db.execute(
+            "INSERT OR REPLACE INTO lane_capabilities VALUES(?,?,0)",
+            (run_id, hashlib.sha256(token.encode()).hexdigest()),
+        )
+        return token
+
+    def verify_lane(self, run_id: str, token: str) -> bool:
+        row = self.db.execute(
+            "SELECT digest,revoked FROM lane_capabilities WHERE run_id=?", (run_id,)
+        ).fetchone()
+        return bool(
+            row
+            and not row[1]
+            and hmac.compare_digest(row[0], hashlib.sha256(token.encode()).hexdigest())
+        )
+
     def revoke(self, run_id: str):
         self.db.execute("UPDATE capabilities SET revoked=1 WHERE run_id=?", (run_id,))
+        self.db.execute("UPDATE lane_capabilities SET revoked=1 WHERE run_id=?", (run_id,))
 
     def close(self):
         self.db.close()

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 
@@ -563,30 +565,75 @@ async def test_reference_resume_requires_actual_capture_references():
         )
 
 
-@pytest.mark.asyncio
-async def test_assay_preserves_tickets_and_sets_wait_without_predictions():
-    def handler(request):
-        assert json.loads(request.content) == {
-            "run_id": "r_one",
-            "tool": "fetch",
-            "params": {"url": "https://example.com", "wait": True},
-        }
-        return httpx.Response(
-            200, json={"kind": "ticket", "ticket_id": "t_one", "action_id": "a_one"}
-        )
+class FakeWorld:
+    """The world's agent endpoint, as the adapter's standard-library client meets it."""
 
-    async with httpx.AsyncClient(
-        base_url="http://world", transport=httpx.MockTransport(handler)
-    ) as client:
-        result = await assay.AssayAdapter(client, "r_one").act(
-            "fetch", {"url": "https://example.com"}
-        )
-    assert result["kind"] == "ticket"
+    def __init__(self, answers=None):
+        self.requests, self.answers = [], answers or {}
+
+    def __call__(self, request, timeout):
+        body = json.loads(request.data)
+        self.requests.append((request.full_url, request.headers, body))
+        answer = self.answers.get(body["tool"], {"kind": "state", "tool": body["tool"]})
+        stream = io.BytesIO(json.dumps(answer).encode())
+        return contextlib.closing(stream)
+
+
+def assay_session(tmp_path, world):
+    tools = {
+        "FETCH": {"tool": "fetch", "shape": "flat", "json_fields": []},
+        "BELIEVE": {"tool": "believe", "shape": "object", "json_fields": ["record"]},
+        "STATUS": {"tool": "status", "shape": "none", "json_fields": []},
+    }
+    return assay.LandingParty(
+        tmp_path,
+        tools,
+        base_url="http://agent/",
+        run_id="r_one",
+        token="fixture-run-capability",
+        opener=world,
+    )
+
+
+def test_assay_forwards_each_action_as_one_world_tool_without_its_prediction(tmp_path):
+    world = FakeWorld({"fetch": {"kind": "ticket", "ticket_id": "t_one", "action_id": "a_one"}})
+    session = assay_session(tmp_path, world)
+    assert world.requests[0][2] == {"run_id": "r_one", "tool": "status", "params": {}}
+    observation = session.step(
+        "FETCH", {"url": "https://example.com"}, {"predict": "the page loads", "because": "x"}
+    )
+    url, headers, body = world.requests[-1]
+    assert url == "http://agent/v1/act"
+    assert headers["Authorization"] == "Bearer fixture-run-capability"
+    assert body == {
+        "run_id": "r_one",
+        "tool": "fetch",
+        "params": {"url": "https://example.com", "wait": True},
+    }
+    assert "predict" not in json.dumps(world.requests)
+    assert observation["data"]["result"]["kind"] == "ticket"
+    assert observation["available_actions"] == ["FETCH", "BELIEVE", "STATUS"]
+    assert observation["state"] == "NOT_FINISHED"
+    assert session.session == {"replayable": False}
     assert assay.assay_budget(20) == 21
     with pytest.raises(ValueError):
         assay.assay_budget(20, margin=0)
     with pytest.raises(ValueError):
         assay.assay_budget("NaN")
+
+
+def test_assay_parses_json_text_and_keeps_long_results_in_a_file(tmp_path):
+    world = FakeWorld({"believe": {"kind": "result", "text": "x" * 20000}})
+    session = assay_session(tmp_path, world)
+    refused = session.step("BELIEVE", {"arguments": {"record": "{not json"}}, None)
+    assert "must be JSON" in refused["data"]["result"]["error"]
+    assert len(world.requests) == 1
+    observation = session.step("BELIEVE", {"arguments": {"record": '{"claim": "x"}'}}, None)
+    assert world.requests[-1][2]["params"] == {"record": {"claim": "x"}}
+    stored = Path(observation["data"]["result_file"])
+    assert stored.parent == tmp_path / "world-results"
+    assert json.loads(stored.read_text())["text"] == "x" * 20000
+    assert len(observation["data"]["result_head"]) == assay.RESULT_CHARS
 
 
 @pytest.mark.asyncio
@@ -733,27 +780,6 @@ async def test_mcp_against_actual_registered_manifest_and_run_tools(tmp_path):
         assert reply["rule_id"] == "stage_gate"
         sealed = await client.post("/v1/beam-up", json={"run_id": run_id})
         assert sealed.status_code == 200
-
-
-async def test_assay_authenticates_manifest_and_actions_with_run_capability(monkeypatch):
-    monkeypatch.setenv("WORLD_RUN_TOKEN", "fixture-run-capability")
-    paths = []
-
-    def handler(request):
-        assert request.headers["authorization"] == "Bearer fixture-run-capability"
-        assert "x-world-control-token" not in request.headers
-        paths.append(request.url.path)
-        return httpx.Response(
-            200, json={"tools": []} if request.url.path == "/v1/manifest" else {"kind": "state"}
-        )
-
-    async with httpx.AsyncClient(
-        base_url="http://agent", transport=httpx.MockTransport(handler)
-    ) as client:
-        adapter = assay.AssayAdapter(client, "r_one")
-        await adapter.manifest()
-        await adapter.act("status", {})
-    assert paths == ["/v1/manifest", "/v1/act"]
 
 
 def test_mcp_read_hints_enable_native_parallel_reads_without_marking_writes_safe():

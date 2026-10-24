@@ -4,11 +4,11 @@
 |---|---|
 | World | `landing-party` |
 | Archetype | service |
-| Backend | MCP (`world-mcp`) or the same core HTTP interface |
-| Actions | typed world tools from `/v1/manifest`; no writes or accounts at stage 0 |
+| Backend | the world's agent HTTP interface, through `adapter.py:factory` |
+| Actions | each world tool from the run's manifest; outward tools are destructive |
 | Observations | results, typed blocks, tickets, silence, inbox events, and state |
 | Reward | `None` in live mode |
-| Replay | recorded archive only; replay misses remain explicit observations |
+| Replay | none: one daemon per world session (`replayable=False`) |
 | Budget | USD and wall seconds; ASSAY cap above world cap |
 | Isolation | cooperative by default; fenced enforcement is a separate deployment requirement |
 | Agent predictions | ASSAY policy; never world infrastructure |

@@ -1,11 +1,61 @@
 # Managed native harnesses
 
-The operator application's Harness Library manages Claude Code and Codex through
+The operator application's Harnesses page manages Claude Code and Codex through
 `HarnessService` in `worldd/harnesses.py`. The supported versions are Claude Code
 2.1.308 and Codex 0.163.0. Discovery executes each client's bounded `--version`
 command. A different detected version is displayed but does not become ready to
 launch. Trusted server configuration can select an existing executable through
 `WORLD_CLAUDE_CLI` or `WORLD_CODEX_CLI`; executable paths are never UI inputs.
+
+## Kinds, connections, models and effort
+
+A harness manifest (`HarnessManifest` in `worldd/harness_config.py`) is
+code-owned. **Native** harnesses (Claude Code, Codex) ship with the world at
+their pins; an **add-on** is a trusted developer's registry entry. Neither can
+be supplied over HTTP or the UI. Each manifest names its `provider` (whose
+models and API key it uses), the effort levels its client accepts, and the
+client stream a transcript meter reads, once one has been verified (Claude
+Code's `stream-json` today).
+
+**ASSAY** is a native harness that plays through Claude Code: the world operates
+the ASSAY run and Claude Code is its player, on Claude Code's connections. See
+[ASSAY as a native harness](assay.md).
+
+In the Docker image, native harnesses are built in from the committed
+lockfiles in `deploy/harnesses/` and found through `WORLD_CLAUDE_CLI` and
+`WORLD_CODEX_CLI`; the install action below is for running `worldd` directly
+and for add-ons.
+
+**Codex on a subscription** stays unmeasured, and a Codex life needs an API key.
+`codex exec --json` reports usage once per turn, in `turn.completed`, without the
+model's name, and a session is one turn: the world would see a session's spend
+only after it ended, so it could not strand a life before the session overspent
+its balance. Codex's own session log keeps no per-call usage either.
+
+A harness pays for its model calls through one of two **connections**, both
+set up on the harness's own card:
+
+- **API key** — the provider's key, shared by every use of that provider in
+  the instance (harnesses, reflection, judges). The lane meters every call.
+  An API key is a provider credential, not a harness.
+- **Subscription account** — the harness's own signed-in account. Its model
+  spend is estimated from the client's stream at reviewed API prices where the
+  stream is verified, and is unmeasured otherwise.
+
+Each connection offers the models it actually serves, crossed with the
+reviewed price table (`policy/prices.json`, with labels and effort levels in
+`policy/models.json`): an API key lists what its provider served at its last
+validation (`/v1/models`); a Codex account lists its own catalogue from its
+profile's `models_cache.json`; a Claude subscription, which has no list, is
+offered the reviewed catalogue, and a model it does not serve holds the life
+(see [lives](lives.md)). A served model with no reviewed price is listed but
+cannot be chosen where spend must be priced. Only exact model identifiers are
+accepted; aliases and "account default" are not.
+
+**Effort** (`RunConfig.effort`) is a registered condition passed to the
+client as chosen: `--effort` for Claude Code and `model_reasoning_effort` for
+Codex. Leaving it to the model records the model's default explicitly. It
+joins the run's `runtime_protocol_id` only when set.
 
 ## Install and connect
 
@@ -27,8 +77,9 @@ model. Explicit client limits and unmanaged clients retain normal validation.
 Subscription connections use official CLI login flows in separate private
 profiles, implemented by `HarnessAuthService`. Subscription credentials are not
 copied into the settings API or converted into API keys. Connection status is
-derived from actual native status commands. Subscription model cost remains
-unmeasured, and these cooperative development sessions are not research cells.
+derived from actual native status commands. Subscription model cost is
+estimated where the client's stream is verified (Claude Code) and unmeasured
+otherwise, and these cooperative development sessions are not research cells.
 No authentication or model call starts merely from library discovery.
 
 After choosing **Connect subscription**, open the **Open provider sign-in**

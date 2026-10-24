@@ -44,6 +44,17 @@ optional writable `WORLD_STUDIO_OUTPUT` directory receives desktop and mobile
 screenshots. A packaged-image pass omits the source-asset overrides. No Docker
 socket, world state, native profile, or provider key is mounted into the pilot.
 
+## Source-level result for harness connections
+
+After harnesses gained connections, served model menus and effort, the pilot
+passed all **35 checks**, with **72 local fixture requests, zero provider calls,
+and zero script errors**, on a macOS developer host with the source assets. New
+checks cover the dialog order (harness, connection, model, effort, then the
+rest), a model menu that disables models without a reviewed price, effort
+levels per model, the exact model and effort sent at launch, the API key on its
+harness card (its draft surviving the card's polling, cleared after success and
+failure, never echoed), and Settings holding no model keys.
+
 ## Source-level result for the life flow
 
 After the Studio gained lives on a balance, the same pilot passed all **31 checks**

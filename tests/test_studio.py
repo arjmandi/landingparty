@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from worldd.app import create_app
+from worldd.harness_config import BUILTINS
 from worldd.models import RunConfig
 from worldd.studio_gateway import create_studio_gateway
 
@@ -51,6 +52,7 @@ async def product(tmp_path, monkeypatch):
                 "models": {
                     "studio-model": price(),
                     "claude-studio": {**price(), "provider": "anthropic"},
+                    "claude-studio-next": {**price(), "provider": "anthropic"},
                 }
             },
         )
@@ -69,11 +71,19 @@ async def product(tmp_path, monkeypatch):
                         "auth_modes": ["api_key", "subscription"],
                         "subscription_auth": dict(connection),
                         "requirements": {"node": True, "npm": True},
+                        # The code-owned manifest's metadata, as the real library reports it.
+                        "kind": manifest.kind,
+                        "provider": manifest.provider,
+                        "efforts": list(manifest.efforts),
+                        "transcript": manifest.transcript,
+                        "description": manifest.description,
                     }
                     for name, binding in (
                         ("codex", "WORLD_OPENAI_API_KEY"),
                         ("claude-code", "WORLD_ANTHROPIC_API_KEY"),
                     )
+                    for manifest in BUILTINS
+                    if manifest.id == name
                 ]
             }
 
@@ -141,11 +151,14 @@ async def test_library_can_finish_setup_with_subscription_and_no_api_key(product
         for row in (await client.get("/api/harnesses")).json()["harnesses"]
         if row["id"] == "codex"
     )
-    assert {row["id"]: row["ready"] for row in item["modes"]} == {
+    assert {row["id"]: row["ready"] for row in item["connections"]} == {
         "api_key": False,
         "subscription": True,
     }
-    assert any(row["id"] == "" and row["auth_modes"] == ["subscription"] for row in item["models"])
+    subscription = next(row for row in item["connections"] if row["id"] == "subscription")
+    # An account is offered exact models only; no alias or "account default".
+    assert [row["id"] for row in subscription["models"]] == ["studio-model"]
+    assert subscription["billing"]["kind"] == "subscription"
     assert not requests
 
 
@@ -168,7 +181,9 @@ async def test_one_click_api_run_registers_actual_conditions_and_hides_capabilit
 async def test_subscription_run_has_truthful_briefing_and_unmeasured_model_cost(product):
     world, _studio, client, requests, launches, connection = product
     connection.update(state="connected", auth_method="subscription")
-    response = await client.post("/api/runs", json=run_body(auth_mode="subscription", model=None))
+    refused = await client.post("/api/runs", json=run_body(auth_mode="subscription", model=None))
+    assert refused.status_code == 400 and not launches
+    response = await client.post("/api/runs", json=run_body(auth_mode="subscription"))
     assert response.status_code == 201, response.text
     info = launches[0][0]
     run_id = info["run_id"]
@@ -321,7 +336,9 @@ async def test_a_life_lives_on_its_balance_with_no_objective_and_holds_its_harne
     config = world.run_config(info["run_id"])
     assert config["life_id"] == life_id and config["goal"] is None
     assert "schedule" in config["packs"] and "objective" not in config["packs"]
-    assert "bounty" in config["packs"] and "market" not in config["packs"]
+    # Bounties and the market are ways to earn the operator chooses; neither is assumed.
+    assert "bounty" not in config["packs"] and "market" not in config["packs"]
+    assert world.services["lives"].get(life_id)["income_channels"] == ["recorded"]
     assert world.store.reconcile(info["run_id"])["cap_usd"] == 2
     assert "Your balance starts at $2" in config["preamble"]
     assert "you rest until 24 hours pass" in config["preamble"]
@@ -415,6 +432,32 @@ async def test_bounties_are_posted_and_listed(product):
     assert posted.json()["bounties"][0]["title"] == "Fix a dead link"
 
 
+async def test_bounties_are_a_way_to_earn_shown_in_that_lifes_purser(product):
+    world, _studio, client, _requests, launches, _connection = product
+    world.instance_settings.update_provider("openai", api_key="fixture-openai-key")
+    await client.post(
+        "/api/bounties", json={"title": "Fix a dead link", "criterion": "Merged", "usd": 3}
+    )
+    response = await client.post("/api/lives", json=life_body(bounty=True, market=True))
+    assert response.status_code == 201, response.text
+    life_id = response.json()["life"]["life_id"]
+    await until(lambda: launches)
+    config = world.run_config(launches[0][0]["run_id"])
+    assert {"bounty", "market"} <= set(config["packs"])
+    detail = (await client.get(f"/api/lives/{life_id}")).json()
+    assert set(detail["life"]["income_channels"]) == {"recorded", "bounty", "market"}
+    assert [item["title"] for item in detail["bounties"]["open"]] == ["Fix a dead link"]
+    bounty_id = detail["bounties"]["open"][0]["bounty_id"]
+    market = world.services["market"]
+    market.db.execute(
+        "INSERT INTO bounty_awards VALUES (?,?,?)", (bounty_id, life_id, "evidence:fixture")
+    )
+    detail = (await client.get(f"/api/lives/{life_id}")).json()
+    assert detail["bounties"]["open"] == []
+    assert [item["bounty_id"] for item in detail["bounties"]["awarded"]] == [bounty_id]
+    await client.post(f"/api/lives/{life_id}/beam-up")
+
+
 async def test_a_claude_code_subscription_life_lives_on_an_estimated_balance(product):
     world, _studio, client, requests, launches, connection = product
     connection.update(state="connected", auth_method="subscription")
@@ -434,6 +477,157 @@ async def test_a_claude_code_subscription_life_lives_on_an_estimated_balance(pro
     assert not requests
 
 
+async def test_a_held_life_switches_model_and_resumes_on_a_fresh_runner(product):
+    world, _studio, client, _requests, launches, connection = product
+    lives, studies = world.services["lives"], world.services["studies"]
+    connection.update(state="connected", auth_method="subscription")
+    body = life_body(harness_id="claude-code", auth_mode="subscription", model="claude-studio")
+    life_id = (await client.post("/api/lives", json=body)).json()["life"]["life_id"]
+    await until(lambda: launches)
+    run_id = launches[0][0]["run_id"]
+    world.store.append_record(
+        run_id,
+        "model_error",
+        status=404,
+        error="model_not_found",
+        error_class="model_unavailable",
+        model="claude-studio",
+        message="There's an issue with the selected model",
+    )
+    await world.end_run(run_id, reason="model_error")
+    await until(lambda: lives.get(life_id)["state"] == "model_hold")
+    held = (await client.get(f"/api/lives/{life_id}")).json()["life"]
+    assert held["life_state"] == "held" and held["hold_reason"]["status"] == 404
+    for refused in ("claude-studio", "studio-model", "claude-unknown"):
+        response = await client.post(f"/api/lives/{life_id}/model", json={"model": refused})
+        assert response.status_code == 400, refused
+    response = await client.post(
+        f"/api/lives/{life_id}/model", json={"model": "claude-studio-next"}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["life"]["model"] == "claude-studio-next"
+    await until(lambda: len(launches) == 2)
+    assert launches[1][1:] == ("claude-code", "subscription", "claude-studio-next")
+    assert world.run_config(launches[1][0]["run_id"])["model_snapshot_id"] == "claude-studio-next"
+    first, second = studies.list_life_runners(life_id)
+    assert first["state"] == "completed" and first["reason"] == "model_switched"
+    assert second["state"] == "running"
+    switched = [e for e in lives.events(life_id) if e["kind"] == "model_switched"]
+    assert switched[0]["model_from"] == "claude-studio"
+    assert switched[0]["model_to"] == "claude-studio-next"
+    response = await client.post(f"/api/lives/{life_id}/model", json={"model": "claude-studio"})
+    assert response.status_code == 400
+    await client.post(f"/api/lives/{life_id}/beam-up")
+
+
+def effortful(studio, monkeypatch):
+    catalog = {
+        "effort_levels": ["low", "medium", "high", "xhigh", "max"],
+        "models": {
+            "claude-studio": {
+                "label": "Claude Studio",
+                "group": "current",
+                "efforts": ["low", "medium", "high"],
+                "default_effort": "medium",
+            },
+            "claude-studio-next": {
+                "label": "Claude Studio Next",
+                "group": "earlier",
+                "efforts": [],
+            },
+        },
+    }
+    monkeypatch.setattr(studio, "model_catalog", catalog)
+
+
+async def test_each_connection_offers_what_it_serves_crossed_with_reviewed_prices(
+    product, monkeypatch
+):
+    world, studio, client, _requests, _launches, connection = product
+    effortful(studio, monkeypatch)
+    world.instance_settings.update_provider("anthropic", api_key="fixture-anthropic-key")
+    world.instance_settings._save_served(
+        "anthropic", ["claude-studio", "claude-unreviewed"], "2026-10-24T00:00:00Z"
+    )
+    connection.update(state="connected", auth_method="subscription")
+    item = next(
+        row
+        for row in (await client.get("/api/harnesses")).json()["harnesses"]
+        if row["id"] == "claude-code"
+    )
+    assert (item["kind"], item["provider"], item["transcript"]) == (
+        "native",
+        "anthropic",
+        "claude-stream-json",
+    )
+    key, account = item["connections"]
+    assert key["label"] == "Anthropic API key" and key["billing"]["kind"] == "metered"
+    rows = {row["id"]: row for row in key["models"]}
+    assert rows["claude-studio"]["served"] is True and rows["claude-studio"]["selectable"]
+    assert rows["claude-studio"]["label"] == "Claude Studio"
+    assert rows["claude-studio"]["efforts"] == ["low", "medium", "high"]
+    # The key does not serve it, so it cannot be chosen; nor can an unpriced one it does.
+    assert rows["claude-studio-next"]["served"] is False
+    assert not rows["claude-studio-next"]["selectable"]
+    assert not rows["claude-unreviewed"]["priced"] and not rows["claude-unreviewed"]["selectable"]
+    assert account["billing"]["kind"] == "estimated"
+    assert {row["id"] for row in account["models"]} == {"claude-studio", "claude-studio-next"}
+    assert all(row["served"] is None for row in account["models"])
+
+
+async def test_effort_is_a_registered_condition_passed_as_chosen(product, monkeypatch):
+    world, studio, client, _requests, launches, connection = product
+    effortful(studio, monkeypatch)
+    connection.update(state="connected", auth_method="subscription")
+    body = run_body(harness_id="claude-code", auth_mode="subscription", model="claude-studio")
+    for refused in (
+        {**body, "effort": "max"},
+        {**body, "model": "claude-studio-next", "effort": "low"},
+    ):
+        response = await client.post("/api/runs", json=refused)
+        assert response.status_code == 400, refused
+    chosen = await client.post("/api/runs", json={**body, "effort": "high"})
+    assert chosen.status_code == 201, chosen.text
+    config = world.run_config(launches[-1][0]["run_id"])
+    assert config["effort"] == "high" and config["model_metering"] == "transcript"
+    await client.post(f"/api/runs/{launches[-1][0]['run_id']}/stop", json={})
+    # Left to the model's default, the default is still recorded explicitly.
+    default = await client.post("/api/runs", json=body)
+    assert default.status_code == 201, default.text
+    second = world.run_config(launches[-1][0]["run_id"])
+    assert second["effort"] == "medium"
+    assert (
+        world.store.get_run(launches[-1][0]["run_id"])["config"]["tuple"]["runtime_protocol_id"]
+        != world.store.get_run(launches[-2][0]["run_id"])["config"]["tuple"]["runtime_protocol_id"]
+    )
+    await client.post(f"/api/runs/{launches[-1][0]['run_id']}/stop", json={})
+    none = await client.post("/api/runs", json={**body, "model": "claude-studio-next"})
+    assert none.status_code == 201, none.text
+    assert world.run_config(launches[-1][0]["run_id"])["effort"] is None
+
+
+async def test_a_codex_account_lists_its_own_catalogue(product, monkeypatch):
+    _world, studio, client, _requests, _launches, connection = product
+    connection.update(state="connected", auth_method="subscription")
+    served = [
+        {"id": "studio-model", "efforts": ["low", "medium", "ultra"], "default_effort": "low"},
+        {"id": "gpt-unreviewed", "efforts": ["low"], "default_effort": "low"},
+    ]
+    auth = studio.harnesses._auth()
+    monkeypatch.setattr(auth, "served_models", lambda harness_id, instance_id="default": served)
+    item = next(
+        row
+        for row in (await client.get("/api/harnesses")).json()["harnesses"]
+        if row["id"] == "codex"
+    )
+    account = next(row for row in item["connections"] if row["id"] == "subscription")
+    rows = {row["id"]: row for row in account["models"]}
+    assert rows["studio-model"]["efforts"] == ["low", "medium", "ultra"]
+    assert rows["studio-model"]["default_effort"] == "low"
+    # Codex's account spend is unmeasured, so an unpriced model stays selectable.
+    assert rows["gpt-unreviewed"]["selectable"] and not rows["gpt-unreviewed"]["priced"]
+
+
 @pytest.mark.parametrize(
     "changes",
     [
@@ -448,3 +642,95 @@ async def test_subscription_lives_need_claude_code_and_an_exact_priced_model(pro
     response = await client.post("/api/lives", json=life_body(**changes))
     assert response.status_code == 400
     assert not world.services["lives"].list() and not launches
+
+
+async def with_assay(studio, monkeypatch, installed=True):
+    original = studio.harnesses.library
+    assay = next(item for item in BUILTINS if item.id == "assay")
+
+    async def library(refresh=False, instance_id="default"):
+        result = await original(refresh, instance_id)
+        return {
+            "items": [
+                *result["items"],
+                {
+                    "id": "assay",
+                    "name": "ASSAY",
+                    "installed": installed,
+                    "version": "1.5.1",
+                    "auth_modes": [],
+                    "api_ready": False,
+                    "subscription_auth": {"state": "auth_required", "auth_method": "unknown"},
+                    "requirements": {"node": True, "npm": True},
+                    "package": None,
+                    "kind": assay.kind,
+                    "provider": None,
+                    "efforts": [],
+                    "transcript": None,
+                    "hosts": list(assay.hosts),
+                    "description": assay.description,
+                },
+            ]
+        }
+
+    monkeypatch.setattr(studio.harnesses, "library", library)
+
+
+async def test_assay_plays_on_claude_codes_connections_and_registers_its_cap(product, monkeypatch):
+    world, studio, client, _requests, launches, connection = product
+    await with_assay(studio, monkeypatch)
+    connection.update(state="connected", auth_method="subscription")
+    item = next(
+        row
+        for row in (await client.get("/api/harnesses")).json()["harnesses"]
+        if row["id"] == "assay"
+    )
+    assert (item["host"], item["provider"], item["transcript"]) == (
+        "claude-code",
+        "anthropic",
+        "claude-stream-json",
+    )
+    account = next(row for row in item["connections"] if row["id"] == "subscription")
+    assert account["ready"] and account["label"].endswith("through claude-code")
+    assert {row["id"] for row in account["models"]} == {"claude-studio", "claude-studio-next"}
+    body = life_body(
+        harness_id="assay", auth_mode="subscription", model="claude-studio", actions=40
+    )
+    response = await client.post("/api/lives", json=body)
+    assert response.status_code == 201, response.text
+    await until(lambda: launches)
+    info, harness, auth_mode, model = launches[0]
+    assert (harness, auth_mode, model) == ("assay", "subscription", "claude-studio")
+    config = world.run_config(info["run_id"])
+    assert config["harness_id"] == "assay@1.5.1+claude-code@1.0.0/subscription"
+    assert config["harness_options"] == {"actions": 40}
+    assert config["model_metering"] == "transcript"
+    plain = world.create_run(RunConfig())
+    capped = world.create_run(RunConfig(harness_options={"actions": 40}))
+    # A harness's registered option is part of the run's protocol.
+    assert plain["tuple"]["runtime_protocol_id"] != capped["tuple"]["runtime_protocol_id"]
+    # ASSAY's life holds Claude Code's account: Claude Code cannot start beside it.
+    refused = await client.post(
+        "/api/lives",
+        json=life_body(harness_id="claude-code", auth_mode="subscription", model="claude-studio"),
+    )
+    assert refused.status_code == 400 and "account" in refused.text
+    await client.post(f"/api/lives/{response.json()['life']['life_id']}/beam-up")
+
+
+async def test_a_host_or_cap_is_refused_where_it_does_not_belong(product, monkeypatch):
+    _world, studio, client, _requests, launches, connection = product
+    await with_assay(studio, monkeypatch)
+    connection.update(state="connected", auth_method="subscription")
+    for body in (
+        run_body(harness_id="assay", auth_mode="subscription", model="claude-studio", host="codex"),
+        run_body(
+            harness_id="claude-code", auth_mode="subscription", model="claude-studio", host="codex"
+        ),
+        run_body(
+            harness_id="claude-code", auth_mode="subscription", model="claude-studio", actions=5
+        ),
+    ):
+        response = await client.post("/api/runs", json=body)
+        assert response.status_code == 400, body
+    assert not launches

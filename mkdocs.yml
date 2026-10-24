@@ -36,6 +36,7 @@ nav:
   - Getting started: getting-started.md
   - Using the app: product-experience.md
   - Harness library: native-harnesses.md
+  - ASSAY: assay.md
   - Single-origin hosting: studio-origin.md
   - Fenced deployment: deployment.md
   - Design: design.md

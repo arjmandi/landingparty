@@ -43,8 +43,19 @@ delivers a `wake` event carrying only the time. Under `on_exhaustion: strand`,
 a balance that cannot cover a model call seals the session as
 `budget_exhausted` and strands the life. Only a `deposit` wakes a stranded life,
 into a session whose cap is what the balance then covers; it has no clock wake.
-Events arriving while a life is asleep, resting, or stranded queue for its next
-session through the same late-event path as sleep.
+Events arriving while a life is asleep, resting, stranded, or held queue for its
+next session through the same late-event path as sleep.
+
+A session whose model the provider refused holds the life (`model_hold`, shown
+as **held**): the session's record has a `model_error` whose `error_class` is
+`model_unavailable` (a 404 or 403: the connection does not serve the model) or
+`request_rejected`, or an `estimate_unavailable`. A held life has no wake rules.
+The operator resolves it with `POST /api/lives/{id}/model {model}`, which
+completes the old harness runner, plans a fresh one on the new model, records
+`model_switched{model_from, model_to}`, and wakes the life; or beams it up. A
+study's life keeps its frozen configuration and cannot switch. A `plan_limit`
+(429) rests the life until the limit's reset time; a `provider_error` (5xx or
+529) rests it with backoff, from 15 minutes doubling to at most 6 hours.
 
 `wall_life_days` is optional. A Studio life has none. A research life still
 declares one, because matched-life analysis compares lives over the same
@@ -97,6 +108,15 @@ chargebacks are outflows on the receiving channel. The author-class columns
 stay separate: only independent money is grounded, sponsor money is its own
 series, and human-attested deposits are a third.
 
+These channels are a life's **ways to earn**, each a way of acting in the world
+with its own dynamics, not a credit abstraction over money. In the Studio the
+operator chooses them at beam-down: deposits they record are always on, and
+bounties and the paper market are opt-in, each issuing its pack with it. The
+life page's Purser is the one money panel: its balance, a tab per way to earn
+(resupply with a recorded deposit; the bounties this life can still claim and
+those it was paid, with the post form for the instance's board; its market
+stakes and payouts), and the ledger of every movement.
+
 Deposits are idempotent for an identical settlement and reject conflicting
 evidence reuse, undeclared channels, and any deposit to an ended life. There is
 no rescue: no channel lets the human add money, and a recorded deposit without
@@ -126,12 +146,17 @@ Money-driver readings derive from actual ledger spend and bank movements.
 A life on a native subscription uses `model_metering: transcript`: the
 transcript meter (`worldd/transcript_meter.py`) prices the usage the client
 reports in its own stream at the run's pinned API prices and debits it as
-`model.estimated`. It stops the session when what is left would not cover
+`model.estimated`. Claude Code runs with partial messages, so each message is
+priced from its start and its final `message_delta` usage; the stored transcript
+keeps those two stream events and drops the token-by-token chunks. The session's
+per-model totals then charge only the tokens the messages missed, at the cache
+durations and price tier the messages showed. It stops the session when what is left would not cover
 another message like its largest, recording a `model_refused` so the life
 strands as under the lane; it records `estimate_overshoot` rather than going
 past the cap, and fails closed with `estimate_unavailable` on unpriced or
 unreadable usage. Estimated dollars are labelled as such and never pooled with
-metered ones. Only Claude Code's stream is confirmed for this so far.
+metered ones. Only Claude Code's stream reports usage per message; Codex's
+reports it once a session ends, so a Codex life needs an API key.
 `floor_event: strand` requires the `usd_balance` metric; other driver metrics
 keep `floor_event: bankruptcy` and accept only trusted observations through
 `observe_driver`. Driver arms deny money asks, but no code enforces this today:
