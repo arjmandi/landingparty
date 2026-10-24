@@ -106,7 +106,10 @@ elif words[:2] == ["hooks", "install"] and "--check" not in words:
 elif words[0] == "audit":
     events = [{"id": 1, "predict": "loads", "predict_ok": True}, {"id": 2, "predict": "x"}]
     (run / ".assay" / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
-    (run / ".assay" / "NOTES.md").write_text("# Notes\nThe link is dead.\n")
+    notes = "# Notes\nThe link is dead.\n".encode()
+    if (run.parent / "bad-notes").exists():
+        notes += b"\xff\xfe not utf-8\n"
+    (run / ".assay" / "NOTES.md").write_bytes(notes)
     print(json.dumps({"verdict": "CLEAN"}))
 """
 
@@ -249,3 +252,28 @@ async def test_a_run_must_name_a_host_the_harness_plays_through(assay_world):
     info = create(harness_id="assay@1.5.1+codex@0.163.0/api_key")
     with pytest.raises(ValueError, match="host"):
         await service.launch(info, "assay", model="fixture-model")
+
+
+async def test_unreadable_notes_or_a_failed_close_never_block_the_seal(assay_world, monkeypatch):
+    service, world, create, _tmp_path = assay_world
+    info = create()
+    session = await service.launch(info, "assay", model="fixture-model")
+    root = Path(service._load(session["session_id"])["root"])
+    (root / "bad-notes").write_text("")
+    await asyncio.wait_for(service.tasks[session["session_id"]], 10)
+    journal = next(r for r in world.store.records(info["run_id"]) if r["kind"] == "assay_journal")
+    assert "The link is dead." in journal["notes"] and "\ufffd" in journal["notes"]
+    assert world.store.get_run(info["run_id"])["state"] == "sealed"
+
+    async def broken(self):
+        raise RuntimeError("the journal could not be read")
+
+    monkeypatch.setattr("worldd.assay.AssayRun.finish", broken)
+    info = create()
+    session = await service.launch(info, "assay", model="fixture-model")
+    await asyncio.wait_for(service.tasks[session["session_id"]], 10)
+    assert service.drained[session["session_id"]].is_set()
+    assert world.store.get_run(info["run_id"])["state"] == "sealed"
+    journal = next(r for r in world.store.records(info["run_id"]) if r["kind"] == "assay_journal")
+    assert journal["error"] == "RuntimeError: the journal could not be read"
+    assert not service.is_busy("claude-code")

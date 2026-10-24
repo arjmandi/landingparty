@@ -828,9 +828,9 @@ class HarnessService(VenueDB):
         try:
             await assay.report_spend(self.store.total_spent(run_id))
             summary = await assay.finish()
-        except (ValueError, OSError) as error:
+        except Exception as error:  # noqa: BLE001 - a failed close is recorded; it never blocks the seal
             await assay.stop()
-            summary = {"error": str(error)[:300]}
+            summary = {"error": f"{type(error).__name__}: {str(error)[:300]}"}
         summary["notes"] = assay.notes()[:ASSAY_NOTES_CHARS]
         if self.store.get_run(run_id)["state"] not in {"sealed", "ended", "killed"}:
             self.store.append_record(run_id, "assay_journal", session_id=session_id, **summary)
@@ -955,9 +955,12 @@ class HarnessService(VenueDB):
         finally:
             monitor.cancel()
             await asyncio.gather(monitor, return_exceptions=True)
-            # The player has stopped; its ASSAY run is audited and closed before the seal.
-            await self._finish_assay(session_id, self._load(session_id)["run_id"])
-            self.drained[session_id].set()
+            try:
+                # The player has stopped; its ASSAY run is audited and closed before the seal.
+                await self._finish_assay(session_id, self._load(session_id)["run_id"])
+            finally:
+                # Whatever closing ASSAY did, the session drains, so the run can seal.
+                self.drained[session_id].set()
         value = self._load(session_id)
         value.update(
             state="failed"

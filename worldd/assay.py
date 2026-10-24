@@ -160,6 +160,14 @@ def player_prompt(preamble, goal):
     return "\n\n".join(parts) + "\n"
 
 
+def _text(path):
+    """A file the player can write, read without trusting its bytes; missing is empty."""
+    try:
+        return Path(path).read_bytes().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
 class AssayRun:
     """One ASSAY run for one world session, operated by the world."""
 
@@ -273,12 +281,12 @@ class AssayRun:
             (self.run_dir / "CONSTITUTION.md").write_text(constitution.read_text())
         notes_path = self.run_dir / ".assay" / "NOTES.md"
         if notes and notes.strip():
-            current = notes_path.read_text() if notes_path.exists() else ""
+            current = _text(notes_path)
             notes_path.write_text(
                 "## Carried from your previous session\n\n" + notes.strip() + "\n\n" + current
             )
         activity = self.run_dir / ".assay" / "activity.jsonl"
-        declared = notes_path.read_text() if notes_path.exists() else ""
+        declared = _text(notes_path)
         self.gate.write_text(
             json.dumps(
                 {
@@ -286,9 +294,7 @@ class AssayRun:
                     "launch": {
                         "session": 1,
                         "at": now(),
-                        "activity": len(activity.read_text().splitlines())
-                        if activity.exists()
-                        else 0,
+                        "activity": len(_text(activity).splitlines()),
                         "declarations": sum(
                             1
                             for line in declared.splitlines()
@@ -321,13 +327,12 @@ class AssayRun:
         )
 
     def notes(self):
-        path = self.run_dir / ".assay" / "NOTES.md"
-        return path.read_text() if path.exists() else ""
+        return _text(self.run_dir / ".assay" / "NOTES.md")
 
     async def stop(self):
         try:
             await self._assay("stop")
-        except ValueError:
+        except (ValueError, OSError):
             pass
 
     async def finish(self):
@@ -343,7 +348,7 @@ class AssayRun:
         journal = self.run_dir / ".assay" / "events.jsonl"
         events = []
         if journal.exists():
-            for line in journal.read_text().splitlines():
+            for line in _text(journal).splitlines():
                 try:
                     events.append(json.loads(line))
                 except ValueError:
