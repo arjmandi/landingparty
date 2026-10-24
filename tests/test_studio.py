@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from worldd.app import create_app
+from worldd.harness_config import BUILTINS
 from worldd.models import RunConfig
 from worldd.studio_gateway import create_studio_gateway
 
@@ -70,11 +71,19 @@ async def product(tmp_path, monkeypatch):
                         "auth_modes": ["api_key", "subscription"],
                         "subscription_auth": dict(connection),
                         "requirements": {"node": True, "npm": True},
+                        # The code-owned manifest's metadata, as the real library reports it.
+                        "kind": manifest.kind,
+                        "provider": manifest.provider,
+                        "efforts": list(manifest.efforts),
+                        "transcript": manifest.transcript,
+                        "description": manifest.description,
                     }
                     for name, binding in (
                         ("codex", "WORLD_OPENAI_API_KEY"),
                         ("claude-code", "WORLD_ANTHROPIC_API_KEY"),
                     )
+                    for manifest in BUILTINS
+                    if manifest.id == name
                 ]
             }
 
@@ -142,11 +151,14 @@ async def test_library_can_finish_setup_with_subscription_and_no_api_key(product
         for row in (await client.get("/api/harnesses")).json()["harnesses"]
         if row["id"] == "codex"
     )
-    assert {row["id"]: row["ready"] for row in item["modes"]} == {
+    assert {row["id"]: row["ready"] for row in item["connections"]} == {
         "api_key": False,
         "subscription": True,
     }
-    assert any(row["id"] == "" and row["auth_modes"] == ["subscription"] for row in item["models"])
+    subscription = next(row for row in item["connections"] if row["id"] == "subscription")
+    # An account is offered exact models only; no alias or "account default".
+    assert [row["id"] for row in subscription["models"]] == ["studio-model"]
+    assert subscription["billing"]["kind"] == "subscription"
     assert not requests
 
 
@@ -169,7 +181,9 @@ async def test_one_click_api_run_registers_actual_conditions_and_hides_capabilit
 async def test_subscription_run_has_truthful_briefing_and_unmeasured_model_cost(product):
     world, _studio, client, requests, launches, connection = product
     connection.update(state="connected", auth_method="subscription")
-    response = await client.post("/api/runs", json=run_body(auth_mode="subscription", model=None))
+    refused = await client.post("/api/runs", json=run_body(auth_mode="subscription", model=None))
+    assert refused.status_code == 400 and not launches
+    response = await client.post("/api/runs", json=run_body(auth_mode="subscription"))
     assert response.status_code == 201, response.text
     info = launches[0][0]
     run_id = info["run_id"]
@@ -476,6 +490,114 @@ async def test_a_held_life_switches_model_and_resumes_on_a_fresh_runner(product)
     response = await client.post(f"/api/lives/{life_id}/model", json={"model": "claude-studio"})
     assert response.status_code == 400
     await client.post(f"/api/lives/{life_id}/beam-up")
+
+
+def effortful(studio, monkeypatch):
+    catalog = {
+        "effort_levels": ["low", "medium", "high", "xhigh", "max"],
+        "models": {
+            "claude-studio": {
+                "label": "Claude Studio",
+                "group": "current",
+                "efforts": ["low", "medium", "high"],
+                "default_effort": "medium",
+            },
+            "claude-studio-next": {
+                "label": "Claude Studio Next",
+                "group": "earlier",
+                "efforts": [],
+            },
+        },
+    }
+    monkeypatch.setattr(studio, "model_catalog", catalog)
+
+
+async def test_each_connection_offers_what_it_serves_crossed_with_reviewed_prices(
+    product, monkeypatch
+):
+    world, studio, client, _requests, _launches, connection = product
+    effortful(studio, monkeypatch)
+    world.instance_settings.update_provider("anthropic", api_key="fixture-anthropic-key")
+    world.instance_settings._save_served(
+        "anthropic", ["claude-studio", "claude-unreviewed"], "2026-10-24T00:00:00Z"
+    )
+    connection.update(state="connected", auth_method="subscription")
+    item = next(
+        row
+        for row in (await client.get("/api/harnesses")).json()["harnesses"]
+        if row["id"] == "claude-code"
+    )
+    assert (item["kind"], item["provider"], item["transcript"]) == (
+        "native",
+        "anthropic",
+        "claude-stream-json",
+    )
+    key, account = item["connections"]
+    assert key["label"] == "Anthropic API key" and key["billing"]["kind"] == "metered"
+    rows = {row["id"]: row for row in key["models"]}
+    assert rows["claude-studio"]["served"] is True and rows["claude-studio"]["selectable"]
+    assert rows["claude-studio"]["label"] == "Claude Studio"
+    assert rows["claude-studio"]["efforts"] == ["low", "medium", "high"]
+    # The key does not serve it, so it cannot be chosen; nor can an unpriced one it does.
+    assert rows["claude-studio-next"]["served"] is False
+    assert not rows["claude-studio-next"]["selectable"]
+    assert not rows["claude-unreviewed"]["priced"] and not rows["claude-unreviewed"]["selectable"]
+    assert account["billing"]["kind"] == "estimated"
+    assert {row["id"] for row in account["models"]} == {"claude-studio", "claude-studio-next"}
+    assert all(row["served"] is None for row in account["models"])
+
+
+async def test_effort_is_a_registered_condition_passed_as_chosen(product, monkeypatch):
+    world, studio, client, _requests, launches, connection = product
+    effortful(studio, monkeypatch)
+    connection.update(state="connected", auth_method="subscription")
+    body = run_body(harness_id="claude-code", auth_mode="subscription", model="claude-studio")
+    for refused in (
+        {**body, "effort": "max"},
+        {**body, "model": "claude-studio-next", "effort": "low"},
+    ):
+        response = await client.post("/api/runs", json=refused)
+        assert response.status_code == 400, refused
+    chosen = await client.post("/api/runs", json={**body, "effort": "high"})
+    assert chosen.status_code == 201, chosen.text
+    config = world.run_config(launches[-1][0]["run_id"])
+    assert config["effort"] == "high" and config["model_metering"] == "transcript"
+    await client.post(f"/api/runs/{launches[-1][0]['run_id']}/stop", json={})
+    # Left to the model's default, the default is still recorded explicitly.
+    default = await client.post("/api/runs", json=body)
+    assert default.status_code == 201, default.text
+    second = world.run_config(launches[-1][0]["run_id"])
+    assert second["effort"] == "medium"
+    assert (
+        world.store.get_run(launches[-1][0]["run_id"])["config"]["tuple"]["runtime_protocol_id"]
+        != world.store.get_run(launches[-2][0]["run_id"])["config"]["tuple"]["runtime_protocol_id"]
+    )
+    await client.post(f"/api/runs/{launches[-1][0]['run_id']}/stop", json={})
+    none = await client.post("/api/runs", json={**body, "model": "claude-studio-next"})
+    assert none.status_code == 201, none.text
+    assert world.run_config(launches[-1][0]["run_id"])["effort"] is None
+
+
+async def test_a_codex_account_lists_its_own_catalogue(product, monkeypatch):
+    _world, studio, client, _requests, _launches, connection = product
+    connection.update(state="connected", auth_method="subscription")
+    served = [
+        {"id": "studio-model", "efforts": ["low", "medium", "ultra"], "default_effort": "low"},
+        {"id": "gpt-unreviewed", "efforts": ["low"], "default_effort": "low"},
+    ]
+    auth = studio.harnesses._auth()
+    monkeypatch.setattr(auth, "served_models", lambda harness_id, instance_id="default": served)
+    item = next(
+        row
+        for row in (await client.get("/api/harnesses")).json()["harnesses"]
+        if row["id"] == "codex"
+    )
+    account = next(row for row in item["connections"] if row["id"] == "subscription")
+    rows = {row["id"]: row for row in account["models"]}
+    assert rows["studio-model"]["efforts"] == ["low", "medium", "ultra"]
+    assert rows["studio-model"]["default_effort"] == "low"
+    # Codex's account spend is unmeasured, so an unpriced model stays selectable.
+    assert rows["gpt-unreviewed"]["selectable"] and not rows["gpt-unreviewed"]["priced"]
 
 
 @pytest.mark.parametrize(

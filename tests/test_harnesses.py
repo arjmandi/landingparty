@@ -282,6 +282,44 @@ def test_an_estimated_claude_session_streams_each_messages_final_usage(tmp_path,
     assert argv[argv.index("--output-format") + 1] == "stream-json"
 
 
+@pytest.mark.parametrize(
+    ("harness_id", "expected"),
+    [
+        ("claude-code", ["--effort", "high"]),
+        ("codex", ["-c", 'model_reasoning_effort="high"']),
+    ],
+)
+def test_effort_reaches_each_client_in_its_own_form(tmp_path, harness_id, expected):
+    root = tmp_path / "binding"
+    root.mkdir()
+    definition = next(item for item in BUILTINS if item.id == harness_id)
+    options = {
+        "root": root,
+        "work": tmp_path,
+        "run_info": {"run_id": "r_fixture", "run_token": "capability", "preamble": "Briefing"},
+        "model": "known-model",
+        "auth_mode": "subscription",
+        "profile": tmp_path / "official-profile",
+        "agent_url": "http://127.0.0.1:7777/agent",
+        "lane_url": "http://127.0.0.1:7777/model",
+        "environment": {"PATH": os.environ["PATH"]},
+    }
+    argv, _env, _prompt = launch_configuration(
+        definition, "/trusted/native-cli", effort="high", **options
+    )
+    position = argv.index(expected[1])
+    assert argv[position - 1] == expected[0]
+    with pytest.raises(ValueError, match="effort"):
+        launch_configuration(definition, "/trusted/native-cli", effort="extreme", **options)
+
+
+async def test_a_run_launches_only_with_an_effort_its_harness_takes(native):
+    service, _world, create, _mode, _script = native
+    info = create(effort="high")
+    with pytest.raises(ValueError, match="effort"):
+        await service.launch(info, "fixture", model="fixture-model")
+
+
 async def test_explicit_pinned_installer_is_not_triggered_by_discovery(native, tmp_path):
     service, _world, _create, _mode, _script = native
     bin_dir = tmp_path / "bin"

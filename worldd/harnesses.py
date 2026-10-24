@@ -282,8 +282,11 @@ class HarnessService(VenueDB):
         match = re.search(r"\b\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?\b", text)
         return match[0] if result["exit_code"] == 0 and match else None
 
-    def _api_ready(self, harness_id):
-        key = "WORLD_ANTHROPIC_API_KEY" if harness_id == "claude-code" else "WORLD_OPENAI_API_KEY"
+    def _api_ready(self, definition):
+        """Whether the key of the provider whose models this harness uses is set."""
+        if not definition.provider:
+            return False
+        key = f"WORLD_{definition.provider.upper()}_API_KEY"
         settings = self.settings or getattr(self.world, "services", {}).get("settings")
         if settings and hasattr(settings, "resolve"):
             try:
@@ -319,7 +322,7 @@ class HarnessService(VenueDB):
                     "version": version,
                     "version_supported": supported,
                     "auth_modes": list(definition.auth_modes),
-                    "api_ready": self._api_ready(definition.id),
+                    "api_ready": self._api_ready(definition),
                     "subscription_auth": connection,
                     "install_status": {
                         key: value
@@ -335,7 +338,14 @@ class HarnessService(VenueDB):
                         "npm": bool(shutil.which("npm", path=self.environment.get("PATH"))),
                     },
                     "isolation": "cooperative",
-                    "subscription_model_cost": "unmeasured",
+                    "subscription_model_cost": "estimated"
+                    if definition.transcript
+                    else "unmeasured",
+                    "kind": definition.kind,
+                    "provider": definition.provider,
+                    "efforts": list(definition.efforts),
+                    "transcript": definition.transcript,
+                    "description": definition.description,
                 }
             )
         return {"items": items}
@@ -540,6 +550,10 @@ class HarnessService(VenueDB):
             raise ValueError("API mode requires the run's explicitly selected model snapshot")
         # A transcript-metered session prices each message from the client's own reports.
         estimated = config.get("model_metering") == "transcript"
+        # The effort is the run's registered condition, never a launch-time choice.
+        effort = config.get("effort")
+        if effort is not None and effort not in definition.efforts:
+            raise ValueError("This harness does not accept the run's effort level")
         binary = binary_path(definition, self.tools, self.environment)
         version = await self._version(definition, binary) if binary else None
         if not version:
@@ -591,6 +605,7 @@ class HarnessService(VenueDB):
                 lane_url=self.lane_url,
                 environment=self.environment,
                 stream_usage=estimated,
+                effort=effort,
             )
             value = {
                 "session_id": session_id,
@@ -599,6 +614,7 @@ class HarnessService(VenueDB):
                 "instance_id": instance_id,
                 "auth_mode": auth_mode,
                 "model": model,
+                "effort": effort,
                 "output_token_limit": self._configured_output_limit(config, model),
                 "state": "starting",
                 "started_at": now(),
@@ -658,6 +674,7 @@ class HarnessService(VenueDB):
                 version=version,
                 auth_mode=auth_mode,
                 model=model,
+                effort=effort,
                 billing=value["billing"],
                 argv_hash=digest(argv),
                 prompt_hash=digest(stdin),

@@ -340,6 +340,25 @@ async def test_explicit_validation_is_fixed_read_only_redacted_and_not_automatic
     assert settings.status()["credentials"]["openai"]["validation"]["status"] == "valid"
 
 
+async def test_validation_keeps_the_models_the_key_serves(settings):
+    settings.update_provider("anthropic", api_key=KEY)
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(
+            200, json={"data": [{"id": "claude-opus-5-5"}, {"id": "bad id"}, {"type": "model"}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await settings.validate_provider("anthropic", client=client)
+    assert result["status"] == "valid"
+    assert seen == ["https://api.anthropic.com/v1/models?limit=1000"]
+    assert settings.served_models("anthropic") == ["claude-opus-5-5"]
+    assert settings.served_models("openai") is None
+    assert KEY not in (settings.model_lists / "anthropic.json").read_text()
+
+
 @pytest.mark.parametrize(
     "status,expected",
     [

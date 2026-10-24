@@ -28,7 +28,19 @@ class HarnessManifest:
     version_args: tuple[str, ...] = ("--version",)
     launcher: Callable | None = None
     auth_modes: tuple[str, ...] = ("api_key", "subscription")
+    # Native harnesses ship with the world at their pins; an add-on is a trusted
+    # developer's registry entry. Neither can be supplied over HTTP or the UI.
+    kind: str = "add-on"
+    # Whose models and API key the harness uses; an API key belongs to its provider.
+    provider: str | None = None
+    # Effort levels the client accepts; a model's own levels narrow them.
+    efforts: tuple[str, ...] = ()
+    # The client stream a transcript meter reads, once a real one has been verified.
+    transcript: str | None = None
+    description: str = ""
 
+
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 BUILTINS = (
     HarnessManifest(
@@ -38,8 +50,24 @@ BUILTINS = (
         "@anthropic-ai/claude-code",
         "2.1.308",
         "WORLD_CLAUDE_CLI",
+        kind="native",
+        provider="anthropic",
+        efforts=EFFORTS,
+        transcript="claude-stream-json",
+        description="Anthropic's native coding agent with your world tools.",
     ),
-    HarnessManifest("codex", "Codex", "codex", "@openai/codex", "0.163.0", "WORLD_CODEX_CLI"),
+    HarnessManifest(
+        "codex",
+        "Codex",
+        "codex",
+        "@openai/codex",
+        "0.163.0",
+        "WORLD_CODEX_CLI",
+        kind="native",
+        provider="openai",
+        efforts=(*EFFORTS, "ultra"),
+        description="OpenAI's native coding agent with your world tools.",
+    ),
 )
 
 
@@ -174,12 +202,16 @@ def launch_configuration(
     lane_url,
     environment,
     stream_usage=False,
+    effort=None,
 ):
     """Return argv/env/stdin; only the constructor's trusted registry can add launchers.
 
     ``stream_usage`` asks the client for each message's final usage as it streams,
     which a transcript-metered session needs to price every message exactly.
+    ``effort`` is passed to the client as chosen; None leaves the client's default.
     """
+    if effort is not None and effort not in manifest.efforts:
+        raise ValueError("This harness does not accept that effort level")
     home = root / "home"
     home.mkdir(mode=0o700)
     env = base_environment(environment, home)
@@ -253,6 +285,8 @@ def launch_configuration(
         argv += ["--setting-sources", "", "--no-session-persistence"]
         if stream_usage:
             argv.append("--include-partial-messages")
+        if effort:
+            argv += ["--effort", effort]
         if model:
             argv += ["--model", model]
         return argv, env, prompt.encode()
@@ -301,6 +335,8 @@ def launch_configuration(
         )
     else:
         env["CODEX_HOME"] = str(profile)
+    if effort:
+        config["model_reasoning_effort"] = effort
 
     # JSON scalar/array syntax is also TOML syntax for these fixed values.
     def toml(value):

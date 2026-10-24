@@ -25,9 +25,15 @@ import uuid
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from .harness_config import BUILTINS
 from .storage import canonical_json, utc_now
 
-PROVIDERS = {"claude-code": "anthropic", "codex": "openai"}
+# Subscription logins of the native harnesses, by whose account they sign in to.
+PROVIDERS = {
+    manifest.id: manifest.provider
+    for manifest in BUILTINS
+    if "subscription" in manifest.auth_modes and manifest.provider
+}
 _INSTANCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 _ANSI = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]")
 _URL = re.compile(r"https?://[^\s<>\"'\x1b]+")
@@ -250,6 +256,45 @@ class HarnessAuthService:
     def profile_path(self, harness_id, instance_id="default"):
         """Private launcher-only path; never include this in the public UI response."""
         return self._profile_base(harness_id, instance_id) / "config"
+
+    def served_models(self, harness_id, instance_id="default"):
+        """The models a signed-in account lists for itself, when its client keeps that list.
+
+        Codex caches its account's catalogue (slugs, reasoning levels) in its profile;
+        Claude Code keeps none, so its subscription is offered the reviewed catalogue.
+        """
+        if harness_id != "codex":
+            return None
+        try:
+            path = self.profile_path(harness_id, instance_id) / "models_cache.json"
+            if path.stat().st_size > 1024 * 1024:
+                return None
+            value = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return None
+        rows = value.get("models") if isinstance(value, dict) else None
+        if not isinstance(rows, list):
+            return None
+        served = []
+        for row in rows:
+            if not isinstance(row, dict) or row.get("visibility", "list") != "list":
+                continue
+            slug = row.get("slug")
+            levels = [
+                level.get("effort") if isinstance(level, dict) else level
+                for level in row.get("supported_reasoning_levels") or []
+            ]
+            if isinstance(slug, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}", slug):
+                served.append(
+                    {
+                        "id": slug,
+                        "efforts": [level for level in levels if isinstance(level, str)],
+                        "default_effort": row.get("default_reasoning_level")
+                        if isinstance(row.get("default_reasoning_level"), str)
+                        else None,
+                    }
+                )
+        return served
 
     def profile_env(self, harness_id, instance_id="default"):
         profile = self._profile_base(harness_id, instance_id)

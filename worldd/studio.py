@@ -21,6 +21,7 @@ class StartRun(StrictModel):
     harness_id: str = Field(min_length=1, max_length=80)
     auth_mode: str = "api_key"
     model: str | None = Field(default=None, max_length=200)
+    effort: str | None = Field(default=None, max_length=20)
     goal: str | None = Field(default=None, max_length=20000)
     name: str | None = Field(default=None, max_length=120)
     budget_usd: float = Field(default=20, gt=0, le=10000)
@@ -33,6 +34,7 @@ class StartLife(StrictModel):
     harness_id: str = Field(min_length=1, max_length=80)
     auth_mode: str = "api_key"
     model: str | None = Field(default=None, max_length=200)
+    effort: str | None = Field(default=None, max_length=20)
     objective: str | None = Field(default=None, max_length=20000)
     name: str | None = Field(default=None, max_length=120)
     balance_usd: float = Field(default=20, gt=0, le=10000)
@@ -51,6 +53,7 @@ class RecordDeposit(StrictModel):
 
 class SwitchModel(StrictModel):
     model: str = Field(min_length=1, max_length=200)
+    effort: str | None = Field(default=None, max_length=20)
 
 
 class PostBounty(StrictModel):
@@ -83,6 +86,84 @@ class StudioService:
             lane_url=lane_url or self.origin + "/model",
         )
 
+    def _model_row(self, model, price, *, efforts, served=None, default_effort=None):
+        """One model as a person chooses it: label, group, rates, effort levels."""
+        entry = self._catalog_entry(model)
+        levels = entry.get("efforts", []) if efforts is None else efforts
+        return {
+            "id": model,
+            "label": entry.get("label", model),
+            "group": entry.get("group", "earlier"),
+            "input_usd": price.get("input") if price else None,
+            "output_usd": price.get("output") if price else None,
+            "priced": bool(price),
+            "served": served,
+            "efforts": list(levels),
+            "default_effort": (default_effort or entry.get("default_effort")) if levels else None,
+        }
+
+    def _connection_models(self, item, table, connection):
+        """What a connection can run: what it serves, crossed with what has a reviewed price.
+
+        An API key lists what its provider served at validation. A Codex account lists
+        its own catalogue. A Claude subscription has no list, so it is offered the
+        reviewed catalogue. A model with no reviewed price is listed but not selectable
+        wherever spend must be priced.
+        """
+        provider = item["provider"]
+        priced = {
+            name: row
+            for name, row in table.items()
+            if row.get("provider") == provider
+            and self._catalog_entry(name).get("group") != "retired"
+        }
+        harness_levels = item.get("efforts", [])
+
+        def narrowed(levels):
+            return [level for level in levels if level in harness_levels]
+
+        if connection == "api_key":
+            served = self.settings.served_models(provider)
+            names = list(priced) + [m for m in served or [] if m not in priced and m not in table]
+            rows = [
+                self._model_row(
+                    name,
+                    priced.get(name),
+                    efforts=narrowed(self._catalog_entry(name).get("efforts", [])),
+                    served=None if served is None else name in served,
+                )
+                for name in names
+            ]
+        else:
+            auth = self.harnesses._auth()
+            account = auth.served_models(item["id"]) if auth else None
+            if account:
+                rows = [
+                    self._model_row(
+                        row["id"],
+                        priced.get(row["id"]),
+                        efforts=narrowed(row["efforts"]),
+                        served=True,
+                        default_effort=row["default_effort"],
+                    )
+                    for row in account
+                ]
+            else:
+                rows = [
+                    self._model_row(
+                        name,
+                        row,
+                        efforts=narrowed(self._catalog_entry(name).get("efforts", [])),
+                    )
+                    for name, row in priced.items()
+                ]
+        # Priced spend (a metered key, an estimated subscription) needs a reviewed price.
+        needs_price = connection == "api_key" or bool(item.get("transcript"))
+        for row in rows:
+            row["selectable"] = row["served"] is not False and (row["priced"] or not needs_price)
+        order = {"current": 0, "earlier": 1}
+        return sorted(rows, key=lambda row: (order.get(row["group"], 2), not row["priced"]))
+
     async def catalog(self):
         actual = await self.harnesses.library()
         prices = self.settings.model_prices(self.world.model_pricing_base)
@@ -90,62 +171,75 @@ class StudioService:
         items = []
         for source in actual["items"]:
             item = dict(source)
-            provider = "anthropic" if item["id"] == "claude-code" else "openai"
+            item.setdefault("provider", "anthropic" if item["id"] == "claude-code" else "openai")
+            item.setdefault("efforts", [])
             connection = item.get("subscription_auth") or {}
             subscribed = (
                 connection.get("state") == "connected"
                 and connection.get("auth_method") == "subscription"
             )
             installed = item.get("installed", False)
-            models = [
-                {"id": name, "label": name, "auth_modes": ["api_key"]}
-                for name, entry in table.items()
-                if entry.get("provider") == provider
-            ]
-            subscription_models = [
-                {"id": "", "label": "Account default", "auth_modes": ["subscription"]}
-            ] + [
-                {"id": name, "label": name, "auth_modes": ["subscription"]}
-                for name in (["sonnet", "opus", "haiku"] if provider == "anthropic" else [])
+            provider_name = "Anthropic" if item["provider"] == "anthropic" else "OpenAI"
+            estimated = bool(item.get("transcript"))
+            key_models = self._connection_models(item, table, "api_key")
+            account_models = self._connection_models(item, table, "subscription")
+            connections = [
+                {
+                    "id": "api_key",
+                    "label": f"{provider_name} API key",
+                    "configured": bool(item.get("api_ready")),
+                    "ready": bool(
+                        installed
+                        and item.get("api_ready")
+                        and any(row["selectable"] for row in key_models)
+                    ),
+                    "reason": "Install the native client first."
+                    if not installed
+                    else f"Add your {provider_name} API key on this harness."
+                    if not item.get("api_ready")
+                    else "No model this key serves has a reviewed price yet."
+                    if not any(row["selectable"] for row in key_models)
+                    else None,
+                    "billing": {"kind": "metered", "label": "Metered API", "usd_metered": True},
+                    "models": key_models,
+                },
+                {
+                    "id": "subscription",
+                    "label": "Subscription account",
+                    "configured": subscribed,
+                    "ready": bool(installed and subscribed),
+                    "reason": "Install the native client first."
+                    if not installed
+                    else "Connect your subscription account."
+                    if not subscribed
+                    else None,
+                    "billing": {
+                        "kind": "estimated" if estimated else "subscription",
+                        "label": "Provider subscription · model dollars estimated at API prices"
+                        if estimated
+                        else "Provider subscription · model dollars unmeasured",
+                        "usd_metered": False,
+                    },
+                    "models": account_models,
+                },
             ]
             item.update(
-                provider=provider,
-                description=(
-                    "Anthropic's native coding agent with your world tools."
-                    if provider == "anthropic"
-                    else "OpenAI's native coding agent with your world tools."
-                ),
-                models=models + subscription_models,
+                provider=item["provider"],
+                kind=item.get("kind", "add-on"),
+                description=item.get("description")
+                or f"{provider_name}'s native coding agent with your world tools.",
                 connection=self.connection_view(connection),
+                connections=connections,
+                # The flat list and modes are the earlier shape, kept for older clients.
+                models=[
+                    {"id": row["id"], "label": row["label"], "auth_modes": [entry["id"]]}
+                    for entry in connections
+                    for row in entry["models"]
+                    if row["selectable"]
+                ],
                 modes=[
-                    {
-                        "id": "api_key",
-                        "label": "API key",
-                        "ready": bool(installed and item.get("api_ready") and models),
-                        "reason": "Install the native client first."
-                        if not installed
-                        else "Configure the provider API key in Settings."
-                        if not item.get("api_ready")
-                        else "Add a reviewed exact model and prices in Settings."
-                        if not models
-                        else None,
-                        "billing": {"kind": "metered", "label": "Metered API", "usd_metered": True},
-                    },
-                    {
-                        "id": "subscription",
-                        "label": "Subscription account",
-                        "ready": bool(installed and subscribed),
-                        "reason": "Install the native client first."
-                        if not installed
-                        else "Connect your subscription account."
-                        if not subscribed
-                        else None,
-                        "billing": {
-                            "kind": "subscription",
-                            "label": "Provider subscription · model dollars unmeasured",
-                            "usd_metered": False,
-                        },
-                    },
+                    {key: entry[key] for key in ("id", "label", "ready", "reason", "billing")}
+                    for entry in connections
                 ],
             )
             items.append(item)
@@ -184,35 +278,40 @@ class StudioService:
             raise ValueError("Choose one of the supported episode tool packs")
 
     async def _resolve(self, request):
-        """The installed, ready harness and exact priced model a request names."""
+        """The ready harness, connection, exact model and effort a request names."""
         library = await self.catalog()
         matching = [item for item in library["harnesses"] if item["id"] == request.harness_id]
         if len(matching) != 1:
             raise ValueError("Choose an installed harness from the library")
         item = matching[0]
-        mode = next(row for row in item["modes"] if row["id"] == request.auth_mode)
-        if not mode["ready"]:
-            raise ValueError(mode["reason"] or "Harness setup is incomplete")
+        connection = next(row for row in item["connections"] if row["id"] == request.auth_mode)
+        if not connection["ready"]:
+            raise ValueError(connection["reason"] or "Harness setup is incomplete")
         if self.harnesses.is_busy(request.harness_id):
             raise ValueError("This harness account already has an active run")
         if self.reserved(request.harness_id):
             raise ValueError("A living life holds this harness; beam it up first")
-        model = request.model or None
-        if request.auth_mode == "api_key" and (
-            not model
-            or not any(
-                row["id"] == model and "api_key" in row["auth_modes"] for row in item["models"]
-            )
-        ):
+        row = next((row for row in connection["models"] if row["id"] == request.model), None)
+        if row is None or not row["selectable"]:
             raise ValueError(
-                "This model has no reviewed price, so API mode cannot meter it. Choose a "
-                "priced model, or add its rates to the world's price table."
+                "Choose a model this connection serves"
+                if row is not None and row["served"] is False
+                else "This model has no reviewed price, so its spend cannot be metered or "
+                "estimated. Choose a priced model, or add its rates to the world's price table."
+                if row is not None or request.model
+                else "Choose the exact model to run"
             )
-        return item, model
+        effort = request.effort or row["default_effort"]
+        if effort is not None and effort not in row["efforts"]:
+            raise ValueError(f"{row['label']} does not take that effort level on this harness")
+        return item, row["id"], effort
 
-    def _config(self, request, item, model, *, goal, packs, budget, model_metering="lane"):
+    def _config(
+        self, request, item, model, *, goal, packs, budget, model_metering="lane", effort=None
+    ):
         return RunConfig(
             model_metering=model_metering,
+            effort=effort,
             name=request.name,
             goal=goal,
             family="F7",
@@ -241,7 +340,7 @@ class StudioService:
     async def start(self, request):
         self._check(request)
         async with self._launch:
-            item, model = await self._resolve(request)
+            item, model, effort = await self._resolve(request)
             config = self._config(
                 request,
                 item,
@@ -249,6 +348,11 @@ class StudioService:
                 goal=request.goal.strip() if request.goal and request.goal.strip() else None,
                 packs=list(dict.fromkeys(["deliver", *request.packs])),
                 budget={"usd": request.budget_usd, "wall_s": request.wall_minutes * 60},
+                # A subscription session is estimated wherever its client's stream is read.
+                model_metering="transcript"
+                if request.auth_mode == "subscription" and item.get("transcript")
+                else "lane",
+                effort=effort,
             )
             info = self.world.create_run(config)
             try:
@@ -289,23 +393,16 @@ class StudioService:
     async def start_life(self, request):
         """A life on a balance, with no objective unless one is given; it rests and strands."""
         self._check(request)
-        # A subscription bypasses the model lane, so its life's balance is estimated from
-        # the transcript. Only Claude Code's usage reports are confirmed for that so far.
-        metering = "transcript" if request.auth_mode == "subscription" else "lane"
-        if metering == "transcript" and request.harness_id != "claude-code":
-            raise ValueError(
-                "A Codex life needs an API key for now: its subscription transcript's usage "
-                "reports are not yet confirmed for estimating a balance"
-            )
         objective = request.objective.strip() if request.objective else ""
         async with self._launch:
-            item, model = await self._resolve(request)
-            if metering == "transcript" and not any(
-                row["id"] == model and "api_key" in row["auth_modes"] for row in item["models"]
-            ):
+            item, model, effort = await self._resolve(request)
+            # A subscription bypasses the model lane, so its life's balance is estimated
+            # from the client's own stream; a harness whose stream is unverified cannot.
+            metering = "transcript" if request.auth_mode == "subscription" else "lane"
+            if metering == "transcript" and not item.get("transcript"):
                 raise ValueError(
-                    "A subscription life needs an exact priced model, so its estimated spend "
-                    "can be priced; aliases and the account default cannot"
+                    f"A {item['name']} life needs an API key for now: its subscription "
+                    "transcript's usage reports are not yet confirmed for estimating a balance"
                 )
             # Every Studio life may claim bounties; trading stays an explicit opt-in.
             packs = [
@@ -324,6 +421,7 @@ class StudioService:
                 # The session may use everything the life has left; the life caps it.
                 budget={"usd": 10000, "wall_s": request.session_minutes * 60},
                 model_metering=metering,
+                effort=effort,
             ).model_dump(mode="json")
             lives = self._lives()
             life = lives.create(
@@ -417,6 +515,7 @@ class StudioService:
             "hold_reason": status.get("hold_reason"),
             "harness_id": config.get("harness_id"),
             "model": runner["cell"].get("model") if runner else None,
+            "effort": config.get("effort"),
             "runner_state": runner["state"] if runner else None,
             "market": "market" in life.get("income_channels", []),
             "estimated": life.get("model_metering") == "transcript",
@@ -477,17 +576,23 @@ class StudioService:
         if old.get("study_binding"):
             raise ValueError("A study's life keeps its frozen configuration")
         config = dict(old["cell"]["config"])
-        provider = "anthropic" if config["harness_id"].startswith("claude-code@") else "openai"
-        prices = self.settings.model_prices(self.world.model_pricing_base)
-        row = prices.get("models", prices).get(request.model)
-        if (
-            not row
-            or row.get("provider") != provider
-            or self._catalog_entry(request.model).get("group") == "retired"
-        ):
-            raise ValueError("Choose a reviewed, current model this harness can use")
         if request.model == old["cell"]["model"]:
             raise ValueError("Choose a different model than the one that failed")
+        item = next(
+            item
+            for item in (await self.catalog())["harnesses"]
+            if config["harness_id"].startswith(item["id"] + "@")
+        )
+        connection = next(
+            row for row in item["connections"] if row["id"] == config["model_billing_mode"]
+        )
+        row = next((row for row in connection["models"] if row["id"] == request.model), None)
+        if row is None or not row["selectable"]:
+            raise ValueError("Choose a reviewed, current model this connection can run")
+        effort = request.effort or row["default_effort"]
+        if effort is not None and effort not in row["efforts"]:
+            raise ValueError(f"{row['label']} does not take that effort level on this harness")
+        config["effort"] = effort
         async with self._launch:
             await studies.pause_life(old["runner_id"], reason="model_switched")
             superseded = studies.get_life_runner(old["runner_id"])
