@@ -108,6 +108,15 @@ chargebacks are outflows on the receiving channel. The author-class columns
 stay separate: only independent money is grounded, sponsor money is its own
 series, and human-attested deposits are a third.
 
+These channels are a life's **ways to earn**, each a way of acting in the world
+with its own dynamics, not a credit abstraction over money. In the Studio the
+operator chooses them at beam-down: deposits they record are always on, and
+bounties and the paper market are opt-in, each issuing its pack with it. The
+life page's Purser is the one money panel: its balance, a tab per way to earn
+(resupply with a recorded deposit; the bounties this life can still claim and
+those it was paid, with the post form for the instance's board; its market
+stakes and payouts), and the ledger of every movement.
+
 Deposits are idempotent for an identical settlement and reject conflicting
 evidence reuse, undeclared channels, and any deposit to an ended life. There is
 no rescue: no channel lets the human add money, and a recorded deposit without

@@ -27,3 +27,4 @@ h1,h2,h3,.tag{overflow-wrap:anywhere}.tag{max-width:100%}#run-setup{margin-botto
 @media(max-width:600px){.shape-choice,.deposit-form{grid-template-columns:1fr}}
 @media(max-width:780px){.list-label{display:none}}
 .model-list{list-style:none;margin:4px 0 12px;padding:0;display:grid;gap:3px;font-family:var(--mono);font-size:12px;color:var(--soft)}.model-list .muted{color:var(--muted)}.harness-card h4{margin:12px 0 2px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}.harness-card .detail-tags{margin:2px 0 8px}
+.earn-choice{border:1px solid var(--line);border-radius:var(--radius);margin:4px 0 12px;padding:10px 14px;display:grid;gap:6px}.earn-choice legend{font-size:12px;color:var(--muted);padding:0 4px}.purser-tabs{display:flex;gap:6px;margin:6px 0 12px;flex-wrap:wrap}.purser-tabs .button[aria-pressed=true]{color:var(--cyan);border-color:#305769;background:#112a3b}

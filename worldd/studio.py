@@ -41,6 +41,8 @@ class StartLife(StrictModel):
     session_minutes: float = Field(default=120, gt=0, le=10080)
     reply_policy: str = "blockers_only"
     packs: list[str] = Field(default_factory=lambda: ["deliver", "belief", "footprint"])
+    # Ways to earn beyond the deposits you record: bounties and the paper market.
+    bounty: bool = False
     market: bool = False
 
 
@@ -405,12 +407,12 @@ class StudioService:
                     f"A {item['name']} life needs an API key for now: its subscription "
                     "transcript's usage reports are not yet confirmed for estimating a balance"
                 )
-            # Every Studio life may claim bounties; trading stays an explicit opt-in.
+            # Each way to earn is the operator's choice; its pack comes with it.
             packs = [
                 "deliver",
                 "schedule",
-                "bounty",
                 *request.packs,
+                *(["bounty"] if request.bounty else []),
                 *(["market"] if request.market else []),
             ]
             config = self._config(
@@ -440,7 +442,7 @@ class StudioService:
                     "on_harness_exit": "rest",
                     "income_channels": [
                         "recorded",
-                        "bounty",
+                        *(["bounty"] if request.bounty else []),
                         *(["market"] if request.market else []),
                     ],
                     "market_settlement": "balance" if request.market else "paper",
@@ -519,6 +521,7 @@ class StudioService:
             "effort": config.get("effort"),
             "runner_state": runner["state"] if runner else None,
             "market": "market" in life.get("income_channels", []),
+            "income_channels": life.get("income_channels", []),
             "estimated": life.get("model_metering") == "transcript",
         }
 
@@ -539,6 +542,9 @@ class StudioService:
         return {
             "life": self._life_summary(life),
             "account": self.world.services["bank"].account(life_id),
+            "bounties": self.life_bounties(life_id)
+            if "bounty" in life.get("income_channels", [])
+            else None,
             "sessions": [
                 runs[item["run_id"]]
                 for item in reversed(life["sessions"])
@@ -642,6 +648,29 @@ class StudioService:
                     "SELECT payload FROM sponsor_bounties ORDER BY rowid DESC"
                 )
             ]
+        }
+
+    def life_bounties(self, life_id):
+        """The board as one life sees it: what it can still claim, and what it was paid."""
+        market = self.world.services["market"]
+        awarded = {
+            row["bounty_id"]
+            for row in market.db.execute(
+                "SELECT bounty_id FROM bounty_awards WHERE owner=?", (life_id,)
+            )
+        }
+        board = [
+            json.loads(row["payload"])
+            for row in market.db.execute("SELECT payload FROM sponsor_bounties ORDER BY rowid DESC")
+        ]
+        current = now()
+        return {
+            "open": [
+                item
+                for item in board
+                if item["bounty_id"] not in awarded and item["expires_at"] > current
+            ],
+            "awarded": [item for item in board if item["bounty_id"] in awarded],
         }
 
     def post_bounty(self, request):

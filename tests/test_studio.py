@@ -336,7 +336,9 @@ async def test_a_life_lives_on_its_balance_with_no_objective_and_holds_its_harne
     config = world.run_config(info["run_id"])
     assert config["life_id"] == life_id and config["goal"] is None
     assert "schedule" in config["packs"] and "objective" not in config["packs"]
-    assert "bounty" in config["packs"] and "market" not in config["packs"]
+    # Bounties and the market are ways to earn the operator chooses; neither is assumed.
+    assert "bounty" not in config["packs"] and "market" not in config["packs"]
+    assert world.services["lives"].get(life_id)["income_channels"] == ["recorded"]
     assert world.store.reconcile(info["run_id"])["cap_usd"] == 2
     assert "Your balance starts at $2" in config["preamble"]
     assert "you rest until 24 hours pass" in config["preamble"]
@@ -428,6 +430,32 @@ async def test_bounties_are_posted_and_listed(product):
     )
     assert posted.status_code == 201, posted.text
     assert posted.json()["bounties"][0]["title"] == "Fix a dead link"
+
+
+async def test_bounties_are_a_way_to_earn_shown_in_that_lifes_purser(product):
+    world, _studio, client, _requests, launches, _connection = product
+    world.instance_settings.update_provider("openai", api_key="fixture-openai-key")
+    await client.post(
+        "/api/bounties", json={"title": "Fix a dead link", "criterion": "Merged", "usd": 3}
+    )
+    response = await client.post("/api/lives", json=life_body(bounty=True, market=True))
+    assert response.status_code == 201, response.text
+    life_id = response.json()["life"]["life_id"]
+    await until(lambda: launches)
+    config = world.run_config(launches[0][0]["run_id"])
+    assert {"bounty", "market"} <= set(config["packs"])
+    detail = (await client.get(f"/api/lives/{life_id}")).json()
+    assert set(detail["life"]["income_channels"]) == {"recorded", "bounty", "market"}
+    assert [item["title"] for item in detail["bounties"]["open"]] == ["Fix a dead link"]
+    bounty_id = detail["bounties"]["open"][0]["bounty_id"]
+    market = world.services["market"]
+    market.db.execute(
+        "INSERT INTO bounty_awards VALUES (?,?,?)", (bounty_id, life_id, "evidence:fixture")
+    )
+    detail = (await client.get(f"/api/lives/{life_id}")).json()
+    assert detail["bounties"]["open"] == []
+    assert [item["bounty_id"] for item in detail["bounties"]["awarded"]] == [bounty_id]
+    await client.post(f"/api/lives/{life_id}/beam-up")
 
 
 async def test_a_claude_code_subscription_life_lives_on_an_estimated_balance(product):

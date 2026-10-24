@@ -435,7 +435,14 @@ async def main():
             "#run-effort option"
         ).evaluate_all("(items)=>items.map(item=>item.value)") == ["", "low", "medium", "high"]
         await page.locator("#run-effort").select_option("high")
+        checks["a_life_chooses_its_ways_to_earn"] = (
+            await page.locator("#earn-options").is_visible()
+            and await page.locator("#earn-options input[name=bounty]").count() == 1
+            and not await page.locator("#earn-options input[name=bounty]").is_checked()
+            and await page.locator("details input[name=market]").count() == 0
+        )
         await page.locator("#shape-run").check()
+        checks["a_run_has_no_ways_to_earn"] = not await page.locator("#earn-options").is_visible()
         checks["subscription_single_run_still_available"] = (
             await page.locator("#shape-run").is_checked()
             and not await page.locator("#launch-button").is_disabled()
