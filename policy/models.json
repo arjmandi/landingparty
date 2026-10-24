@@ -3,7 +3,8 @@
   "note": "Catalog metadata for people choosing a model: labels, groups and effort levels. Prices live in prices.json; this file is outside price_table_id. Groups: current, earlier, retired (never offered for new work). recommended names each provider's model a new life or run starts on when no default is saved.",
   "reviewed_at": "2026-10-24",
   "sources": {
-    "anthropic": "https://platform.claude.com/docs/en/about-claude/models/overview"
+    "anthropic": "https://platform.claude.com/docs/en/about-claude/models/overview",
+    "openai": "https://developers.openai.com/api/docs/models"
   },
   "effort_levels": [
     "low",
@@ -14,9 +15,99 @@
     "ultra"
   ],
   "recommended": {
-    "anthropic": "claude-sonnet-5-5"
+    "anthropic": "claude-sonnet-5-5",
+    "openai": "gpt-6.1-sol"
   },
   "models": {
+    "gpt-6.1-sol": {
+      "label": "GPT-6.1 Sol",
+      "group": "current",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "default_effort": "low"
+    },
+    "gpt-6-astra": {
+      "label": "GPT-6 Astra",
+      "group": "current",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "default_effort": "medium"
+    },
+    "gpt-6-luna": {
+      "label": "GPT-6 Luna",
+      "group": "current",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "medium"
+    },
+    "gpt-6-sol": {
+      "label": "GPT-6 Sol",
+      "group": "earlier",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "default_effort": "medium"
+    },
+    "gpt-5.6-sol": {
+      "label": "GPT-5.6 Sol",
+      "group": "earlier",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "default_effort": "low"
+    },
+    "gpt-5.6-terra": {
+      "label": "GPT-5.6 Terra",
+      "group": "earlier",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "default_effort": "medium"
+    },
+    "gpt-5.6-luna": {
+      "label": "GPT-5.6 Luna",
+      "group": "earlier",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "medium"
+    },
     "claude-fable-5-1": {
       "label": "Claude Fable 5.1",
       "group": "current",

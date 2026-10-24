@@ -404,8 +404,8 @@ class StudioService:
             metering = "transcript" if request.auth_mode == "subscription" else "lane"
             if metering == "transcript" and not item.get("transcript"):
                 raise ValueError(
-                    f"A {item['name']} life needs an API key for now: its subscription "
-                    "transcript's usage reports are not yet confirmed for estimating a balance"
+                    f"A {item['name']} life needs an API key: its subscription stream reports "
+                    "usage only when a session ends, so a balance could not stop it in time"
                 )
             # Each way to earn is the operator's choice; its pack comes with it.
             packs = [

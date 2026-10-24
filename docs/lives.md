@@ -155,7 +155,8 @@ another message like its largest, recording a `model_refused` so the life
 strands as under the lane; it records `estimate_overshoot` rather than going
 past the cap, and fails closed with `estimate_unavailable` on unpriced or
 unreadable usage. Estimated dollars are labelled as such and never pooled with
-metered ones. Only Claude Code's stream is confirmed for this so far.
+metered ones. Only Claude Code's stream reports usage per message; Codex's
+reports it once a session ends, so a Codex life needs an API key.
 `floor_event: strand` requires the `usd_balance` metric; other driver metrics
 keep `floor_event: bankruptcy` and accept only trusted observations through
 `observe_driver`. Driver arms deny money asks, but no code enforces this today:

@@ -1,0 +1,8 @@
+{
+  "name": "landingparty-native-codex",
+  "private": true,
+  "description": "The pinned Codex client built into the world image.",
+  "dependencies": {
+    "@openai/codex": "0.163.0"
+  }
+}

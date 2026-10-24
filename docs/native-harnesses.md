@@ -1,6 +1,6 @@
 # Managed native harnesses
 
-The operator application's Harness Library manages Claude Code and Codex through
+The operator application's Harnesses page manages Claude Code and Codex through
 `HarnessService` in `worldd/harnesses.py`. The supported versions are Claude Code
 2.1.308 and Codex 0.163.0. Discovery executes each client's bounded `--version`
 command. A different detected version is displayed but does not become ready to
@@ -16,6 +16,17 @@ be supplied over HTTP or the UI. Each manifest names its `provider` (whose
 models and API key it uses), the effort levels its client accepts, and the
 client stream a transcript meter reads, once one has been verified (Claude
 Code's `stream-json` today).
+
+In the Docker image, native harnesses are built in from the committed
+lockfiles in `deploy/harnesses/` and found through `WORLD_CLAUDE_CLI` and
+`WORLD_CODEX_CLI`; the install action below is for running `worldd` directly
+and for add-ons.
+
+**Codex on a subscription** stays unmeasured, and a Codex life needs an API key.
+`codex exec --json` reports usage once per turn, in `turn.completed`, without the
+model's name, and a session is one turn: the world would see a session's spend
+only after it ended, so it could not strand a life before the session overspent
+its balance. Codex's own session log keeps no per-call usage either.
 
 A harness pays for its model calls through one of two **connections**, both
 set up on the harness's own card:

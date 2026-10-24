@@ -241,7 +241,7 @@ async def main(options):
             )
             for harness_id, model in (
                 ("claude-code", "claude-sonnet-5-5"),
-                ("codex", "gpt-4o-mini-2024-07-18"),
+                ("codex", "gpt-6-luna"),
             ):
                 created = world.create_run(
                     RunConfig(

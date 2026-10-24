@@ -1,7 +1,7 @@
 # Getting started with Landing Party
 
 The Studio is the main way to use Landing Party. Start one world process, open
-one URL, install a native harness through the Library, connect a provider, and
+one URL, use a native harness (built into the Docker image), connect a provider, and
 start a run. Follow its timeline, beliefs, asks and footprint from the same app.
 There is one trusted operator per instance; no Landing Party website account or
 hosted service is required.
@@ -19,7 +19,7 @@ world/agent user separation, controlled mounts and restricted egress.
 Install these on the machine that will run `worldd`:
 
 - Python 3.12+, Git, Bash and [uv](https://docs.astral.sh/uv/getting-started/installation/).
-- Node.js 22+ and npm for the Library's native-client installer.
+- Node.js 22+ and npm for the Harnesses page's native-client installer (outside Docker).
 - A browser on your own computer to use Studio and complete provider sign-in.
 
 Linux is the validated host-native path. Use WSL2 on Windows. Docker is needed
@@ -85,9 +85,11 @@ The recorded proxy remains a private TCP service, normally on loopback port
 for deployment details and [the operator workflow](docs/product-experience.md)
 for how the panels behave.
 
-## 3. Install a harness in Library
+## 3. Install a harness on the Harnesses page
 
-Open **Library** and choose Claude Code or Codex. Click **Install client** if it
+In the Docker image, Claude Code and Codex are native harnesses built in at their
+pins, and this step is already done. Running `worldd` directly, open
+**Harnesses** and choose Claude Code or Codex. Click **Install client** if it
 is not installed. Installation uses the supported pinned npm package in this
 instance's private tools directory; it does not need a global npm installation
 or `sudo`. Wait for installation to finish and readiness to refresh.
@@ -116,7 +118,7 @@ does not open a terminal or browser window on your computer automatically.
   works when the native client is on a VPS and a browser callback cannot reach
   that server.
 
-Return to the Library and click **Check connection** if needed. Wait for the
+Return to the Harnesses page and click **Check connection** if needed. Wait for the
 state to become connected before starting a run. The app checks the official
 CLI's local login status; a URL being displayed is not successful authentication.
 Use **Cancel sign-in** for an interrupted flow, or **Disconnect** to remove that
@@ -232,7 +234,7 @@ The manual examples below use the default Studio's `/agent` and `/model` paths
 instead. Do not mix those layouts accidentally.
 
 For a manual client, install the corresponding official CLI yourself if it is
-not on PATH (the Library's private installation need not be on your shell PATH):
+not on PATH (the Harnesses page's private installation need not be on your shell PATH):
 
 ```bash
 npm install -g @openai/codex@0.163.0
@@ -510,9 +512,9 @@ from completed experiments.
 
 | Symptom | Check |
 | --- | --- |
-| Library cannot install a client | Node.js 22+ and npm must be on the server's PATH; restart after installing them. Inspect the actual installation result and retry. |
+| The Harnesses page cannot install a client | Node.js 22+ and npm must be on the server's PATH; restart after installing them. Inspect the actual installation result and retry. |
 | Subscription is not connected | Complete the official provider flow and use Check connection; an API-key login is not a subscription login. |
-| Claude sign-in on a VPS waits for a code | Complete provider authorization, then submit its confirmation code in the Library. |
+| Claude sign-in on a VPS waits for a code | Complete provider authorization, then submit its confirmation code on the Harnesses page. |
 | A connection is busy | One native profile can have only one active run; stop its current run first. |
 | Studio asks for a token / returns 401 | Use the instance's configured control token; an agent capability or provider key does not grant operator access. |
 | MCP returns 401 | Use `/agent`, the current run ID and capability. In explicit legacy mode use port 7778. Sealed capabilities are revoked. |

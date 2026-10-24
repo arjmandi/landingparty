@@ -20,7 +20,7 @@ FROM base AS build
 COPY . .
 RUN chmod -R a+rX /opt/landingparty && uv sync --frozen --extra full --no-dev
 
-# Only the world target needs Node for explicitly requested native CLI installs.
+# Only the world target needs Node: for its built-in native clients and add-on installs.
 # Keep this stage outside the agent target's dependency tree.
 FROM node:22-bookworm-slim AS node-runtime
 
@@ -32,6 +32,18 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
     && node -e 'if (Number(process.versions.node.split(".")[0]) < 22) process.exit(1)' \
     && npm --version
+# Native harnesses ship with the world at their pins, from committed lockfiles.
+# Lifecycle scripts stay off, so Claude Code's platform binary is linked by name.
+COPY deploy/harnesses /opt/harnesses
+RUN npm ci --prefix /opt/harnesses/claude-code --ignore-scripts --no-audit --no-fund \
+    && npm ci --prefix /opt/harnesses/codex --ignore-scripts --no-audit --no-fund \
+    && mkdir -p /opt/harnesses/bin \
+    && ln -s "/opt/harnesses/claude-code/node_modules/@anthropic-ai/claude-code-linux-$(node -p process.arch)/claude" /opt/harnesses/bin/claude \
+    && HOME=/tmp /opt/harnesses/bin/claude --version | grep -q '^2\.1\.308 ' \
+    && HOME=/tmp /opt/harnesses/codex/node_modules/.bin/codex --version | grep -q ' 0\.163\.0$' \
+    && chmod -R a+rX /opt/harnesses
+ENV WORLD_CLAUDE_CLI=/opt/harnesses/bin/claude \
+    WORLD_CODEX_CLI=/opt/harnesses/codex/node_modules/.bin/codex
 COPY --from=build /opt/landingparty /opt/landingparty
 RUN groupadd --gid 10002 harness && useradd --uid 10001 --gid 10002 --create-home world \
     && mkdir -p /data && chown world:harness /data
