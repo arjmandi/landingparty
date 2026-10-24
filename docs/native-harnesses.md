@@ -17,6 +17,10 @@ models and API key it uses), the effort levels its client accepts, and the
 client stream a transcript meter reads, once one has been verified (Claude
 Code's `stream-json` today).
 
+**ASSAY** is a native harness that plays through Claude Code: the world operates
+the ASSAY run and Claude Code is its player, on Claude Code's connections. See
+[ASSAY as a native harness](assay.md).
+
 In the Docker image, native harnesses are built in from the committed
 lockfiles in `deploy/harnesses/` and found through `WORLD_CLAUDE_CLI` and
 `WORLD_CODEX_CLI`; the install action below is for running `worldd` directly

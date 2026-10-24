@@ -797,3 +797,48 @@ async def test_only_authenticated_managed_codex_receives_a_recorded_output_bound
     assert saved["original_request"] == payload
     assert saved["request"]["max_output_tokens"] == 100
     assert call["reservation_id"] and store.spend(run_id)["model"] == 0.00035
+
+
+async def test_a_lane_only_capability_pays_for_model_calls_and_nothing_else(store, tmp_path):
+    capabilities = Capabilities(tmp_path)
+    run_id = run(store)
+    run_token, lane_token = capabilities.issue(run_id), capabilities.issue_lane(run_id)
+    # The agent boundary checks only the run capability; the lane's never passes it.
+    assert capabilities.verify(run_id, run_token) and not capabilities.verify(run_id, lane_token)
+    assert capabilities.verify_lane(run_id, lane_token)
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "model": "fixture-anthropic",
+                "content": [],
+                "usage": {"input_tokens": 100, "output_tokens": 10},
+            },
+        )
+
+    upstream = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app = FastAPI()
+    app.state.require_run_token = True
+    app.include_router(
+        create_lane_router(store, client=upstream, prices=PRICES, capabilities=capabilities)
+    )
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://world")
+    body = {"model": "fixture-anthropic", "max_tokens": 100, "messages": []}
+    async with client, upstream:
+        for token, status in (("forged-capability", 401), (lane_token, 200)):
+            response = await client.post(
+                f"/lane/{run_id}/anthropic/v1/messages",
+                headers={"authorization": "Bearer " + token},
+                json=body,
+            )
+            assert response.status_code == status, token
+        capabilities.revoke(run_id)
+        assert not capabilities.verify_lane(run_id, lane_token)
+        response = await client.post(
+            f"/lane/{run_id}/anthropic/v1/messages",
+            headers={"authorization": "Bearer " + lane_token},
+            json=body,
+        )
+        assert response.status_code == 401
+    capabilities.close()

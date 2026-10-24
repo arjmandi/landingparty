@@ -320,6 +320,37 @@ async def test_a_run_launches_only_with_an_effort_its_harness_takes(native):
         await service.launch(info, "fixture", model="fixture-model")
 
 
+@pytest.mark.parametrize("harness_id", ["claude-code", "codex"])
+def test_an_api_key_session_pays_for_models_with_the_lane_only_capability(tmp_path, harness_id):
+    root = tmp_path / "binding"
+    root.mkdir()
+    definition = next(item for item in BUILTINS if item.id == harness_id)
+    argv, env, _prompt = launch_configuration(
+        definition,
+        "/trusted/native-cli",
+        root=root,
+        work=tmp_path,
+        run_info={
+            "run_id": "r_fixture",
+            "run_token": "run-capability",
+            "lane_token": "lane-capability",
+            "preamble": "Briefing",
+        },
+        model="known-model",
+        auth_mode="api_key",
+        profile=tmp_path / "official-profile",
+        agent_url="http://127.0.0.1:7777/agent",
+        lane_url="http://127.0.0.1:7777/model",
+        environment={"PATH": os.environ["PATH"]},
+    )
+    assert env["WORLD_LANE_TOKEN"] == "lane-capability"
+    if harness_id == "claude-code":
+        assert env["ANTHROPIC_AUTH_TOKEN"] == "lane-capability"
+        assert "X-World-Run-Token: lane-capability" in env["ANTHROPIC_CUSTOM_HEADERS"]
+    else:
+        assert 'model_providers.landingparty.env_key="WORLD_LANE_TOKEN"' in argv
+
+
 async def test_explicit_pinned_installer_is_not_triggered_by_discovery(native, tmp_path):
     service, _world, _create, _mode, _script = native
     bin_dir = tmp_path / "bin"

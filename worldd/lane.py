@@ -426,14 +426,24 @@ def create_lane_router(
                 request.headers.get("x-world-internal-token", ""), internal_token
             )
         )
-        front_bearer = request.headers.get("authorization", "").removeprefix("Bearer ")
-        frontend_auth = bool(capabilities and capabilities.verify(run_id, front_bearer))
-        valid_run_token = bool(
-            frontend_auth
-            or (
+
+        def capability(token):
+            # The run's capability, or its lane-only one; the agent boundary takes only the first.
+            return bool(
                 capabilities
-                and capabilities.verify(run_id, request.headers.get("x-world-run-token", ""))
+                and (
+                    capabilities.verify(run_id, token)
+                    or (
+                        hasattr(capabilities, "verify_lane")
+                        and capabilities.verify_lane(run_id, token)
+                    )
+                )
             )
+
+        front_bearer = request.headers.get("authorization", "").removeprefix("Bearer ")
+        frontend_auth = capability(front_bearer)
+        valid_run_token = bool(
+            frontend_auth or capability(request.headers.get("x-world-run-token", ""))
         )
         if (
             getattr(request.app.state, "require_run_token", False)

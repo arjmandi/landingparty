@@ -20,12 +20,27 @@ FROM base AS build
 COPY . .
 RUN chmod -R a+rX /opt/landingparty && uv sync --frozen --extra full --no-dev
 
+# ASSAY plays through another native harness. Its hooks, worlds and constitution live
+# in its checkout rather than its wheel, so the pinned tag is cloned, checked against
+# its commit, and installed editable into its own interpreter.
+FROM base AS assay
+ARG ASSAY_REF=v1.5.1
+ARG ASSAY_COMMIT=44d8f08f2249a1e6ffd4868d285f1d529874d595
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/* \
+    && git clone --depth 1 --branch "$ASSAY_REF" https://github.com/arjmandi/assay /opt/assay \
+    && test "$(git -C /opt/assay rev-parse HEAD)" = "$ASSAY_COMMIT" \
+    && rm -rf /opt/assay/.git \
+    && python -m venv /opt/assay/venv \
+    && /opt/assay/venv/bin/pip install --no-cache-dir -e /opt/assay \
+    && ASSAY_PYTHON=/opt/assay/venv/bin/python /opt/assay/bin/assay version | grep -q '^assay 1\.5\.1 ' \
+    && chmod -R a+rX /opt/assay
+
 # Only the world target needs Node: for its built-in native clients and add-on installs.
 # Keep this stage outside the agent target's dependency tree.
 FROM node:22-bookworm-slim AS node-runtime
 
 FROM base AS world
-RUN apt-get update && apt-get install -y --no-install-recommends chromium ffmpeg && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends chromium ffmpeg procps && rm -rf /var/lib/apt/lists/*
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
 COPY --from=node-runtime /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
@@ -44,6 +59,8 @@ RUN npm ci --prefix /opt/harnesses/claude-code --ignore-scripts --no-audit --no-
     && chmod -R a+rX /opt/harnesses
 ENV WORLD_CLAUDE_CLI=/opt/harnesses/bin/claude \
     WORLD_CODEX_CLI=/opt/harnesses/codex/node_modules/.bin/codex
+COPY --from=assay /opt/assay /opt/assay
+ENV WORLD_ASSAY_CLI=/opt/assay/bin/assay ASSAY_PYTHON=/opt/assay/venv/bin/python
 COPY --from=build /opt/landingparty /opt/landingparty
 RUN groupadd --gid 10002 harness && useradd --uid 10001 --gid 10002 --create-home world \
     && mkdir -p /data && chown world:harness /data

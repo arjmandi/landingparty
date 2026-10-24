@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import Field, ValidationError
 
+from .harness_config import harness_account
 from .lane import load_catalog
 from .models import RunConfig, StrictModel
 from .run_views import RunViews
@@ -22,6 +23,9 @@ class StartRun(StrictModel):
     auth_mode: str = "api_key"
     model: str | None = Field(default=None, max_length=200)
     effort: str | None = Field(default=None, max_length=20)
+    # For a harness that plays through another (ASSAY): which, and its paid-action cap.
+    host: str | None = Field(default=None, max_length=80)
+    actions: int | None = Field(default=None, ge=1, le=100000)
     goal: str | None = Field(default=None, max_length=20000)
     name: str | None = Field(default=None, max_length=120)
     budget_usd: float = Field(default=20, gt=0, le=10000)
@@ -35,6 +39,9 @@ class StartLife(StrictModel):
     auth_mode: str = "api_key"
     model: str | None = Field(default=None, max_length=200)
     effort: str | None = Field(default=None, max_length=20)
+    # For a harness that plays through another (ASSAY): which, and its paid-action cap.
+    host: str | None = Field(default=None, max_length=80)
+    actions: int | None = Field(default=None, ge=1, le=100000)
     objective: str | None = Field(default=None, max_length=20000)
     name: str | None = Field(default=None, max_length=120)
     balance_usd: float = Field(default=20, gt=0, le=10000)
@@ -65,6 +72,8 @@ class PostBounty(StrictModel):
     days: float = Field(default=7, gt=0, le=365)
 
 
+# ASSAY's paid-action cap when the operator names none.
+DEFAULT_ACTIONS = 1000
 # How long a resumed life waits for its harness before treating the launch as a rest.
 LAUNCH_ATTEMPTS, LAUNCH_RETRY_S = 10, 3.0
 TERMINAL_RUNS = {"sealed", "ended", "killed"}
@@ -75,6 +84,7 @@ class StudioService:
         self.world, self.settings, self.harnesses = world, settings, harnesses
         self.views = RunViews(world)
         self.model_catalog = load_catalog()
+        self._library_cache = []
         self.origin = "http://127.0.0.1:7777"
         self._launch = asyncio.Lock()
 
@@ -246,7 +256,49 @@ class StudioService:
                 ],
             )
             items.append(item)
+        for item in items:
+            if item.get("hosts"):
+                self._hosted(item, items)
         return {"harnesses": items}
+
+    @staticmethod
+    def _hosted(item, items):
+        """A harness that plays through another offers its host's connections and models."""
+        hosts = [other for other in items if other["id"] in item["hosts"]]
+        if not hosts:
+            return
+        host = hosts[0]
+        installed = item.get("installed", False)
+        item.update(
+            host=host["id"],
+            provider=host["provider"],
+            efforts=host.get("efforts", []),
+            transcript=host.get("transcript"),
+            recommended_model=host.get("recommended_model"),
+            connection=host["connection"],
+            connections=[
+                {
+                    **connection,
+                    "label": f"{connection['label']} · through {host['name']}",
+                    "ready": bool(installed and connection["ready"]),
+                    "reason": f"{item['name']} is not installed in this instance."
+                    if not installed
+                    else connection["reason"]
+                    and f"{connection['reason']} (on the {host['name']} card)",
+                }
+                for connection in host["connections"]
+            ],
+        )
+        item["models"] = [
+            {"id": row["id"], "label": row["label"], "auth_modes": [connection["id"]]}
+            for connection in item["connections"]
+            for row in connection["models"]
+            if row["selectable"]
+        ]
+        item["modes"] = [
+            {key: connection[key] for key in ("id", "label", "ready", "reason", "billing")}
+            for connection in item["connections"]
+        ]
 
     @staticmethod
     def connection_view(value):
@@ -283,6 +335,7 @@ class StudioService:
     async def _resolve(self, request):
         """The ready harness, connection, exact model and effort a request names."""
         library = await self.catalog()
+        self._library_cache = library["harnesses"]
         matching = [item for item in library["harnesses"] if item["id"] == request.harness_id]
         if len(matching) != 1:
             raise ValueError("Choose an installed harness from the library")
@@ -290,10 +343,18 @@ class StudioService:
         connection = next(row for row in item["connections"] if row["id"] == request.auth_mode)
         if not connection["ready"]:
             raise ValueError(connection["reason"] or "Harness setup is incomplete")
-        if self.harnesses.is_busy(request.harness_id):
+        host = None
+        if item.get("hosts"):
+            host = request.host or item.get("host")
+            if host not in item["hosts"]:
+                raise ValueError(f"{item['name']} does not play through that harness")
+        elif request.host:
+            raise ValueError("This harness plays on its own")
+        account = host or request.harness_id
+        if self.harnesses.is_busy(request.harness_id, host=host):
             raise ValueError("This harness account already has an active run")
-        if self.reserved(request.harness_id):
-            raise ValueError("A living life holds this harness; beam it up first")
+        if self.reserved(account):
+            raise ValueError("A living life holds this harness's account; beam it up first")
         row = next((row for row in connection["models"] if row["id"] == request.model), None)
         if row is None or not row["selectable"]:
             raise ValueError(
@@ -307,7 +368,21 @@ class StudioService:
         effort = request.effort or row["default_effort"]
         if effort is not None and effort not in row["efforts"]:
             raise ValueError(f"{row['label']} does not take that effort level on this harness")
+        if request.actions is not None and not host:
+            raise ValueError("Only a harness that plays through another takes an action cap")
         return item, row["id"], effort
+
+    def _harness_id(self, item, request):
+        """`name@version/connection`, or `name@version+host@version/connection`."""
+        name = f"{item['id']}@{item['version']}"
+        if item.get("hosts"):
+            host = next(
+                other
+                for other in self._library_cache
+                if other["id"] == (request.host or item.get("host"))
+            )
+            name += f"+{host['id']}@{host['version']}"
+        return f"{name}/{request.auth_mode}"
 
     def _config(
         self, request, item, model, *, goal, packs, budget, model_metering="lane", effort=None
@@ -333,7 +408,10 @@ class StudioService:
                     .get("max_output_tokens", 4096)
                 ),
             ),
-            harness_id=f"{item['id']}@{item['version']}/{request.auth_mode}",
+            harness_id=self._harness_id(item, request),
+            harness_options={"actions": request.actions or DEFAULT_ACTIONS}
+            if item.get("hosts")
+            else {},
             budget=budget,
             reply_policy=request.reply_policy,
             operator_messages_allowed=False,
@@ -385,11 +463,11 @@ class StudioService:
         ]
         return runners[-1] if runners else None
 
-    def reserved(self, harness_id):
-        """A Studio life holds its harness from birth until it ends, resting included."""
+    def reserved(self, account):
+        """A Studio life holds its harness's account from birth until it ends, resting included."""
         for life in self._lives().list():
             runner = None if life["ended"] else self._runner(life["life_id"])
-            if runner and runner["cell"]["config"]["harness_id"].startswith(harness_id + "@"):
+            if runner and harness_account(runner["cell"]["config"]["harness_id"]) == account:
                 return True
         return False
 

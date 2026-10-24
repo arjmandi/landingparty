@@ -642,3 +642,95 @@ async def test_subscription_lives_need_claude_code_and_an_exact_priced_model(pro
     response = await client.post("/api/lives", json=life_body(**changes))
     assert response.status_code == 400
     assert not world.services["lives"].list() and not launches
+
+
+async def with_assay(studio, monkeypatch, installed=True):
+    original = studio.harnesses.library
+    assay = next(item for item in BUILTINS if item.id == "assay")
+
+    async def library(refresh=False, instance_id="default"):
+        result = await original(refresh, instance_id)
+        return {
+            "items": [
+                *result["items"],
+                {
+                    "id": "assay",
+                    "name": "ASSAY",
+                    "installed": installed,
+                    "version": "1.5.1",
+                    "auth_modes": [],
+                    "api_ready": False,
+                    "subscription_auth": {"state": "auth_required", "auth_method": "unknown"},
+                    "requirements": {"node": True, "npm": True},
+                    "package": None,
+                    "kind": assay.kind,
+                    "provider": None,
+                    "efforts": [],
+                    "transcript": None,
+                    "hosts": list(assay.hosts),
+                    "description": assay.description,
+                },
+            ]
+        }
+
+    monkeypatch.setattr(studio.harnesses, "library", library)
+
+
+async def test_assay_plays_on_claude_codes_connections_and_registers_its_cap(product, monkeypatch):
+    world, studio, client, _requests, launches, connection = product
+    await with_assay(studio, monkeypatch)
+    connection.update(state="connected", auth_method="subscription")
+    item = next(
+        row
+        for row in (await client.get("/api/harnesses")).json()["harnesses"]
+        if row["id"] == "assay"
+    )
+    assert (item["host"], item["provider"], item["transcript"]) == (
+        "claude-code",
+        "anthropic",
+        "claude-stream-json",
+    )
+    account = next(row for row in item["connections"] if row["id"] == "subscription")
+    assert account["ready"] and account["label"].endswith("through claude-code")
+    assert {row["id"] for row in account["models"]} == {"claude-studio", "claude-studio-next"}
+    body = life_body(
+        harness_id="assay", auth_mode="subscription", model="claude-studio", actions=40
+    )
+    response = await client.post("/api/lives", json=body)
+    assert response.status_code == 201, response.text
+    await until(lambda: launches)
+    info, harness, auth_mode, model = launches[0]
+    assert (harness, auth_mode, model) == ("assay", "subscription", "claude-studio")
+    config = world.run_config(info["run_id"])
+    assert config["harness_id"] == "assay@1.5.1+claude-code@1.0.0/subscription"
+    assert config["harness_options"] == {"actions": 40}
+    assert config["model_metering"] == "transcript"
+    plain = world.create_run(RunConfig())
+    capped = world.create_run(RunConfig(harness_options={"actions": 40}))
+    # A harness's registered option is part of the run's protocol.
+    assert plain["tuple"]["runtime_protocol_id"] != capped["tuple"]["runtime_protocol_id"]
+    # ASSAY's life holds Claude Code's account: Claude Code cannot start beside it.
+    refused = await client.post(
+        "/api/lives",
+        json=life_body(harness_id="claude-code", auth_mode="subscription", model="claude-studio"),
+    )
+    assert refused.status_code == 400 and "account" in refused.text
+    await client.post(f"/api/lives/{response.json()['life']['life_id']}/beam-up")
+
+
+async def test_a_host_or_cap_is_refused_where_it_does_not_belong(product, monkeypatch):
+    _world, studio, client, _requests, launches, connection = product
+    await with_assay(studio, monkeypatch)
+    connection.update(state="connected", auth_method="subscription")
+    for body in (
+        run_body(harness_id="assay", auth_mode="subscription", model="claude-studio", host="codex"),
+        run_body(
+            harness_id="claude-code", auth_mode="subscription", model="claude-studio", host="codex"
+        ),
+        run_body(
+            harness_id="claude-code", auth_mode="subscription", model="claude-studio", actions=5
+        ),
+    ):
+        response = await client.post("/api/runs", json=body)
+        assert response.status_code == 400, body
+    assert not launches

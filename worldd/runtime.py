@@ -319,6 +319,11 @@ class World:
                     ),
                     # Effort shapes the model's work; runs without one keep their id.
                     **({"effort": config.effort} if config.effort else {}),
+                    **(
+                        {"harness_options": config.harness_options}
+                        if config.harness_options
+                        else {}
+                    ),
                     "operator_messages_allowed": config.operator_messages_allowed,
                     "human_rate_per_minute": config.human_rate_per_minute,
                     "max_in_flight": config.max_in_flight,
