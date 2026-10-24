@@ -11,8 +11,10 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import Field, ValidationError
 
+from .lane import load_catalog
 from .models import RunConfig, StrictModel
 from .run_views import RunViews
+from .util import now
 
 
 class StartRun(StrictModel):
@@ -47,6 +49,10 @@ class RecordDeposit(StrictModel):
     request_id: str = Field(min_length=8, max_length=100)
 
 
+class SwitchModel(StrictModel):
+    model: str = Field(min_length=1, max_length=200)
+
+
 class PostBounty(StrictModel):
     title: str = Field(min_length=1, max_length=200)
     criterion: str = Field(min_length=1, max_length=2000)
@@ -63,6 +69,7 @@ class StudioService:
     def __init__(self, world, settings, harnesses):
         self.world, self.settings, self.harnesses = world, settings, harnesses
         self.views = RunViews(world)
+        self.model_catalog = load_catalog()
         self.origin = "http://127.0.0.1:7777"
         self._launch = asyncio.Lock()
 
@@ -407,6 +414,7 @@ class StudioService:
             # Its personal log and footprint carry forward into the latest session.
             "latest_run_id": life["sessions"][-1]["run_id"] if life["sessions"] else None,
             "wake_rules": life["wake_rules"],
+            "hold_reason": status.get("hold_reason"),
             "harness_id": config.get("harness_id"),
             "model": runner["cell"].get("model") if runner else None,
             "runner_state": runner["state"] if runner else None,
@@ -450,6 +458,58 @@ class StudioService:
                 for ticket in self.views.asks(item["run_id"]).get("tickets", [])
             ]
         }
+
+    def _catalog_entry(self, model):
+        return self.model_catalog.get("models", {}).get(model, {})
+
+    async def switch_model(self, life_id, request):
+        """Resume a held life on another model: a new runner, the old one completed.
+
+        The runner's configuration is hashed and frozen, so the switch plans a fresh
+        runner rather than editing the old one; each session's own tuple names its model.
+        """
+        self.life(life_id)
+        lives, studies = self._lives(), self._studies()
+        life = lives.get(life_id)
+        if life["ended"] or life["state"] != "model_hold":
+            raise ValueError("Only a held life can switch model")
+        old = self._runner(life_id)
+        if old.get("study_binding"):
+            raise ValueError("A study's life keeps its frozen configuration")
+        config = dict(old["cell"]["config"])
+        provider = "anthropic" if config["harness_id"].startswith("claude-code@") else "openai"
+        prices = self.settings.model_prices(self.world.model_pricing_base)
+        row = prices.get("models", prices).get(request.model)
+        if (
+            not row
+            or row.get("provider") != provider
+            or self._catalog_entry(request.model).get("group") == "retired"
+        ):
+            raise ValueError("Choose a reviewed, current model this harness can use")
+        if request.model == old["cell"]["model"]:
+            raise ValueError("Choose a different model than the one that failed")
+        async with self._launch:
+            await studies.pause_life(old["runner_id"], reason="model_switched")
+            superseded = studies.get_life_runner(old["runner_id"])
+            superseded.update(state="completed", completed_at=now(), reason="model_switched")
+            studies._save_life_runner(superseded)
+            config["model_snapshot_id"] = request.model
+            runner = studies.plan_life(
+                life_id, {"baseline": "native", "model": request.model, "config": config}
+            )
+            await studies.execute_life(
+                runner["runner_id"], execute=True, budget_usd=life["budget"]["usd_life"]
+            )
+            with self.world.store._transaction():
+                lives._save(
+                    lives._load(life_id),
+                    "model_switched",
+                    model_from=old["cell"]["model"],
+                    model_to=request.model,
+                    reason=(life.get("hold_reason") or {}).get("kind"),
+                )
+            lives.resume_held(life_id, reason="model_switched", model=request.model)
+        return self.life(life_id)
 
     async def beam_up(self, life_id):
         self.life(life_id)
@@ -603,6 +663,14 @@ def create_studio_router(studio):
     @router.post("/api/lives/{life_id}/beam-up")
     async def beam_up(life_id: str):
         return await studio.beam_up(life_id)
+
+    @router.post("/api/lives/{life_id}/model")
+    async def switch_model(life_id: str, request: Request):
+        try:
+            body = SwitchModel.model_validate(await _body(request))
+        except ValidationError:
+            raise HTTPException(400, "Choose the model to resume on") from None
+        return await studio.switch_model(life_id, body)
 
     @router.post("/api/lives/{life_id}/deposits", status_code=201)
     async def deposit(life_id: str, request: Request):

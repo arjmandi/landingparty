@@ -47,6 +47,13 @@ REST_WAKE_ON = [
     "page_changed",
 ]
 REST_EVERY_S = 86400
+# A provider outage rests a life with growing backoff instead of a day's check-in.
+PROVIDER_BACKOFF_S = 900
+PROVIDER_BACKOFF_MAX_S = 6 * 3600
+# Session ends that mean the life cannot go on as configured: its model is not
+# served, its request is refused, or its spend cannot be estimated. They hold the
+# life until the operator acts; resting would only repeat them at every wake.
+HOLDING_ERRORS = {"model_unavailable", "request_rejected"}
 # Ways money reaches a life's bank account; each keeps its own measurement column.
 INCOME_CHANNELS = ("recorded", "bounty", "market", "independent")
 
@@ -111,6 +118,48 @@ class LifeService(LifeBilling, LifeCheckpoints):
         life["wake_rules"] = {}
         life["pending_wake"] = None
         self._save(life, "stranded", reason=reason, run_id=run_id)
+
+    def _hold(self, life, cause, run_id):
+        """Called in a Store transaction; a held life waits for the operator, not for events."""
+        life["state"] = "model_hold"
+        life["hold_reason"] = cause
+        life["wake_rules"] = {}
+        life["pending_wake"] = None
+        self._save(life, "held", run_id=run_id, hold_reason=cause)
+
+    def _session_problem(self, run_id):
+        """What a session's own record says went wrong with its model, if anything."""
+        for record in self.store.records(run_id):
+            if record["kind"] == "model_error":
+                return {
+                    "kind": record.get("error_class"),
+                    "status": record.get("status"),
+                    "error": record.get("error"),
+                    "message": record.get("message"),
+                    "model": record.get("model"),
+                    **({"resets_at": record["resets_at"]} if record.get("resets_at") else {}),
+                }
+            if record["kind"] == "estimate_unavailable":
+                return {
+                    "kind": "estimate_unavailable",
+                    "message": record.get("reason"),
+                    "model": self.store.get_run(run_id)["config"].get("model_snapshot_id"),
+                }
+        return None
+
+    def resume_held(self, life_id, *, reason, **data):
+        """The operator resolved a hold (for example by switching model): wake the life."""
+        with self.store._transaction():
+            life = self._load(life_id)
+            if life["ended"] or life["state"] != "model_hold":
+                raise ValueError("Only a held life can be resumed")
+            life["hold_reason"] = None
+            life["state"] = "waking"
+            life["pending_wake"] = {"reason": reason, **data}
+            self._save(life, "wake", **life["pending_wake"])
+        self._schedule(life_id)
+        self._notify_state(life_id)
+        return self.get(life_id)
 
     def _enforce_money_end(self, life_id):
         life = self.get(life_id)
@@ -722,6 +771,8 @@ class LifeService(LifeBilling, LifeCheckpoints):
             phase = "resting"
         elif life["state"] == "sleeping":
             phase = "asleep"
+        elif life["state"] == "model_hold":
+            phase = "held"
         else:
             phase = life["state"]
         return {
@@ -741,6 +792,7 @@ class LifeService(LifeBilling, LifeCheckpoints):
             "active_run_id": life["active_run_id"],
             "continuity": life["continuity"],
             "wake_rules": life["wake_rules"],
+            "hold_reason": life.get("hold_reason"),
             "ended": life["ended"],
             "afterlife": life["afterlife"],
             "rubric_jobs": life.get("rubric_jobs", {}),
@@ -1015,7 +1067,11 @@ class LifeService(LifeBilling, LifeCheckpoints):
                 life["state"] = "ready"
             self._save(life, "session_close", run_id=run_id, spent_usd=session["spent_usd"])
             stranding = life.get("on_exhaustion", "end") == "strand"
-            if (
+            problem = self._session_problem(run_id)
+            holding = problem and problem["kind"] in HOLDING_ERRORS | {"estimate_unavailable"}
+            if holding and not life["ended"] and life["state"] in {"ready", "waking"}:
+                self._hold(life, problem, run_id)
+            elif (
                 stranding
                 and not life["ended"]
                 and life["state"] in {"ready", "sleeping", "waking"}
@@ -1260,10 +1316,29 @@ class LifeService(LifeBilling, LifeCheckpoints):
             until = (
                 self._now() + timedelta(seconds=policy["every_s"]) if policy["every_s"] else None
             )
+            # A plan limit rests until it resets; an outage, with growing backoff.
+            problem = self._session_problem(run_id) or {}
+            cause = (
+                problem.get("kind")
+                if problem.get("kind") in {"plan_limit", "provider_error"}
+                else None
+            )
+            if cause == "plan_limit" and problem.get("resets_at"):
+                until = max(_time(problem["resets_at"]), self._now())
+            if cause == "provider_error":
+                previous = life.get("provider_backoff_s")
+                backoff = min(
+                    PROVIDER_BACKOFF_MAX_S, 2 * previous if previous else PROVIDER_BACKOFF_S
+                )
+                life["provider_backoff_s"] = backoff
+                until = self._now() + timedelta(seconds=backoff)
+            else:
+                life.pop("provider_backoff_s", None)
             life["wake_rules"] = {
                 "until": until.isoformat() if until else None,
                 "wake_on": list(policy["wake_on"]),
                 "origin": "rest",
+                **({"cause": cause} if cause else {}),
             }
             life["state"] = "sleeping"
             self._save(life, "rest", run_id=run_id, wake_rules=life["wake_rules"])

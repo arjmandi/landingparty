@@ -51,6 +51,7 @@ async def product(tmp_path, monkeypatch):
                 "models": {
                     "studio-model": price(),
                     "claude-studio": {**price(), "provider": "anthropic"},
+                    "claude-studio-next": {**price(), "provider": "anthropic"},
                 }
             },
         )
@@ -432,6 +433,49 @@ async def test_a_claude_code_subscription_life_lives_on_an_estimated_balance(pro
     billing = (await client.get(f"/api/runs/{info['run_id']}")).json()["billing"]
     assert billing["model_cost_estimated"] is True and billing["model_cost_usd"] is None
     assert not requests
+
+
+async def test_a_held_life_switches_model_and_resumes_on_a_fresh_runner(product):
+    world, _studio, client, _requests, launches, connection = product
+    lives, studies = world.services["lives"], world.services["studies"]
+    connection.update(state="connected", auth_method="subscription")
+    body = life_body(harness_id="claude-code", auth_mode="subscription", model="claude-studio")
+    life_id = (await client.post("/api/lives", json=body)).json()["life"]["life_id"]
+    await until(lambda: launches)
+    run_id = launches[0][0]["run_id"]
+    world.store.append_record(
+        run_id,
+        "model_error",
+        status=404,
+        error="model_not_found",
+        error_class="model_unavailable",
+        model="claude-studio",
+        message="There's an issue with the selected model",
+    )
+    await world.end_run(run_id, reason="model_error")
+    await until(lambda: lives.get(life_id)["state"] == "model_hold")
+    held = (await client.get(f"/api/lives/{life_id}")).json()["life"]
+    assert held["life_state"] == "held" and held["hold_reason"]["status"] == 404
+    for refused in ("claude-studio", "studio-model", "claude-unknown"):
+        response = await client.post(f"/api/lives/{life_id}/model", json={"model": refused})
+        assert response.status_code == 400, refused
+    response = await client.post(
+        f"/api/lives/{life_id}/model", json={"model": "claude-studio-next"}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["life"]["model"] == "claude-studio-next"
+    await until(lambda: len(launches) == 2)
+    assert launches[1][1:] == ("claude-code", "subscription", "claude-studio-next")
+    assert world.run_config(launches[1][0]["run_id"])["model_snapshot_id"] == "claude-studio-next"
+    first, second = studies.list_life_runners(life_id)
+    assert first["state"] == "completed" and first["reason"] == "model_switched"
+    assert second["state"] == "running"
+    switched = [e for e in lives.events(life_id) if e["kind"] == "model_switched"]
+    assert switched[0]["model_from"] == "claude-studio"
+    assert switched[0]["model_to"] == "claude-studio-next"
+    response = await client.post(f"/api/lives/{life_id}/model", json={"model": "claude-studio"})
+    assert response.status_code == 400
+    await client.post(f"/api/lives/{life_id}/beam-up")
 
 
 @pytest.mark.parametrize(

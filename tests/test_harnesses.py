@@ -162,7 +162,7 @@ async def test_capture_caps_suppression_and_subscription_research_guard(native):
     assert service.logs(suppressed["session_id"])["suppressed"]
     assert not service.logs(suppressed["session_id"])["events"]
     info = create(research_mode="research", model_billing_mode="subscription")
-    with pytest.raises(ValueError, match="unmeasured"):
+    with pytest.raises(ValueError, match="not measured"):
         await service.launch(info, "fixture", auth_mode="subscription")
     mode[0] = "success"
     info = create(stage=1, model_billing_mode="subscription")
@@ -257,6 +257,29 @@ def test_builtin_binding_keeps_credentials_runtime_only(tmp_path, harness_id, au
         assert "X-World-Run-Token" in env["ANTHROPIC_CUSTOM_HEADERS"]
     else:
         assert "ANTHROPIC_CUSTOM_HEADERS" not in env and "ANTHROPIC_BASE_URL" not in env
+
+
+@pytest.mark.parametrize("stream_usage", [False, True])
+def test_an_estimated_claude_session_streams_each_messages_final_usage(tmp_path, stream_usage):
+    root = tmp_path / "binding"
+    root.mkdir()
+    definition = next(item for item in BUILTINS if item.id == "claude-code")
+    argv, _env, _prompt = launch_configuration(
+        definition,
+        "/trusted/native-cli",
+        root=root,
+        work=tmp_path,
+        run_info={"run_id": "r_fixture", "run_token": "capability", "preamble": "Briefing"},
+        model="known-model",
+        auth_mode="subscription",
+        profile=tmp_path / "official-profile",
+        agent_url="http://127.0.0.1:7777/agent",
+        lane_url="http://127.0.0.1:7777/model",
+        environment={"PATH": os.environ["PATH"]},
+        stream_usage=stream_usage,
+    )
+    assert ("--include-partial-messages" in argv) is stream_usage
+    assert argv[argv.index("--output-format") + 1] == "stream-json"
 
 
 async def test_explicit_pinned_installer_is_not_triggered_by_discovery(native, tmp_path):

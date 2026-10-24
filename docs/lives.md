@@ -43,8 +43,19 @@ delivers a `wake` event carrying only the time. Under `on_exhaustion: strand`,
 a balance that cannot cover a model call seals the session as
 `budget_exhausted` and strands the life. Only a `deposit` wakes a stranded life,
 into a session whose cap is what the balance then covers; it has no clock wake.
-Events arriving while a life is asleep, resting, or stranded queue for its next
-session through the same late-event path as sleep.
+Events arriving while a life is asleep, resting, stranded, or held queue for its
+next session through the same late-event path as sleep.
+
+A session whose model the provider refused holds the life (`model_hold`, shown
+as **held**): the session's record has a `model_error` whose `error_class` is
+`model_unavailable` (a 404 or 403: the connection does not serve the model) or
+`request_rejected`, or an `estimate_unavailable`. A held life has no wake rules.
+The operator resolves it with `POST /api/lives/{id}/model {model}`, which
+completes the old harness runner, plans a fresh one on the new model, records
+`model_switched{model_from, model_to}`, and wakes the life; or beams it up. A
+study's life keeps its frozen configuration and cannot switch. A `plan_limit`
+(429) rests the life until the limit's reset time; a `provider_error` (5xx or
+529) rests it with backoff, from 15 minutes doubling to at most 6 hours.
 
 `wall_life_days` is optional. A Studio life has none. A research life still
 declares one, because matched-life analysis compares lives over the same
@@ -126,7 +137,11 @@ Money-driver readings derive from actual ledger spend and bank movements.
 A life on a native subscription uses `model_metering: transcript`: the
 transcript meter (`worldd/transcript_meter.py`) prices the usage the client
 reports in its own stream at the run's pinned API prices and debits it as
-`model.estimated`. It stops the session when what is left would not cover
+`model.estimated`. Claude Code runs with partial messages, so each message is
+priced from its start and its final `message_delta` usage; the stored transcript
+keeps those two stream events and drops the token-by-token chunks. The session's
+per-model totals then charge only the tokens the messages missed, at the cache
+durations and price tier the messages showed. It stops the session when what is left would not cover
 another message like its largest, recording a `model_refused` so the life
 strands as under the lane; it records `estimate_overshoot` rather than going
 past the cap, and fails closed with `estimate_unavailable` on unpriced or

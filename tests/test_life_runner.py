@@ -466,6 +466,108 @@ async def test_a_stranded_life_waits_for_income_instead_of_failing(running_app):
     await until(lambda: service.get_life_runner(runner["runner_id"])["state"] == "completed")
 
 
+def model_error(world, run_id, status, error_class, **extra):
+    world.store.append_record(
+        run_id,
+        "model_error",
+        status=status,
+        error=None,
+        error_class=error_class,
+        model="fixture-model",
+        message="The provider refused",
+        **extra,
+    )
+
+
+async def test_a_model_the_provider_refuses_holds_the_life_instead_of_resting(running_app):
+    app, _ = running_app
+    world = app.state.world
+    lives = world.services["lives"]
+    calls = []
+
+    def callback(created, cell):
+        calls.append(created["run_id"])
+        model_error(world, created["run_id"], 404, "model_unavailable")
+        return {}
+
+    life_id, service, runner = native_life(app, callback)
+    await service.execute_life(runner["runner_id"], execute=True, budget_usd=2)
+    await until(lambda: lives.status(life_id)["life_state"] == "held")
+    status = lives.status(life_id)
+    assert status["hold_reason"]["kind"] == "model_unavailable"
+    assert status["hold_reason"]["status"] == 404 and status["wake_rules"] == {}
+    await asyncio.sleep(0.3)
+    assert len(calls) == 1
+    assert service.get_life_runner(runner["runner_id"])["waiting_reason"] == "model_hold"
+    # Events do not wake a held life; only the operator's resolution does.
+    world.push(calls[0], {"type": "message_received", "body": "Ignored while held"})
+    await asyncio.sleep(0.2)
+    assert lives.get(life_id)["state"] == "model_hold"
+    lives.resume_held(life_id, reason="model_switched")
+    await until(lambda: len(calls) == 2)
+    await lives.end(life_id, reason="beam_up")
+
+
+async def test_an_unestimable_session_holds_the_life_too(running_app):
+    app, _ = running_app
+    world = app.state.world
+    lives = world.services["lives"]
+
+    def callback(created, cell):
+        world.store.append_record(
+            created["run_id"],
+            "estimate_unavailable",
+            reason="No pinned price",
+            metering="transcript",
+        )
+        return {}
+
+    life_id, service, runner = native_life(app, callback)
+    await service.execute_life(runner["runner_id"], execute=True, budget_usd=2)
+    await until(lambda: lives.status(life_id)["life_state"] == "held")
+    assert lives.status(life_id)["hold_reason"]["kind"] == "estimate_unavailable"
+    await lives.end(life_id, reason="beam_up")
+
+
+async def test_a_plan_limit_rests_until_its_reset_and_an_outage_backs_off(running_app):
+    app, _ = running_app
+    world = app.state.world
+    lives = world.services["lives"]
+    reset = "2099-01-01T00:00:00+00:00"
+    errors = iter(
+        [
+            (429, "plan_limit", {"resets_at": reset}),
+            (529, "provider_error", {}),
+            (503, "provider_error", {}),
+        ]
+    )
+    calls = []
+
+    def callback(created, cell):
+        calls.append(created["run_id"])
+        status, kind, extra = next(errors)
+        model_error(world, created["run_id"], status, kind, **extra)
+        return {}
+
+    life_id, service, runner = native_life(app, callback)
+    await service.execute_life(runner["runner_id"], execute=True, budget_usd=2)
+    await until(lambda: lives.status(life_id)["life_state"] == "resting")
+    rules = lives.get(life_id)["wake_rules"]
+    assert rules["cause"] == "plan_limit" and rules["until"] == reset
+    for backoff in (900, 1800):
+        before = len(calls)
+        world.push(calls[-1], {"type": "message_received", "body": "Wake for the next session"})
+        await until(
+            lambda before=before: (
+                len(calls) == before + 1 and lives.status(life_id)["life_state"] == "resting"
+            )
+        )
+        life = lives.get(life_id)
+        assert life["wake_rules"]["cause"] == "provider_error"
+        assert life["provider_backoff_s"] == backoff
+    await lives.end(life_id, reason="beam_up")
+
+
 async def test_a_confirmed_objective_claim_ends_the_life_even_across_rest(running_app):
     app, _ = running_app
     world = app.state.world

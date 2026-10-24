@@ -466,7 +466,7 @@ class LifeRunner:
                 end = self.store.get_run(active).get("end", {})
                 ended_run, active = active, None
                 current = lives.get(life["life_id"])
-                if sleeping or current["ended"] or current["state"] == "stranded":
+                if sleeping or current["ended"] or current["state"] in {"stranded", "model_hold"}:
                     pass
                 elif current.get("on_harness_exit", "end") == "rest":
                     # A restart is not the agent stopping; recovery reopens the session.

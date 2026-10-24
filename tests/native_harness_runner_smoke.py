@@ -240,7 +240,7 @@ async def main(options):
                 lane_url="http://127.0.0.1:" + str(sockets[1].getsockname()[1]),
             )
             for harness_id, model in (
-                ("claude-code", "claude-sonnet-4-20250514"),
+                ("claude-code", "claude-sonnet-5-5"),
                 ("codex", "gpt-4o-mini-2024-07-18"),
             ):
                 created = world.create_run(

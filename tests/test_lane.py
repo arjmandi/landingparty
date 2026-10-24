@@ -9,7 +9,14 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from worldd.lane import StreamUsage, UsageError, create_lane_router, normalize_usage, usage_cost
+from worldd.lane import (
+    StreamUsage,
+    UsageError,
+    _maximum_cost,
+    create_lane_router,
+    normalize_usage,
+    usage_cost,
+)
 from worldd.security import Capabilities
 from worldd.storage import Store
 
@@ -31,6 +38,16 @@ PRICES = {
             "cache_write": "3.75",
             "cache_write_1h": "6",
             "context_window": 1000,
+            "max_output_tokens": 1000,
+        },
+        "fixture-anthropic-wide": {
+            "provider": "anthropic",
+            "input": "3",
+            "output": "15",
+            "cache_read": "0.3",
+            "cache_write": "3.75",
+            "cache_write_1h": "6",
+            "context_window": 1_000_000,
             "max_output_tokens": 1000,
         },
     }
@@ -82,6 +99,51 @@ def test_anthropic_cache_durations_are_distinct():
         },
     )
     assert usage_cost(usage, PRICES["models"]["fixture-anthropic"]) == Decimal("0.00210")
+
+
+TIERED = {
+    "provider": "anthropic",
+    "input": "0.10",
+    "output": "0.50",
+    "cache_read": "0.01",
+    "cache_write": "0.125",
+    "cache_write_1h": "0.20",
+    "context_window": 1_000_000,
+    "max_output_tokens": 128_000,
+    "long_context": {
+        "above_prompt_tokens": 100_000,
+        "input": "0.50",
+        "output": "2.50",
+        "cache_read": "0.05",
+        "cache_write": "0.625",
+        "cache_write_1h": "1.00",
+    },
+}
+
+
+def tokens(input=0, output=0, cache_read=0, cache_write=0, cache_write_1h=0):
+    return {
+        "input": input,
+        "output": output,
+        "cache_read": cache_read,
+        "cache_write": cache_write,
+        "cache_write_1h": cache_write_1h,
+    }
+
+
+def test_a_tiered_row_prices_each_call_by_its_own_prompt():
+    # The prompt counts cache reads and writes too: 60K + 40K is exactly the threshold.
+    at = tokens(input=60_000, cache_read=40_000, output=1_000)
+    assert usage_cost(at, TIERED) == Decimal("0.0069")
+    above = tokens(input=60_000, cache_read=40_000, cache_write_1h=1, output=1_000)
+    assert usage_cost(above, TIERED) == Decimal("0.034501")
+
+
+def test_a_reservation_is_bounded_at_the_higher_tier():
+    body = {"max_tokens": 1_000}
+    assert _maximum_cost(body, TIERED) == Decimal("1.0025")
+    flat = {key: value for key, value in TIERED.items() if key != "long_context"}
+    assert _maximum_cost(body, flat) == Decimal("0.2005")
 
 
 @pytest.mark.parametrize(
@@ -198,6 +260,69 @@ async def test_anthropic_messages_and_run_scoped_route(store):
         )
     assert response.status_code == 200
     assert store.spend(run_id)["model"] == 0.00045
+
+
+async def test_a_wide_window_reserves_what_the_provider_counts_not_the_window(store):
+    run_id = run(store, budget="0.1")
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.path)
+        if request.url.path.endswith("/count_tokens"):
+            assert "max_tokens" not in json.loads(request.content)
+            return httpx.Response(200, json={"input_tokens": 100})
+        return httpx.Response(
+            200,
+            json={
+                "model": "fixture-anthropic-wide",
+                "content": [],
+                "usage": {"input_tokens": 100, "output_tokens": 10},
+            },
+        )
+
+    client, remote = lane(store, handler)
+    async with client, remote:
+        response = await client.post(
+            f"/lane/{run_id}/anthropic/v1/messages",
+            json={"model": "fixture-anthropic-wide", "max_tokens": 100, "messages": []},
+        )
+    # The whole window would reserve $6 against a $0.10 budget.
+    assert response.status_code == 200
+    assert seen == ["/v1/messages/count_tokens", "/v1/messages"]
+    call = next(r for r in store.records(run_id) if r["kind"] == "model_call")
+    assert call["reservation_input_tokens"] == 100
+
+
+@pytest.mark.parametrize(
+    ("count", "extra"),
+    [
+        (httpx.Response(500, json={"error": "down"}), {}),
+        (httpx.Response(200, json={"input_tokens": 100}), {"mcp_servers": []}),
+        (
+            httpx.Response(200, json={"input_tokens": 100}),
+            {
+                "messages": [
+                    {"role": "user", "content": [{"type": "image", "source": {"type": "url"}}]}
+                ]
+            },
+        ),
+    ],
+)
+async def test_without_a_trustworthy_count_the_whole_window_is_reserved(store, count, extra):
+    run_id = run(store, budget="0.1")
+
+    def handler(request):
+        if request.url.path.endswith("/count_tokens"):
+            return count
+        raise AssertionError("A call the budget cannot cover reached the provider")
+
+    client, remote = lane(store, handler)
+    async with client, remote:
+        response = await client.post(
+            f"/lane/{run_id}/anthropic/v1/messages",
+            json={"model": "fixture-anthropic-wide", "max_tokens": 100, "messages": [], **extra},
+        )
+    assert response.status_code == 402
 
 
 async def test_anthropic_bearer_auth_preserved_without_recording_it(store):

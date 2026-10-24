@@ -173,8 +173,13 @@ def launch_configuration(
     agent_url,
     lane_url,
     environment,
+    stream_usage=False,
 ):
-    """Return argv/env/stdin; only the constructor's trusted registry can add launchers."""
+    """Return argv/env/stdin; only the constructor's trusted registry can add launchers.
+
+    ``stream_usage`` asks the client for each message's final usage as it streams,
+    which a transcript-metered session needs to price every message exactly.
+    """
     home = root / "home"
     home.mkdir(mode=0o700)
     env = base_environment(environment, home)
@@ -246,6 +251,8 @@ def launch_configuration(
         if auth_mode == "api_key":
             env = runner.runtime_environment(root, env)
         argv += ["--setting-sources", "", "--no-session-persistence"]
+        if stream_usage:
+            argv.append("--include-partial-messages")
         if model:
             argv += ["--model", model]
         return argv, env, prompt.encode()

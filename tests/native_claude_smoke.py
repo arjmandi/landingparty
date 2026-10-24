@@ -30,7 +30,7 @@ from worldd.models import RunConfig
 from worldd.security import create_agent_app
 
 ROOT = Path(__file__).resolve().parents[1]
-MODEL = "claude-sonnet-4-20250514"
+MODEL = "claude-sonnet-5-5"
 
 
 def module(path):

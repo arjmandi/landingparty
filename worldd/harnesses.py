@@ -32,9 +32,23 @@ MAX_LOG = 2 * 1024 * 1024
 # A metered line is read whole, apart from the log's limits, so its usage is never cut off.
 METER_LINE = 8 * 1024 * 1024
 TERMINAL = {"completed", "failed", "stopped", "interrupted"}
+# A partial-message stream keeps only what prices a message: its start and final usage.
+KEPT_STREAM_EVENTS = {"message_start", "message_delta"}
 SECRET_FIELD = re.compile(
     r"""(?i)(["']?(?:access_token|refresh_token|api_key|authorization|password|secret|WORLD_RUN_TOKEN)["']?\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s,}\n]+)"""
 )
+
+
+def _token_chunk(line: bytes) -> bool:
+    """A Claude partial-message chunk other than a message's start or final usage."""
+    if not line.startswith(b'{"type":"stream_event"'):
+        return False
+    try:
+        event = json.loads(line)
+    except ValueError:
+        return False
+    inner = event.get("event") if isinstance(event, dict) else None
+    return isinstance(inner, dict) and inner.get("type") not in KEPT_STREAM_EVENTS
 
 
 def _birth(pid):
@@ -520,10 +534,12 @@ class HarnessService(VenueDB):
             or config.get("measurement_of")
         ):
             raise ValueError(
-                "Native subscription model costs are unmeasured; research runs are not supported"
+                "Native subscription model costs are estimated, not measured; research runs are not supported"
             )
         if auth_mode == "api_key" and (not model or model != config.get("model_snapshot_id")):
             raise ValueError("API mode requires the run's explicitly selected model snapshot")
+        # A transcript-metered session prices each message from the client's own reports.
+        estimated = config.get("model_metering") == "transcript"
         binary = binary_path(definition, self.tools, self.environment)
         version = await self._version(definition, binary) if binary else None
         if not version:
@@ -574,6 +590,7 @@ class HarnessService(VenueDB):
                 agent_url=self.agent_url,
                 lane_url=self.lane_url,
                 environment=self.environment,
+                stream_usage=estimated,
             )
             value = {
                 "session_id": session_id,
@@ -587,8 +604,14 @@ class HarnessService(VenueDB):
                 "started_at": now(),
                 "version": version,
                 "billing": {
-                    "model": "unmeasured" if auth_mode == "subscription" else "world_lane",
-                    "dollar_cap_scope": "world_tools_only"
+                    "model": "estimated"
+                    if estimated
+                    else "unmeasured"
+                    if auth_mode == "subscription"
+                    else "world_lane",
+                    "dollar_cap_scope": "model_estimate_and_world_tools"
+                    if estimated
+                    else "world_tools_only"
                     if auth_mode == "subscription"
                     else "model_and_world_tools",
                 },
@@ -656,10 +679,10 @@ class HarnessService(VenueDB):
         pending, total, stored = bytearray(), 0, 0
         discard = False
         path = root / ("stdout.jsonl" if channel == "stdout" else "stderr.log")
+        # Every native stdout line reaches the meter: it prices metered sessions and
+        # records provider errors for all of them.
         meter = self.world.services.get("transcript_meter") if channel == "stdout" else None
-        if meter is not None and not meter.metered(value["run_id"]):
-            meter = None
-        metered, overflowed = bytearray(), False
+        metered, overflowed, filtered = bytearray(), False, False
         with path.open("xb") as transcript:
             path.chmod(0o600)
 
@@ -717,7 +740,15 @@ class HarnessService(VenueDB):
                             current["output_truncated"] = True
                             self._save(current)
                     if part.endswith(b"\n"):
-                        if pending:
+                        if pending and channel == "stdout" and _token_chunk(pending):
+                            # Partial-message chunks were metered above; storing every
+                            # token delta would fill the transcript cap.
+                            if not filtered:
+                                filtered = True
+                                current = self._load(session_id)
+                                current["stdout_filtered"] = True
+                                self._save(current)
+                        elif pending:
                             await emit(bytes(pending).rstrip(b"\r\n"))
                         pending.clear()
                         discard = False
@@ -795,6 +826,7 @@ class HarnessService(VenueDB):
                 else None,
                 capture_truncated=value["output_truncated"],
                 capture_suppressed=value["output_suppressed"],
+                stdout_filtered=value.get("stdout_filtered", False),
             )
             if capture_error:
                 self.store.update_run(value["run_id"], tainted=True)

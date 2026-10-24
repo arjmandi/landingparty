@@ -182,12 +182,34 @@ def test_prices_are_validated_and_merged_without_mutating_base_or_input(settings
         settings.update_provider("openai", prices={"bad": {**model_price(), "extra": "command"}})
 
 
+def test_a_long_context_tier_is_validated_and_survives_an_override(settings):
+    tier = {"above_prompt_tokens": 100000, "input": "4", "output": "16", "cache_read": "2"}
+    tier["cache_write"] = "4"
+    settings.update_provider(
+        "openai", prices={"tiered-model": {**model_price(), "long_context": tier}}
+    )
+    base = {"models": {"tiered-model": {**model_price(), "long_context": tier}}}
+    override = {**model_price(), "input": "3"}
+    settings.update_provider("openai", prices={"tiered-model": override})
+    merged = settings.model_prices(base)["models"]["tiered-model"]
+    assert merged["input"] == "3" and merged["long_context"]["above_prompt_tokens"] == 100000
+    for bad in (
+        {**tier, "above_prompt_tokens": 128000},
+        {key: value for key, value in tier.items() if key != "cache_read"},
+        {**tier, "extra": "1"},
+    ):
+        with pytest.raises(ValueError, match="long-context tier"):
+            settings.update_provider(
+                "openai", prices={"tiered-model": {**model_price(), "long_context": bad}}
+            )
+
+
 def test_model_identity_collision_rejects_the_entire_settings_batch(settings):
     with pytest.raises(ValueError, match="cannot change provider"):
         settings.update(
             {
                 "credentials": {"openai_api_key": KEY},
-                "providers": {"openai": {"prices": {"claude-sonnet-4-20250514": model_price()}}},
+                "providers": {"openai": {"prices": {"claude-sonnet-5-5": model_price()}}},
             }
         )
     assert settings.status()["revision"] == 0 and not list(settings.root.iterdir())

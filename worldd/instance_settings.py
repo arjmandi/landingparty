@@ -42,11 +42,13 @@ _MODEL_FIELDS = {
     "context_window",
     "max_output_tokens",
     "source",
+    "long_context",
 }
+_TIER_RATES = ("input", "output", "cache_read", "cache_write", "cache_write_1h")
 DEFAULT_SETTINGS = {
     "instance_name": "Landing Party",
     "default_harness_id": "claude-code",
-    "default_model": "claude-sonnet-4-20250514",
+    "default_model": "claude-sonnet-5-5",
     "default_budget_usd": 20,
     "default_wall_minutes": 120,
 }
@@ -173,6 +175,24 @@ def _secret(value):
     return value
 
 
+def _long_context(tier, row):
+    """A long-prompt tier: a threshold inside the window and every base rate repriced."""
+    threshold = tier.get("above_prompt_tokens") if isinstance(tier, dict) else None
+    if (
+        not isinstance(tier, dict)
+        or set(tier) - {"above_prompt_tokens", *_TIER_RATES}
+        or isinstance(threshold, bool)
+        or not isinstance(threshold, int)
+        or not 1 <= threshold < row["context_window"]
+        or {name for name in _TIER_RATES if name in row} - set(tier)
+    ):
+        raise ValueError("A long-context tier needs a threshold and a rate for every base rate")
+    return {
+        "above_prompt_tokens": threshold,
+        **{name: _decimal(tier[name]) for name in _TIER_RATES if name in tier},
+    }
+
+
 def _prices(provider, prices):
     if not isinstance(prices, dict) or len(prices) > 128:
         raise ValueError("Provider prices must be a bounded reviewed object")
@@ -220,6 +240,8 @@ def _prices(provider, prices):
             normalized[name] = value
         if normalized["max_output_tokens"] > normalized["context_window"]:
             raise ValueError("Model output limit cannot exceed its context window")
+        if "long_context" in row:
+            normalized["long_context"] = _long_context(row["long_context"], normalized)
         source = row["source"]
         try:
             parsed = urlsplit(source) if isinstance(source, str) else None
@@ -731,7 +753,8 @@ class InstanceSettings:
                     for model, row in fields.get("prices", {}).items():
                         if model in models and models[model].get("provider") != provider:
                             raise ValueError("A priced model identifier cannot change provider")
-                        models[model] = copy.deepcopy(row)
+                        # Field by field: an override never silently drops a declared tier.
+                        models[model] = {**models.get(model, {}), **copy.deepcopy(row)}
         return result
 
     def status(self):
